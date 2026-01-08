@@ -124,6 +124,17 @@ public final class AccountDiscovery {
             )
         }
 
+        // Handle list results - NSAppleEventDescriptor.stringValue returns nil for lists
+        if result.numberOfItems > 0 {
+            var items: [String] = []
+            for i in 1...result.numberOfItems {
+                if let item = result.atIndex(i)?.stringValue {
+                    items.append(item)
+                }
+            }
+            return items.joined(separator: ", ")
+        }
+
         return result.stringValue ?? ""
     }
 
