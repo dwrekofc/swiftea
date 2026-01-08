@@ -1,4 +1,5 @@
 import ArgumentParser
+import SwiftEAKit
 
 public struct Sync: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -15,10 +16,13 @@ public struct Sync: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        let vault = try VaultContext.require()
         if status {
             print("Sync status - not yet implemented")
+            print("Using vault: \(vault.rootPath)")
         } else {
             print("Syncing all modules")
+            print("Using vault: \(vault.rootPath)")
             if watch {
                 print("Watch mode requested")
             }

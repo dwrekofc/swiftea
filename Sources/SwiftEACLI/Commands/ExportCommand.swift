@@ -1,4 +1,5 @@
 import ArgumentParser
+import SwiftEAKit
 
 public struct Export: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -21,6 +22,7 @@ public struct Export: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        let vault = try VaultContext.require()
         if all {
             print("Exporting all data to \(format)")
         } else if let id = id {
@@ -28,6 +30,7 @@ public struct Export: ParsableCommand {
         } else {
             print("Error: specify --id or --all")
         }
+        print("Using vault: \(vault.rootPath)")
 
         if let output = output {
             print("Output directory: \(output)")

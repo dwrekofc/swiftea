@@ -1,4 +1,5 @@
 import ArgumentParser
+import SwiftEAKit
 
 public struct Contacts: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -24,7 +25,9 @@ struct ContactsSync: ParsableCommand {
     var watch: Bool = false
 
     func run() throws {
+        let vault = try VaultContext.require()
         print("Contacts sync - not yet implemented")
+        print("Using vault: \(vault.rootPath)")
         if watch {
             print("Watch mode requested")
         }
@@ -41,7 +44,9 @@ struct ContactsSearch: ParsableCommand {
     var query: String
 
     func run() throws {
+        let vault = try VaultContext.require()
         print("Searching contacts for: \(query)")
+        print("Using vault: \(vault.rootPath)")
     }
 }
 
@@ -55,6 +60,8 @@ struct ContactsExport: ParsableCommand {
     var format: String = "markdown"
 
     func run() throws {
+        let vault = try VaultContext.require()
         print("Exporting contacts to \(format)")
+        print("Using vault: \(vault.rootPath)")
     }
 }

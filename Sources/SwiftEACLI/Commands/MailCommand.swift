@@ -1,4 +1,5 @@
 import ArgumentParser
+import SwiftEAKit
 
 public struct Mail: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -24,7 +25,9 @@ struct MailSync: ParsableCommand {
     var watch: Bool = false
 
     func run() throws {
+        let vault = try VaultContext.require()
         print("Mail sync - not yet implemented")
+        print("Using vault: \(vault.rootPath)")
         if watch {
             print("Watch mode requested")
         }
@@ -41,7 +44,9 @@ struct MailSearch: ParsableCommand {
     var query: String
 
     func run() throws {
+        let vault = try VaultContext.require()
         print("Searching mail for: \(query)")
+        print("Using vault: \(vault.rootPath)")
     }
 }
 
@@ -55,6 +60,8 @@ struct MailExport: ParsableCommand {
     var format: String = "markdown"
 
     func run() throws {
+        let vault = try VaultContext.require()
         print("Exporting mail to \(format)")
+        print("Using vault: \(vault.rootPath)")
     }
 }

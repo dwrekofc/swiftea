@@ -1,4 +1,5 @@
 import ArgumentParser
+import SwiftEAKit
 
 public struct Search: ParsableCommand {
     public static let configuration = CommandConfiguration(
@@ -21,7 +22,9 @@ public struct Search: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        let vault = try VaultContext.require()
         print("Searching for: \(query)")
+        print("Using vault: \(vault.rootPath)")
         if mail {
             print("Scope: mail")
         }

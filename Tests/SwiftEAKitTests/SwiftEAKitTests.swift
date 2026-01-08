@@ -1,8 +1,10 @@
-import XCTest
+import Testing
 @testable import SwiftEAKit
 
-final class SwiftEAKitTests: XCTestCase {
+@Suite("SwiftEAKit Tests")
+struct SwiftEAKitTests {
+    @Test("Version is correct")
     func testVersion() {
-        XCTAssertEqual(SwiftEAKit.version, "0.1.0")
+        #expect(SwiftEAKit.version == "0.1.0")
     }
 }
