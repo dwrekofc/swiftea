@@ -1,0 +1,16 @@
+## 1. Implementation
+- [ ] 1.1 Create SwiftPM package `SwiftEA` with executable `swiftea`
+- [ ] 1.2 Add library target `SwiftEAKit` and set `swift-argument-parser` dependency
+- [ ] 1.3 Create folder layout:
+  - `Sources/SwiftEAKit/Core/`
+  - `Sources/SwiftEAKit/Modules/MailModule/`
+  - `Sources/SwiftEAKit/Modules/CalendarModule/`
+  - `Sources/SwiftEAKit/Modules/ContactsModule/`
+  - `Sources/SwiftEACLI/Commands/`
+  - `Sources/SwiftEACLI/Output/`
+- [ ] 1.4 Implement CLI skeleton using ArgumentParser:
+  - `swiftea` root command
+  - subcommands: `mail`, `cal`, `contacts`, `sync`, `export`
+  - placeholder handlers with help output only
+- [ ] 1.5 Add `Tests/TestData/` directory
+- [ ] 1.6 Ensure `swift build` succeeds

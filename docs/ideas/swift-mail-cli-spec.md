@@ -3,15 +3,22 @@
 > **Part of SwiftEA**: This document specifies the Mail Module within the SwiftEA unified CLI tool. For overall architecture and cross-module features, see `swiftea-architecture.md`.
 
 ## Executive Summary
-The SwiftEA Mail Module provides programmatic access to Apple Mail by interfacing directly with its SQLite database and .emlx files. As part of the larger SwiftEA system, it enables ClaudEA (and users) to read, search, export, and take actions on emails within a unified knowledge graph that spans mail, calendar, contacts, and more.
+The SwiftEA Mail Module provides programmatic access to Apple Mail by interfacing directly with its SQLite database and .emlx files. As part of the larger SwiftEA system, it enables ClaudEA (and users) to read, search, export, and later take actions on emails within a unified knowledge graph that spans mail, calendar, contacts, and more. Phase 1 focuses on read/search/export with near-real-time sync; AppleScript actions are deferred to Phase 2.
 
 ## Module Goals
 - **Universal Email Access**: Read and search emails via direct SQLite access
 - **Data Liberation**: Export emails to markdown and JSON for ClaudEA workflows
-- **Automation**: Execute email actions (send, reply, archive, etc.) via AppleScript
+- **Automation (Phase 2)**: Execute email actions (send, reply, archive, etc.) via AppleScript
 - **Intelligence Layer**: Maintain custom metadata and AI insights (using SwiftEA's unified metadata system)
 - **Search Excellence**: Provide fast, ranked full-text search (integrates with SwiftEA's cross-module search)
 - **Cross-Module Integration**: Enable linking emails to calendar events, contacts, tasks, and projects
+
+## Phase 1 Scope (Read/Export/Watch)
+- Read and mirror Apple Mail data into libSQL (read-only source access)
+- Full-text search across subject/from/to/body_text
+- Markdown and JSON export formats
+- `sync --watch` as a launchd agent with near-real-time updates
+- No AppleScript actions in Phase 1 (Phase 2+)
 
 ## Architecture Overview
 
@@ -88,7 +95,7 @@ The SwiftEA Mail Module provides programmatic access to Apple Mail by interfacin
 - Convert HTML to markdown for export
 - Preserve formatting and structure
 
-### Layer 3: Action Layer (AppleScript Automation)
+### Layer 3: Action Layer (AppleScript Automation, Phase 2)
 
 **Interface**: Apple Mail Scripting Dictionary via osascript
 
@@ -112,7 +119,7 @@ The SwiftEA Mail Module provides programmatic access to Apple Mail by interfacin
 
 ### 1. Database Mirroring & Synchronization
 
-**Mirror Strategy**: Separate SQLite database that stays synchronized with Apple Mail's Envelope Index
+**Mirror Strategy**: Query-and-rebuild from Apple Mail's SQLite source into a libSQL mirror database (no file-level copying of the source DB)
 
 **Sync Methods**:
 1. **File System Watcher** (FSEvents API): Real-time detection of Envelope Index changes
@@ -218,6 +225,18 @@ swiftea search "project alpha" --mail                  # Limit to mail module
 swiftea search "meeting" --mail --calendar             # Search mail and calendar
 ```
 
+**JSON Output (Search/Query/Get)**:
+When `--json` is used, responses are wrapped in an envelope:
+```json
+{
+  "version": "1",
+  "query": "from:bob is:unread",
+  "total": 2,
+  "items": [ /* results */ ],
+  "warnings": []
+}
+```
+
 **Index Management**:
 ```bash
 swiftea mail index rebuild         # Rebuild mail index
@@ -240,29 +259,12 @@ swiftea index rebuild --mail       # Same as above
 **Template**:
 ```markdown
 ---
-id: 12345
-messageId: <abc@example.com>
-from: Bob <bob@example.com>
-to:
-  - You <you@example.com>
-cc: []
+id: mail:abc123
 subject: Project Update
+from: Bob <bob@example.com>
 date: 2026-01-06T10:30:00Z
-isRead: true
-isFlagged: false
-labels:
-  - work
-  - urgent
-customMetadata:
-  aiSummary: "Brief summary here"
-  priority: 8
-  status: needs-response
-  linkedTasks:
-    - TASK-123
-  linkedProjects:
-    - ProjectAlpha
-attachments:
-  - filename.pdf
+aliases:
+  - Project Update
 ---
 
 # Project Update
@@ -271,7 +273,7 @@ Email body content converted to markdown...
 
 - Preserves lists
 - **Preserves formatting**
-- Converts HTML to clean markdown
+- Converts HTML to clean markdown when plain text is unavailable
 
 ## Quoted Replies
 
@@ -284,6 +286,7 @@ swiftea mail export --id 12345 --format markdown
 swiftea mail export --id 12345 --format markdown --output ~/vault/emails/
 swiftea mail export --from "bob@example.com" --format markdown  # Batch export
 swiftea mail export --query "unread AND after:2026-01-01" --format markdown
+swiftea mail export --id 12345 --format markdown --include-attachments
 
 # Or use global export (with ID prefix):
 swiftea export --id mail:12345 --format markdown
@@ -298,7 +301,8 @@ swiftea export --id mail:12345 --format markdown
 **Individual Email JSON Structure**:
 ```json
 {
-  "id": "12345",
+  "id": "mail:abc123",
+  "rowid": 12345,
   "messageId": "<abc@example.com>",
   "from": {
     "name": "Bob",
@@ -376,7 +380,7 @@ swiftea mail export --from "bob" --format json --batch           # Multiple indi
 - Array format: ClaudEA batch processing, data analysis
 - Pipeline integration: Feed JSON to other CLI tools
 
-### 5. Email Actions (AppleScript Layer)
+### 5. Email Actions (AppleScript Layer, Phase 2)
 
 **Core Actions**:
 
@@ -602,6 +606,7 @@ swiftea mail status                 # Mail module status
 # Search & Query
 swiftea mail search <query> [options]
 swiftea mail query [--from|--to|--subject|--after|--before|...]
+swiftea mail get --id <id> [--format json|text]
 
 # Export
 swiftea mail export --id <id> --format <md|json> [options]
@@ -611,7 +616,7 @@ swiftea mail export --query <query> --format <md|json> [options]
 swiftea mail meta set --id <id> --field <field> --value <value>
 swiftea mail meta get --id <id>
 
-# Actions
+# Actions (Phase 2)
 swiftea mail send --to <email> --subject <subject> --body <text>
 swiftea mail reply --id <id> --body <text>
 swiftea mail archive --id <id>
@@ -658,7 +663,7 @@ swiftea sync [--all|--mail|--calendar]
 
 ```bash
 # ID selection
---id <id>              # Single email ID
+--id <id>              # Single email ID (stable hash, e.g., mail:abc123)
 --ids <id1,id2,id3>    # Multiple IDs
 --stdin                # Read IDs from stdin
 
@@ -741,6 +746,8 @@ swiftea sync [--all|--mail|--calendar]
 }
 ```
 
+**Auto-detection**: If `modules.mail.envelopeIndexPath` is not set, SwiftEA SHALL auto-detect the latest `~/Library/Mail/V*/MailData/Envelope Index` and set it at runtime.
+
 ### Config Commands
 
 ```bash
@@ -761,21 +768,23 @@ swiftea config edit                   # Open in editor
 **Goal**: Get email data out of Apple Mail and into ClaudEA workflows
 
 **Features**:
-- ✅ SQLite mirroring (read-only)
-- ✅ Basic sync (manual + periodic)
-- ✅ FTS5 indexing
+- ✅ Query-and-rebuild mirror into libSQL (read-only source)
+- ✅ Manual sync + launchd-based `sync --watch`
+- ✅ FTS5 indexing across subject/from/to/body_text
 - ✅ Search commands (keyword + structured)
 - ✅ Export to markdown and JSON
-- ✅ Custom metadata schema (basic)
 - ✅ Batch export
-- ✅ Pipeline support (JSON output)
+- ✅ Pipeline support (JSON envelope output)
+- ✅ Attachment metadata indexing (no extraction by default)
 
 **Deliverables**:
-- `swiftmail sync`
-- `swiftmail search`
-- `swiftmail query`
-- `swiftmail export`
-- `swiftmail index`
+- `swiftea mail sync`
+- `swiftea mail sync --watch`
+- `swiftea mail search`
+- `swiftea mail query`
+- `swiftea mail get`
+- `swiftea mail export`
+- `swiftea mail index`
 
 **Success Criteria**:
 - Can export all emails from last 6 months as markdown
