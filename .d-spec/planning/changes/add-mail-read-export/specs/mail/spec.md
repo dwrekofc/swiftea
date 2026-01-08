@@ -100,3 +100,11 @@ When exporting markdown or JSON, the system SHALL record the output path for eac
 - **WHEN** the user exports an email
 - **THEN** the system SHALL store the export path for that email
 - **AND** SHALL update the path on re-export
+
+### Requirement: Envelope Index Auto-Detection
+If no path is configured, the system SHALL auto-detect the latest `~/Library/Mail/V*/MailData/Envelope Index` at runtime.
+
+#### Scenario: Auto-detect Envelope Index
+- **WHEN** `modules.mail.envelopeIndexPath` is unset
+- **THEN** the system SHALL locate the latest `V*` Mail directory
+- **AND** SHALL use its `MailData/Envelope Index` as the source database

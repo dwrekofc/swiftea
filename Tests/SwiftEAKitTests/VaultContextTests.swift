@@ -1,116 +1,98 @@
-import Testing
-import Foundation
+import XCTest
 @testable import SwiftEAKit
 
-@Suite("VaultContext Tests")
-struct VaultContextTests {
-    let testDir: String
-    let vaultPath: String
-    let manager: VaultManager
+final class VaultContextTests: XCTestCase {
+    var testDir: String!
+    var vaultPath: String!
+    var manager: VaultManager!
 
-    init() {
+    override func setUp() {
+        super.setUp()
         testDir = NSTemporaryDirectory() + "swiftea-context-test-\(UUID().uuidString)"
         vaultPath = testDir + "/test-vault"
         try? FileManager.default.createDirectory(atPath: vaultPath, withIntermediateDirectories: true)
         manager = VaultManager()
     }
 
+    override func tearDown() {
+        try? FileManager.default.removeItem(atPath: testDir)
+        super.tearDown()
+    }
+
     // MARK: - Vault Context Require Tests
 
-    @Test("Require succeeds in vault")
-    func requireSucceedsInVault() throws {
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
-
+    func testRequireSucceedsInVault() throws {
         // Initialize vault
         _ = try manager.initializeVault(at: vaultPath)
 
         // Require should succeed
         let context = try VaultContext.require(at: vaultPath)
-        #expect(context.rootPath == (vaultPath as NSString).standardizingPath)
-        #expect(context.config.version == "1.0")
+        XCTAssertEqual(context.rootPath, (vaultPath as NSString).standardizingPath)
+        XCTAssertEqual(context.config.version, "1.0")
     }
 
-    @Test("Require fails outside vault")
-    func requireFailsOutsideVault() {
+    func testRequireFailsOutsideVault() {
         let nonVaultPath = testDir + "/not-a-vault"
         try? FileManager.default.createDirectory(atPath: nonVaultPath, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
 
-        #expect(throws: NoVaultContextError.self) {
-            _ = try VaultContext.require(at: nonVaultPath)
+        XCTAssertThrowsError(try VaultContext.require(at: nonVaultPath)) { error in
+            XCTAssertTrue(error is NoVaultContextError, "Expected NoVaultContextError")
         }
     }
 
-    @Test("Require error message is actionable")
-    func requireErrorMessageIsActionable() {
+    func testRequireErrorMessageIsActionable() {
         let nonVaultPath = testDir + "/actionable-test"
         try? FileManager.default.createDirectory(atPath: nonVaultPath, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
 
         do {
             _ = try VaultContext.require(at: nonVaultPath)
-            Issue.record("Should have thrown")
+            XCTFail("Should have thrown")
         } catch let error as NoVaultContextError {
             let message = error.localizedDescription
-            #expect(message.contains("No vault context found"), "Error should explain the problem")
-            #expect(message.contains("swiftea vault init"), "Error should suggest solution")
-            #expect(message.contains(nonVaultPath), "Error should include the path")
+            XCTAssertTrue(message.contains("No vault context found"), "Error should explain the problem")
+            XCTAssertTrue(message.contains("swiftea vault init"), "Error should suggest solution")
+            XCTAssertTrue(message.contains(nonVaultPath), "Error should include the path")
         } catch {
-            Issue.record("Wrong error type: \(error)")
+            XCTFail("Wrong error type: \(error)")
         }
     }
 
     // MARK: - Vault Context Exists Tests
 
-    @Test("Exists returns true for vault")
-    func existsReturnsTrueForVault() throws {
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
-
+    func testExistsReturnsTrueForVault() throws {
         _ = try manager.initializeVault(at: vaultPath)
-        #expect(VaultContext.exists(at: vaultPath))
+        XCTAssertTrue(VaultContext.exists(at: vaultPath))
     }
 
-    @Test("Exists returns false for non-vault")
-    func existsReturnsFalseForNonVault() {
+    func testExistsReturnsFalseForNonVault() {
         let nonVaultPath = testDir + "/not-vault"
         try? FileManager.default.createDirectory(atPath: nonVaultPath, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
-
-        #expect(!VaultContext.exists(at: nonVaultPath))
+        XCTAssertFalse(VaultContext.exists(at: nonVaultPath))
     }
 
     // MARK: - Context Properties Tests
 
-    @Test("Context provides database path")
-    func contextProvidesDatabasePath() throws {
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
-
+    func testContextProvidesDatabasePath() throws {
         _ = try manager.initializeVault(at: vaultPath)
         let context = try VaultContext.require(at: vaultPath)
 
         let expectedDbPath = ((vaultPath as NSString).standardizingPath as NSString)
             .appendingPathComponent(".swiftea/swiftea.db")
-        #expect(context.databasePath == expectedDbPath)
+        XCTAssertEqual(context.databasePath, expectedDbPath)
     }
 
-    @Test("Context provides data folder path")
-    func contextProvidesDataFolderPath() throws {
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
-
+    func testContextProvidesDataFolderPath() throws {
         _ = try manager.initializeVault(at: vaultPath)
         let context = try VaultContext.require(at: vaultPath)
 
         let expectedDataPath = ((vaultPath as NSString).standardizingPath as NSString)
             .appendingPathComponent("Swiftea")
-        #expect(context.dataFolderPath == expectedDataPath)
+        XCTAssertEqual(context.dataFolderPath, expectedDataPath)
     }
 
     // MARK: - Subdirectory Behavior Tests
 
-    @Test("Require fails from subdirectory")
-    func requireFailsFromSubdirectory() throws {
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
-
+    func testRequireFailsFromSubdirectory() throws {
         // Initialize vault
         _ = try manager.initializeVault(at: vaultPath)
 
@@ -118,17 +100,14 @@ struct VaultContextTests {
         let subDir = vaultPath + "/Swiftea/Mail"
 
         // Require from subdirectory should fail (no .swiftea in CWD)
-        #expect(throws: NoVaultContextError.self) {
-            _ = try VaultContext.require(at: subDir)
+        XCTAssertThrowsError(try VaultContext.require(at: subDir)) { error in
+            XCTAssertTrue(error is NoVaultContextError)
         }
     }
 
     // MARK: - Config Access Tests
 
-    @Test("Context provides config")
-    func contextProvidesConfig() throws {
-        defer { try? FileManager.default.removeItem(atPath: testDir) }
-
+    func testContextProvidesConfig() throws {
         _ = try manager.initializeVault(at: vaultPath)
 
         // Modify config
@@ -138,7 +117,7 @@ struct VaultContextTests {
 
         // Get context and verify config
         let context = try VaultContext.require(at: vaultPath)
-        #expect(context.config.accounts.count == 1)
-        #expect(context.config.accounts[0].name == "Context Account")
+        XCTAssertEqual(context.config.accounts.count, 1)
+        XCTAssertEqual(context.config.accounts[0].name, "Context Account")
     }
 }

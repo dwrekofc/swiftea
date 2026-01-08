@@ -1,4 +1,4 @@
-# Discovery → OpenSpec → Beads (Combined Workflow)
+# Discovery → OpenSpec → Beads (Proposal → Execution)
 
 This doc is the detailed procedure behind the "Discovery → Spec → Beads → Implement" section in `AGENTS.md`.
 
@@ -15,8 +15,8 @@ Use this workflow when the user asks for a workflow, proposal, spec, plan, or to
 
 ## Outputs
 
-- OpenSpec change: `openspec/changes/<change-id>/...`
-- Beads epic + tasks (only after chat approval)
+- OpenSpec change: `openspec/changes/<change-id>/...` (proposal + specs for approval)
+- Beads epic + tasks (only after chat approval; **execution source of truth**)
 - Archived idea doc with YAML traceability (only after chat approval)
 
 ## Workflow
@@ -46,10 +46,10 @@ Target questions:
 
 ### 3) Draft OpenSpec change (no Beads yet)
 
-1. Choose a verb-led, date-stamped change id: `<verb>-<slug>-YYYY-MM-DD`.
+1. Choose a verb-led, date-stamped change id: `<verb>-<slug>-YYYY-MM-DD`. Existing non-dated change IDs are grandfathered; new changes must use the date-stamped format.
 2. Scaffold:
    - `openspec/changes/<change-id>/proposal.md`
-   - `openspec/changes/<change-id>/tasks.md` (mid-detail)
+   - `openspec/changes/<change-id>/tasks.md` (approval-level checklist; not execution source)
    - `openspec/changes/<change-id>/specs/<capability>/spec.md` deltas (one per impacted capability)
 3. Ensure each new/modified requirement includes at least one scenario.
 4. Run: `openspec validate <change-id> --strict` and fix issues.
@@ -59,8 +59,8 @@ Approval gate:
 
 ### 4) After chat approval
 
-1. Archive the processed idea doc (see `.d-spec/archive-instructions.md`).
-2. Create Beads epic + tasks from `openspec/changes/<change-id>/tasks.md`.
-3. Add traceability:
+1. Decompose the approved proposal/specs/tasks into a **detailed** Beads epic + tasks per `bd prime` (each task must include a clear description and acceptance criteria; expand beyond `tasks.md` as needed).
+2. Add traceability:
    - Add `Beads: <epic-id>` to `openspec/changes/<change-id>/proposal.md`
-   - Fill `beads_epic_id` in the archived idea doc YAML header
+3. Archive the processed idea doc (see `.d-spec/archive-instructions.md`) and fill `beads_epic_id` in the YAML header.
+4. Freeze OpenSpec: do not update `openspec/changes/<change-id>/tasks.md` during implementation; all execution tracking happens in Beads.

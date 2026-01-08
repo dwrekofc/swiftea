@@ -6,7 +6,7 @@ Instructions for AI coding assistants using OpenSpec for spec-driven development
 
 - Search existing work: `openspec spec list --long`, `openspec list` (use `rg` only for full-text search)
 - Decide scope: new capability vs modify existing capability
-- Pick a unique `change-id`: kebab-case, verb-led (`add-`, `update-`, `remove-`, `refactor-`)
+- Pick a unique `change-id`: kebab-case, verb-led, date-stamped (`add-`, `update-`, `remove-`, `refactor-`), format `<verb>-<slug>-YYYY-MM-DD`. Existing non-dated change IDs are grandfathered; new changes must use the date-stamped format.
 - Scaffold: `proposal.md`, `tasks.md`, `design.md` (only if needed), and delta specs per affected capability
 - Write deltas: use `## ADDED|MODIFIED|REMOVED|RENAMED Requirements`; include at least one `#### Scenario:` per requirement
 - Validate: `openspec validate [change-id] --strict` and fix issues
@@ -42,26 +42,30 @@ Skip proposal for:
 
 **Workflow**
 1. Review `openspec/project.md`, `openspec list`, and `openspec list --specs` to understand current context.
-2. Choose a unique verb-led `change-id` and scaffold `proposal.md`, `tasks.md`, optional `design.md`, and spec deltas under `openspec/changes/<id>/`.
+2. Choose a unique verb-led, date-stamped `change-id` and scaffold `proposal.md`, `tasks.md`, optional `design.md`, and spec deltas under `openspec/changes/<id>/`.
 3. Draft spec deltas using `## ADDED|MODIFIED|REMOVED Requirements` with at least one `#### Scenario:` per requirement.
 4. Run `openspec validate <id> --strict` and resolve any issues before sharing the proposal.
 
-### Stage 2: Implementing Changes
+### Stage 2: Create Beads Epics and Tasks
 Track these steps as TODOs and complete them one by one.
 1. **Read proposal.md** - Understand what's being built
 2. **Read design.md** (if exists) - Review technical decisions
 3. **Read tasks.md** - Get implementation checklist
-4. **Implement tasks sequentially** - Complete in order
-5. **Confirm completion** - Ensure every item in `tasks.md` is finished before updating statuses
-6. **Update checklist** - After all work is done, set every task to `- [x]` so the list reflects reality
-7. **Approval gate** - Do not start implementation until the proposal is reviewed and approved
+4. **Convert to Epics and Tasks in Beads** - Create an epic and tasks from the approved proposal; each task must include type, priority, status, description, explicit dependencies (beads IDs or "none"), acceptance criteria (observable outcomes + verification), and notes as needed (use the template in `CLAUDE.md`)
+5. **Definition of "correct and complete" Beads task** - Every task has full metadata, description, acceptance criteria, dependencies, and notes where needed
+6. **Have we met that standard?** - If not, fix before execution:
+   - Backfill every task with Description + Acceptance Criteria using the template in `CLAUDE.md`
+   - Add real dependencies between tasks (not just the epic) where sequencing matters
+7. **Execution gate** - Do not start implementation until the proposal is approved and Beads tasks meet the standard above
 
-### Stage 3: Archiving Changes
-After deployment, create separate PR to:
+### Stage 3: Archiving OpenSpec Changes
+After successfully executing Beads epics/tasks (and any required deployment), create a separate PR to:
+- Confirm all Beads tasks are closed and acceptance criteria verified, then run `bd sync`
 - Move `changes/[name]/` → `changes/archive/YYYY-MM-DD-[name]/`
 - Update `specs/` if capabilities changed
 - Use `openspec archive <change-id> --skip-specs --yes` for tooling-only changes (always pass the change ID explicitly)
 - Run `openspec validate --strict` to confirm the archived change passes checks
+Note: This is separate from archiving idea docs in `docs/archive/`, which happens after proposal approval.
 
 ## Before Any Task
 
@@ -156,7 +160,7 @@ New request?
 
 ### Proposal Structure
 
-1. **Create directory:** `changes/[change-id]/` (kebab-case, verb-led, unique)
+1. **Create directory:** `changes/[change-id]/` (kebab-case, verb-led, date-stamped, unique)
 
 2. **Write proposal.md:**
 ```markdown

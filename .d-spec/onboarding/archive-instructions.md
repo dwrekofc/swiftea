@@ -1,10 +1,10 @@
 # Archiving Processed Ideas
 
-Archive the selected idea doc after the user approves the related OpenSpec proposal in chat.
+Archive the selected idea doc after the user approves the related OpenSpec proposal in chat **and** after the Beads epic is created (so `beads_epic_id` is available).
 
 ## When To Archive
 
-- Archive after **proposal approval** (chat approval gate), not at draft time.
+- Archive after **proposal approval** (chat approval gate) and Beads epic creation, not at draft time.
 
 ## Where To Archive
 

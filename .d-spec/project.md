@@ -21,10 +21,9 @@
 ## Tech Stack
 - **Swift 6.0+**: Core language (native macOS, fast, safe)
 - **Swift Argument Parser**: CLI argument handling
-- **libSQL**: Database access (mirror databases)
+- **libSQL**: Core database engine for SwiftEA/ClaudEA backend and all mirror databases (FTS5 for search)
 - **Foundation**: macOS system APIs
 - **OSAKit**: AppleScript execution
-- **libSQL**: Core database engine with FTS5 for search
 
 **Development Tools**:
 - Swift Package Manager (SPM) for dependency management
