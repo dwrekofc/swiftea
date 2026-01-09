@@ -4,7 +4,7 @@ Use this when the user wants a phased plan across multiple ideas or capabilities
 
 ## Where To Save
 
-- Prefer `docs/roadmap.md` (or a small set of `docs/roadmap-*.md` files) so discovery can load it quickly.
+- Prefer `.d-spec/roadmap.md` (or a small set of `.d-spec/roadmap-*.md` files) so discovery can load it quickly.
 
 ## Interview (AskUserTool)
 
@@ -19,12 +19,14 @@ Ask option-based questions about:
 
 ## Output Format (Suggested)
 
-- **Phase 1 (MVP)**: 3–7 bullets, each linkable to an idea doc or OpenSpec change
+- **Phase 1 (MVP)**: 3–7 bullets, each linkable to an idea doc or d-spec change
 - **Phase 2**: 3–7 bullets
 - **Phase 3+**: high level themes
 
-## Relationship To OpenSpec + Beads
+## Relationship To d-spec + Beads
 
 - Roadmap items should usually point to idea docs first.
-- Only after an idea is selected and clarified should it become an OpenSpec change.
-- Beads issues are created only after the OpenSpec proposal is approved in chat.
+- Only after an idea is selected and clarified should it become a d-spec change.
+- Beads issues are created only after the d-spec proposal is approved in chat.
+- New ideas should be added to the roadmap as potential changes.
+- After an idea becomes an approved change, update the roadmap to reference the official spec(s) and Beads epic IDs.

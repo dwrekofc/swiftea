@@ -1,6 +1,6 @@
 # Archiving Processed Ideas
 
-Archive the selected idea doc after the user approves the related OpenSpec proposal in chat **and** after the Beads epic is created (so `beads_epic_id` is available).
+Archive the selected idea doc after the user approves the related d-spec proposal in chat **and** after the Beads epic is created (so `beads_epic_id` is available).
 
 ## When To Archive
 
@@ -8,7 +8,7 @@ Archive the selected idea doc after the user approves the related OpenSpec propo
 
 ## Where To Archive
 
-- Move: `docs/ideas/<idea>.md` → `docs/archive/<idea>.md`
+- Move: `.d-spec/planning/ideas/<idea>.md` → `.d-spec/planning/ideas/archive/<idea>.md`
 
 ## What To Add (YAML Header)
 
@@ -17,7 +17,7 @@ Prepend (or insert) a YAML frontmatter block at the top of the archived idea doc
 ```yaml
 ---
 processed_date: YYYY-MM-DD
-openspec_change_id: <change-id>
+d-spec_change_id: <change-id>
 beads_epic_id: <epic-id>
 decision_summary:
   - <short decision>

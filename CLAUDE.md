@@ -1,117 +1,41 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
-
-## Issue Tracking
-
-This project uses **bd (beads)** for issue tracking.
-Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
-
-**Quick reference:**
-- `bd ready` - Find unblocked work
-- `bd create "Title" --type task --priority 2` - Create issue
-- `bd close <id>` - Complete work
-- `bd sync` - Sync with git (run at session end)
-
-For full workflow details: `bd prime`
-
 ## Start Here
 
-- If the user asks for a workflow, proposal/spec/change, plan, or new capability: read `.d-spec/AGENTS.md` and follow the linked docs as-needed.
+- If the user asks for a new idea, new feature, proposal/spec/change, plan, or new capability: read `.d-spec/CLAUDE.md` and follow the linked docs as-needed.
 - If the user asks questions or needs context gathering: use `AskUserTool` for interviews and clarifications.
-- If the user asks to implement an approved change: follow the workflow below, then use **Beads as the sole execution source of truth** per `bd prime` (OpenSpec is input-only after approval).
-- If the repo needs ideation docs setup/standardization: start with `.d-spec/project-setup.md`.
+- If the user asks to implement an approved change/feature: follow the workflow below, then use **Beads as the sole execution source of truth** per `bd prime` (d-spec is input-only after approval).
+- If the repo needs ideation docs setup/standardization: start with `.d-spec/onboarding/project-setup.md`.
 
-## End-to-End Workflow (Discovery → Spec → Beads → Implement)
+# Planning Phase - d-spec
+THis project uses **d-spec** (`/.d-spec/`) for ideation and planning. See `.d-spec/CLAUDE.md`
 
-1. **Discovery (read-only)**: read the north star (`docs/*master-plan*.md`) and skim candidates in `docs/ideas/` (`.d-spec/discovery-to-spec.md`).
-2. **Interview (AskUserTool)**: ask one question at a time, option-based; stop and wait for answers (`.d-spec/discovery-to-spec.md`).
-3. **Draft Spec (OpenSpec)**: create `openspec/changes/<change-id>/` and write `proposal.md`, `tasks.md`, and spec deltas (`openspec/AGENTS.md` Stage 1).
-4. **Validate**: run `openspec validate <change-id> --strict`; ensure each new/modified requirement has ≥1 scenario (`openspec/AGENTS.md`).
-5. **Approval Gate**: do not create Beads issues or implement until the user approves the proposal in chat.
-6. **Beads (after approval)**: decompose the approved OpenSpec proposal/specs/tasks into a **detailed** Beads epic + tasks per `bd prime` (each task must have a clear description and acceptance criteria). After this step, **Beads is the source of truth**.
-7. **Archive Idea (after approval)**: move `docs/ideas/<idea>.md` → `docs/archive/<idea>.md` and prepend YAML traceability keys (`.d-spec/archive-instructions.md`).
-8. **Implement**: execute Beads tasks sequentially and update Beads statuses/fields as you work. Do **not** update `openspec/changes/<change-id>/tasks.md` during implementation (OpenSpec is frozen after approval).
-9. **Wrap Up**: follow the session completion checklist (below).
+## Quick Reference
+<!-- note to editor:START -->
+add d-spec quickstart information here, see beads quickstart info below for reference. keep it short and reference/link to the other CLAUDE.md files in the /.d-spec folder for further info
+<!-- note to editor:END -->
 
-## OpenSpec → Beads Handoff
+# Beads (Execution Phase)
+This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
-- Use OpenSpec only to draft/iterate proposals, specs, and approval-level tasks.
-- Do not create Beads issues until the proposal is approved in chat.
-- After approval, decompose into **detailed** Beads epics/tasks and make Beads the **single source of truth** for execution.
-- Freeze OpenSpec after Beads creation; do not update `openspec/changes/<change-id>/tasks.md` during implementation.
-
-## Beads Task Template (use for every task)
-
-```text
-Title: <concise action>
-Description: <what/why; 2-4 sentences>
-Acceptance Criteria:
-- [ ] <observable outcome>
-- [ ] <test or verification>
-Dependencies: <beads ids or "none">
-Notes: <risks, edge cases, or references>
-```
-
-## Gates
-
-- **Approval**: OpenSpec proposals require explicit chat approval before Beads creation or implementation.
-- **Spec hygiene**: `openspec validate <change-id> --strict` must pass before requesting approval.
-- **Beads handoff**: once Beads is created, execution tracking happens only in Beads; OpenSpec remains read-only.
-- **Session completion**: work is not done until `git push` succeeds (see Wrap Up).
-
-## Command Cheat Sheet
+## Quick Reference
 
 ```bash
-# Discovery
-rg --files -g'*.md'
-rg -n "TODO|FIXME|NEEDS" docs -S
-
-# OpenSpec (draft/validate)
-openspec list
-openspec list --specs
-openspec spec list --long
-openspec validate <change-id> --strict
-
-# Beads (execute)
-bd ready
-bd show <id>
-bd update <id> --status in_progress
-bd close <id>
-bd sync
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --status in_progress  # Claim work
+bd close <id>         # Complete work
+bd sync               # Sync with git
 ```
 
-## Reference (OpenSpec; managed)
-
-Consult this when drafting or validating OpenSpec changes; the workflow above is primary.
-
-<!-- OPENSPEC:START -->
-# OpenSpec Instructions
-
-These instructions are for AI assistants working in this project.
-
-Open `@/openspec/AGENTS.md` when a request:
-- Mentions planning or proposals (words like proposal, spec, change, plan)
-- Introduces new capabilities, breaking changes, architecture shifts, or big performance/security work
-- Is ambiguous and you need the authoritative OpenSpec format/conventions before drafting
-
-Use `@/openspec/AGENTS.md` to learn:
-- How to create and apply change proposals
-- Spec format and conventions
-- Project structure and guidelines
-
-Keep this managed block so 'openspec update' can refresh the instructions.
-
-<!-- OPENSPEC:END -->
-
-## Wrap Up (Every Session)
+## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
+2. **Run quality gates** (if code changed) - Tests, linters, builds (tests should be written first unless explicitly exempted)
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
@@ -129,3 +53,7 @@ Keep this managed block so 'openspec update' can refresh the instructions.
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+
+<!-- note to editor:START -->
+everything below this needs to be migrated to the CLAUDE.md file in the `/.d-spec` folder.
+<!-- note to editor:END -->

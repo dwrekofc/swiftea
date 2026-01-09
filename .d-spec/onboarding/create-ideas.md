@@ -1,14 +1,14 @@
-# Creating Idea Docs (`docs/ideas/`)
+# Creating Idea Docs (`.d-spec/planning/ideas/`)
 
 Use this workflow when the user wants to capture a new idea (small feature → whole module).
 
 ## File Naming
 
 Create new idea files as:
-- `docs/ideas/YYYY-MM-DD-<verb>-<slug>.md`
+- `.d-spec/planning/ideas/YYYY-MM-DD-<verb>-<slug>.md`
 
 Example:
-- `docs/ideas/2026-01-07-add-mail-rules.md`
+- `.d-spec/planning/ideas/2026-01-07-add-mail-rules.md`
 
 ## Required YAML Frontmatter (Minimal)
 
@@ -47,6 +47,10 @@ Use headings if helpful, but keep it lightweight:
 
 ## Open Questions
 ```
+
+## Next Step (Required)
+
+- Add the idea as an unimplemented/future item in `.d-spec/*master-plan*.md` and `.d-spec/roadmap.md` (as a potential change).
 
 ## Notes
 

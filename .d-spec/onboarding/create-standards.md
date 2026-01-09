@@ -1,10 +1,10 @@
-# Defining Project Standards
+# Defining Project Conventions & Standards (project.md)
 
-Use this when the user wants to establish or refine project standards (coding style, UX principles, data/privacy rules, etc).
+Use this when the user wants to establish or refine project standards (coding style, UX principles, data/privacy rules, etc). This repo does **not** use `.d-spec/standards.md`; capture standards inside `.d-spec/project.md`.
 
-## Primary Standard Doc
+## Primary Standards Doc
 
-- Keep standards in `docs/standards.md` (or a small set of `docs/*.md` files) so discovery can load them quickly.
+- Keep standards in `.d-spec/project.md` so discovery can load them quickly.
 
 ## Interview (AskUserTool)
 
