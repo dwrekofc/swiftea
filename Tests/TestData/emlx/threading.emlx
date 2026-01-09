@@ -1,0 +1,20 @@
+520
+Message-ID: <reply222@example.com>
+From: replier@example.com
+To: original@example.com
+Subject: Re: Original Thread Subject
+Date: Sat, 11 Jan 2026 08:30:00 -0500
+In-Reply-To: <original111@example.com>
+References: <original111@example.com> <prev222@example.com>
+Content-Type: text/plain; charset=utf-8
+
+This is a reply in a thread.
+It references the original message and previous replies.
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>date-received</key>
+	<real>1736599800</real>
+</dict>
+</plist>

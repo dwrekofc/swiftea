@@ -1,0 +1,34 @@
+698
+Message-ID: <multi789@example.com>
+From: "Support Team" <support@company.com>
+To: customer@client.org, "Another Person" <another@client.org>
+Cc: manager@company.com
+Subject: Multipart Email Test
+Date: Wed, 08 Jan 2026 09:00:00 -0800
+Content-Type: multipart/alternative; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset=utf-8
+
+This is the plain text version of the email.
+Please use an HTML-capable email client.
+
+--boundary123
+Content-Type: text/html; charset=utf-8
+
+<!DOCTYPE html>
+<html>
+<body>
+<p>This is the <b>HTML version</b> of the email.</p>
+</body>
+</html>
+
+--boundary123--
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>date-received</key>
+	<real>1736352000</real>
+</dict>
+</plist>

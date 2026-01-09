@@ -1,0 +1,24 @@
+446
+Message-ID: <html456@example.com>
+From: Alice Wonder <alice@example.com>
+To: Bob Builder <bob@example.com>
+Subject: HTML Email Test
+Date: Tue, 07 Jan 2026 14:15:00 +0000
+Content-Type: text/html; charset=utf-8
+
+<!DOCTYPE html>
+<html>
+<head><title>Test</title></head>
+<body>
+<h1>Hello World</h1>
+<p>This is an <strong>HTML</strong> email.</p>
+</body>
+</html>
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>date-received</key>
+	<real>1736262900</real>
+</dict>
+</plist>

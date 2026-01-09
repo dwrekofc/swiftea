@@ -1,0 +1,31 @@
+820
+Message-ID: <attach111@example.com>
+From: sender@example.com
+To: recipient@example.com
+Subject: Email with Attachment
+Date: Fri, 10 Jan 2026 12:00:00 +0000
+Content-Type: multipart/mixed; boundary="mixedboundary"
+
+--mixedboundary
+Content-Type: text/plain; charset=utf-8
+
+This email has an attachment.
+
+--mixedboundary
+Content-Type: application/pdf; name="document.pdf"
+Content-Disposition: attachment; filename="document.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRv
+YmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PgplbmRvYmoKMyAw
+IG9iagplbmRvYmoK
+
+--mixedboundary--
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>date-received</key>
+	<real>1736510400</real>
+</dict>
+</plist>

@@ -1,0 +1,19 @@
+420
+Message-ID: <encoded999@example.com>
+From: =?UTF-8?B?SsO8cmdlbiBNw7xsbGVy?= <jurgen@example.de>
+To: user@example.com
+Subject: =?UTF-8?Q?Re:_Caf=C3=A9_meeting?=
+Date: Thu, 09 Jan 2026 16:45:00 +0100
+Content-Type: text/plain; charset=utf-8
+
+This email has encoded headers using RFC2047.
+The sender name contains German umlauts.
+The subject contains an accented character.
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>date-received</key>
+	<real>1736437500</real>
+</dict>
+</plist>
