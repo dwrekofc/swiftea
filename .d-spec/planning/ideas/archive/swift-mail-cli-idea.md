@@ -1,3 +1,21 @@
+---
+title: Swift Mail CLI Foundation
+area: mail
+status: processed
+created: 2026-01-06
+processed_date: 2026-01-09
+related_changes:
+  - id: add-mail-read-export
+    beads_epic_id: swiftea-7im
+    description: SQL layer + content layer for reading mail
+  - id: add-mail-actions-applescript
+    beads_epic_id: swiftea-01t
+    description: Action layer via AppleScript
+  - id: add-threading
+    beads_epic_id: swiftea-az6
+    description: Email conversation threading
+---
+
 # Idea
 I want to create a swift CLI program that allows me or ClaudEA (see claudea-ideas/CLAUDEA.md) to programmatically access my apple mail by directly accessing the SQLite DB that apple mail stores locally with all the email data and by accessing the .emlx files.
 

@@ -1,3 +1,15 @@
+---
+title: Email Threading & UI Vision
+area: mail
+status: processed
+created: 2026-01-07
+processed_date: 2026-01-09
+related_changes:
+  - id: add-threading
+    beads_epic_id: swiftea-az6
+    description: Email conversation threading implementation
+---
+
 # Swift Mail CLI - Threaded Conversations & UI Vision
 
 ## Summary
