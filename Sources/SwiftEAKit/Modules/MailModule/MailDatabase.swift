@@ -423,6 +423,88 @@ public final class MailDatabase: @unchecked Sendable {
         return mailboxes
     }
 
+    // MARK: - Incremental Sync Support
+
+    /// Represents minimal message status info for change detection
+    public struct MessageStatus {
+        public let id: String
+        public let appleRowId: Int
+        public let isRead: Bool
+        public let isFlagged: Bool
+    }
+
+    /// Get all message statuses for change detection
+    public func getAllMessageStatuses() throws -> [MessageStatus] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT id, apple_rowid, is_read, is_flagged
+            FROM messages
+            WHERE is_deleted = 0 AND apple_rowid IS NOT NULL
+            """)
+
+        var statuses: [MessageStatus] = []
+        for row in result {
+            guard let id = getStringValue(row, 0),
+                  let appleRowId = getIntValue(row, 1) else {
+                continue
+            }
+            let isRead = (getIntValue(row, 2) ?? 0) == 1
+            let isFlagged = (getIntValue(row, 3) ?? 0) == 1
+            statuses.append(MessageStatus(id: id, appleRowId: appleRowId, isRead: isRead, isFlagged: isFlagged))
+        }
+        return statuses
+    }
+
+    /// Update the read/flagged status of a message
+    public func updateMessageStatus(id: String, isRead: Bool, isFlagged: Bool) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = try conn.execute("""
+            UPDATE messages
+            SET is_read = \(isRead ? 1 : 0), is_flagged = \(isFlagged ? 1 : 0), updated_at = \(now)
+            WHERE id = '\(escapeSql(id))'
+            """)
+    }
+
+    /// Get all Apple rowids from the mirror for deletion detection
+    public func getAllAppleRowIds() throws -> [Int] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT apple_rowid FROM messages
+            WHERE is_deleted = 0 AND apple_rowid IS NOT NULL
+            """)
+
+        var rowIds: [Int] = []
+        for row in result {
+            if let rowId = getIntValue(row, 0) {
+                rowIds.append(rowId)
+            }
+        }
+        return rowIds
+    }
+
+    /// Mark a message as deleted (soft delete)
+    public func markMessageDeleted(appleRowId: Int) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = try conn.execute("""
+            UPDATE messages SET is_deleted = 1, updated_at = \(now)
+            WHERE apple_rowid = \(appleRowId)
+            """)
+    }
+
     // MARK: - Helpers
 
     private func escapeSql(_ string: String) -> String {

@@ -53,6 +53,8 @@ public enum SyncPhase: String, Sendable {
     case syncingMailboxes = "Syncing mailboxes"
     case syncingMessages = "Syncing messages"
     case parsingContent = "Parsing content"
+    case detectingChanges = "Detecting changes"
+    case detectingDeletions = "Detecting deletions"
     case indexing = "Indexing"
     case complete = "Complete"
 }
@@ -62,18 +64,26 @@ public struct SyncResult: Sendable {
     public let messagesProcessed: Int
     public let messagesAdded: Int
     public let messagesUpdated: Int
+    public let messagesDeleted: Int
+    public let messagesUnchanged: Int
     public let mailboxesProcessed: Int
     public let errors: [String]
     public let duration: TimeInterval
+    public let isIncremental: Bool
 
     public init(messagesProcessed: Int, messagesAdded: Int, messagesUpdated: Int,
-                mailboxesProcessed: Int, errors: [String], duration: TimeInterval) {
+                messagesDeleted: Int = 0, messagesUnchanged: Int = 0,
+                mailboxesProcessed: Int, errors: [String], duration: TimeInterval,
+                isIncremental: Bool = false) {
         self.messagesProcessed = messagesProcessed
         self.messagesAdded = messagesAdded
         self.messagesUpdated = messagesUpdated
+        self.messagesDeleted = messagesDeleted
+        self.messagesUnchanged = messagesUnchanged
         self.mailboxesProcessed = mailboxesProcessed
         self.errors = errors
         self.duration = duration
+        self.isIncremental = isIncremental
     }
 }
 
@@ -102,13 +112,16 @@ public final class MailSync: @unchecked Sendable {
         self.idGenerator = idGenerator
     }
 
-    /// Run a full sync from Apple Mail to the mirror database
+    /// Run a sync from Apple Mail to the mirror database
+    /// - Parameter incremental: If true, only sync changes since last sync (faster). If false, full rebuild.
     public func sync(incremental: Bool = false) throws -> SyncResult {
         let startTime = Date()
         var errors: [String] = []
         var messagesProcessed = 0
         var messagesAdded = 0
         var messagesUpdated = 0
+        var messagesDeleted = 0
+        var messagesUnchanged = 0
         var mailboxesProcessed = 0
 
         // Discover envelope index
@@ -131,44 +144,205 @@ public final class MailSync: @unchecked Sendable {
         let mailboxCount = try syncMailboxes()
         mailboxesProcessed = mailboxCount
 
-        // Get messages to sync
-        reportProgress(.syncingMessages, 0, 1, "Querying messages...")
-        let messages = try queryMessages(since: lastSyncTime)
-        let totalMessages = messages.count
+        if incremental && lastSyncTime != nil {
+            // Incremental sync: new messages + status changes + deletions
+            let result = try performIncrementalSync(
+                info: info,
+                lastSyncTime: lastSyncTime!,
+                errors: &errors
+            )
+            messagesProcessed = result.processed
+            messagesAdded = result.added
+            messagesUpdated = result.updated
+            messagesDeleted = result.deleted
+            messagesUnchanged = result.unchanged
+        } else {
+            // Full sync: process all messages
+            reportProgress(.syncingMessages, 0, 1, "Querying messages...")
+            let messages = try queryMessages(since: nil)
+            let totalMessages = messages.count
 
-        reportProgress(.syncingMessages, 0, totalMessages, "Syncing \(totalMessages) messages...")
+            reportProgress(.syncingMessages, 0, totalMessages, "Syncing \(totalMessages) messages...")
 
-        // Process messages in batches
-        let batchSize = 100
-        for (index, messageRow) in messages.enumerated() {
-            do {
-                let (added, updated) = try processMessage(messageRow, mailBasePath: info.mailBasePath)
-                if added { messagesAdded += 1 }
-                if updated { messagesUpdated += 1 }
-                messagesProcessed += 1
+            let batchSize = 100
+            for (index, messageRow) in messages.enumerated() {
+                do {
+                    let (added, updated) = try processMessage(messageRow, mailBasePath: info.mailBasePath)
+                    if added { messagesAdded += 1 }
+                    if updated { messagesUpdated += 1 }
+                    messagesProcessed += 1
 
-                if index % batchSize == 0 || index == totalMessages - 1 {
-                    reportProgress(.syncingMessages, index + 1, totalMessages,
-                                   "Processed \(index + 1)/\(totalMessages) messages")
+                    if index % batchSize == 0 || index == totalMessages - 1 {
+                        reportProgress(.syncingMessages, index + 1, totalMessages,
+                                       "Processed \(index + 1)/\(totalMessages) messages")
+                    }
+                } catch {
+                    errors.append("Message \(messageRow.rowId): \(error.localizedDescription)")
                 }
-            } catch {
-                errors.append("Message \(messageRow.rowId): \(error.localizedDescription)")
             }
         }
 
         // Update last sync time
         try mailDatabase.setLastSyncTime(Date())
 
-        reportProgress(.complete, totalMessages, totalMessages, "Sync complete")
+        reportProgress(.complete, messagesProcessed, messagesProcessed, "Sync complete")
 
         return SyncResult(
             messagesProcessed: messagesProcessed,
             messagesAdded: messagesAdded,
             messagesUpdated: messagesUpdated,
+            messagesDeleted: messagesDeleted,
+            messagesUnchanged: messagesUnchanged,
             mailboxesProcessed: mailboxesProcessed,
             errors: errors,
-            duration: Date().timeIntervalSince(startTime)
+            duration: Date().timeIntervalSince(startTime),
+            isIncremental: incremental
         )
+    }
+
+    // MARK: - Incremental Sync
+
+    private struct IncrementalSyncResult {
+        var processed: Int = 0
+        var added: Int = 0
+        var updated: Int = 0
+        var deleted: Int = 0
+        var unchanged: Int = 0
+    }
+
+    private func performIncrementalSync(
+        info: EnvelopeIndexInfo,
+        lastSyncTime: Date,
+        errors: inout [String]
+    ) throws -> IncrementalSyncResult {
+        var result = IncrementalSyncResult()
+
+        // Phase 1: Query new messages (received since last sync)
+        reportProgress(.syncingMessages, 0, 1, "Querying new messages...")
+        let newMessages = try queryMessages(since: lastSyncTime)
+
+        if !newMessages.isEmpty {
+            reportProgress(.syncingMessages, 0, newMessages.count, "Syncing \(newMessages.count) new messages...")
+
+            let batchSize = 100
+            for (index, messageRow) in newMessages.enumerated() {
+                do {
+                    let (added, updated) = try processMessage(messageRow, mailBasePath: info.mailBasePath)
+                    if added { result.added += 1 }
+                    if updated { result.updated += 1 }
+                    result.processed += 1
+
+                    if index % batchSize == 0 || index == newMessages.count - 1 {
+                        reportProgress(.syncingMessages, index + 1, newMessages.count,
+                                       "Processed \(index + 1)/\(newMessages.count) new messages")
+                    }
+                } catch {
+                    errors.append("Message \(messageRow.rowId): \(error.localizedDescription)")
+                }
+            }
+        }
+
+        // Phase 2: Check for status changes on existing messages (read/flagged)
+        reportProgress(.detectingChanges, 0, 1, "Detecting status changes...")
+        let statusChanges = try detectStatusChanges()
+        if statusChanges > 0 {
+            result.updated += statusChanges
+            result.processed += statusChanges
+        }
+
+        // Phase 3: Detect deleted messages
+        reportProgress(.detectingDeletions, 0, 1, "Detecting deleted messages...")
+        let deletions = try detectDeletedMessages()
+        result.deleted = deletions
+        result.processed += deletions
+
+        return result
+    }
+
+    /// Detect messages in the mirror that have changed status (read/flagged) in Apple Mail
+    private func detectStatusChanges() throws -> Int {
+        // Get existing messages from mirror with their current status
+        let existingMessages = try mailDatabase.getAllMessageStatuses()
+        var changesDetected = 0
+
+        // Query current status from Apple Mail for these messages
+        let rowIds = existingMessages.map { $0.appleRowId }
+        guard !rowIds.isEmpty else { return 0 }
+
+        // Batch query status from source
+        let batchSize = 500
+        for batch in stride(from: 0, to: rowIds.count, by: batchSize) {
+            let end = min(batch + batchSize, rowIds.count)
+            let batchIds = Array(rowIds[batch..<end])
+
+            let idList = batchIds.map { String($0) }.joined(separator: ",")
+            let sql = """
+                SELECT ROWID, read, flagged
+                FROM messages
+                WHERE ROWID IN (\(idList))
+                """
+
+            let rows = try executeQuery(sql)
+
+            for row in rows {
+                guard let rowId = row["ROWID"] as? Int64 else { continue }
+
+                let isRead = (row["read"] as? Int64 ?? 0) == 1
+                let isFlagged = (row["flagged"] as? Int64 ?? 0) == 1
+
+                // Find the existing message status
+                if let existing = existingMessages.first(where: { $0.appleRowId == Int(rowId) }) {
+                    if existing.isRead != isRead || existing.isFlagged != isFlagged {
+                        // Status changed, update it
+                        try mailDatabase.updateMessageStatus(
+                            id: existing.id,
+                            isRead: isRead,
+                            isFlagged: isFlagged
+                        )
+                        changesDetected += 1
+                    }
+                }
+            }
+        }
+
+        return changesDetected
+    }
+
+    /// Detect messages that exist in the mirror but have been deleted from Apple Mail
+    private func detectDeletedMessages() throws -> Int {
+        // Get all Apple rowids from the mirror
+        let mirrorRowIds = try mailDatabase.getAllAppleRowIds()
+        guard !mirrorRowIds.isEmpty else { return 0 }
+
+        // Query which of these still exist in Apple Mail
+        let batchSize = 500
+        var deletedCount = 0
+        var existingInSource = Set<Int>()
+
+        for batch in stride(from: 0, to: mirrorRowIds.count, by: batchSize) {
+            let end = min(batch + batchSize, mirrorRowIds.count)
+            let batchIds = Array(mirrorRowIds[batch..<end])
+
+            let idList = batchIds.map { String($0) }.joined(separator: ",")
+            let sql = "SELECT ROWID FROM messages WHERE ROWID IN (\(idList))"
+
+            let rows = try executeQuery(sql)
+            for row in rows {
+                if let rowId = row["ROWID"] as? Int64 {
+                    existingInSource.insert(Int(rowId))
+                }
+            }
+        }
+
+        // Mark messages as deleted if they're not in source
+        for rowId in mirrorRowIds {
+            if !existingInSource.contains(rowId) {
+                try mailDatabase.markMessageDeleted(appleRowId: rowId)
+                deletedCount += 1
+            }
+        }
+
+        return deletedCount
     }
 
     // MARK: - Source Database Operations

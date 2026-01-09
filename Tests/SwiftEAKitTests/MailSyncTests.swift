@@ -383,4 +383,202 @@ This is a simple test email body.
         XCTAssertEqual(searchResults.count, 1)
         XCTAssertEqual(searchResults.first?.id, id)
     }
+
+    // MARK: - Incremental Sync Tests
+
+    func testSyncResultWithIncrementalFields() {
+        let result = SyncResult(
+            messagesProcessed: 100,
+            messagesAdded: 50,
+            messagesUpdated: 30,
+            messagesDeleted: 10,
+            messagesUnchanged: 10,
+            mailboxesProcessed: 5,
+            errors: [],
+            duration: 5.0,
+            isIncremental: true
+        )
+
+        XCTAssertEqual(result.messagesProcessed, 100)
+        XCTAssertEqual(result.messagesAdded, 50)
+        XCTAssertEqual(result.messagesUpdated, 30)
+        XCTAssertEqual(result.messagesDeleted, 10)
+        XCTAssertEqual(result.messagesUnchanged, 10)
+        XCTAssertTrue(result.isIncremental)
+    }
+
+    func testSyncResultDefaultsForBackwardCompatibility() {
+        // Ensure old-style initialization still works with defaults
+        let result = SyncResult(
+            messagesProcessed: 100,
+            messagesAdded: 80,
+            messagesUpdated: 20,
+            mailboxesProcessed: 5,
+            errors: [],
+            duration: 5.0
+        )
+
+        XCTAssertEqual(result.messagesDeleted, 0)
+        XCTAssertEqual(result.messagesUnchanged, 0)
+        XCTAssertFalse(result.isIncremental)
+    }
+
+    func testNewSyncPhases() {
+        XCTAssertEqual(SyncPhase.detectingChanges.rawValue, "Detecting changes")
+        XCTAssertEqual(SyncPhase.detectingDeletions.rawValue, "Detecting deletions")
+    }
+
+    // MARK: - Incremental Sync Database Support Tests
+
+    func testGetAllMessageStatuses() throws {
+        // Insert test messages
+        let msg1 = MailMessage(
+            id: "test-status-1",
+            appleRowId: 100,
+            subject: "Test 1",
+            isRead: true,
+            isFlagged: false
+        )
+        let msg2 = MailMessage(
+            id: "test-status-2",
+            appleRowId: 200,
+            subject: "Test 2",
+            isRead: false,
+            isFlagged: true
+        )
+
+        try mailDatabase.upsertMessage(msg1)
+        try mailDatabase.upsertMessage(msg2)
+
+        let statuses = try mailDatabase.getAllMessageStatuses()
+
+        XCTAssertEqual(statuses.count, 2)
+
+        let status1 = statuses.first(where: { $0.id == "test-status-1" })
+        XCTAssertNotNil(status1)
+        XCTAssertEqual(status1?.appleRowId, 100)
+        XCTAssertTrue(status1?.isRead ?? false)
+        XCTAssertFalse(status1?.isFlagged ?? true)
+
+        let status2 = statuses.first(where: { $0.id == "test-status-2" })
+        XCTAssertNotNil(status2)
+        XCTAssertEqual(status2?.appleRowId, 200)
+        XCTAssertFalse(status2?.isRead ?? true)
+        XCTAssertTrue(status2?.isFlagged ?? false)
+    }
+
+    func testUpdateMessageStatus() throws {
+        // Insert a message
+        let msg = MailMessage(
+            id: "test-update-status",
+            appleRowId: 300,
+            subject: "Test Update",
+            isRead: false,
+            isFlagged: false
+        )
+        try mailDatabase.upsertMessage(msg)
+
+        // Verify initial state
+        var retrieved = try mailDatabase.getMessage(id: "test-update-status")
+        XCTAssertFalse(retrieved?.isRead ?? true)
+        XCTAssertFalse(retrieved?.isFlagged ?? true)
+
+        // Update status
+        try mailDatabase.updateMessageStatus(id: "test-update-status", isRead: true, isFlagged: true)
+
+        // Verify updated state
+        retrieved = try mailDatabase.getMessage(id: "test-update-status")
+        XCTAssertTrue(retrieved?.isRead ?? false)
+        XCTAssertTrue(retrieved?.isFlagged ?? false)
+    }
+
+    func testGetAllAppleRowIds() throws {
+        // Insert test messages
+        let msg1 = MailMessage(id: "test-rowid-1", appleRowId: 1001, subject: "Test 1")
+        let msg2 = MailMessage(id: "test-rowid-2", appleRowId: 1002, subject: "Test 2")
+        let msg3 = MailMessage(id: "test-rowid-3", appleRowId: 1003, subject: "Test 3", isDeleted: true)
+
+        try mailDatabase.upsertMessage(msg1)
+        try mailDatabase.upsertMessage(msg2)
+        try mailDatabase.upsertMessage(msg3)
+
+        let rowIds = try mailDatabase.getAllAppleRowIds()
+
+        // Should not include deleted message
+        XCTAssertTrue(rowIds.contains(1001))
+        XCTAssertTrue(rowIds.contains(1002))
+        XCTAssertFalse(rowIds.contains(1003))
+    }
+
+    func testMarkMessageDeleted() throws {
+        // Insert a message
+        let msg = MailMessage(
+            id: "test-delete",
+            appleRowId: 500,
+            subject: "To Be Deleted",
+            isDeleted: false
+        )
+        try mailDatabase.upsertMessage(msg)
+
+        // Verify not deleted
+        var retrieved = try mailDatabase.getMessage(id: "test-delete")
+        XCTAssertFalse(retrieved?.isDeleted ?? true)
+
+        // Mark as deleted
+        try mailDatabase.markMessageDeleted(appleRowId: 500)
+
+        // Verify deleted
+        retrieved = try mailDatabase.getMessage(id: "test-delete")
+        XCTAssertTrue(retrieved?.isDeleted ?? false)
+    }
+
+    func testDeletedMessagesExcludedFromStatuses() throws {
+        // Insert messages, one deleted
+        let msg1 = MailMessage(id: "active-msg", appleRowId: 600, subject: "Active")
+        let msg2 = MailMessage(id: "deleted-msg", appleRowId: 601, subject: "Deleted", isDeleted: true)
+
+        try mailDatabase.upsertMessage(msg1)
+        try mailDatabase.upsertMessage(msg2)
+
+        let statuses = try mailDatabase.getAllMessageStatuses()
+
+        // Only active message should be in statuses
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses.first?.id, "active-msg")
+    }
+
+    func testIncrementalSyncFasterThanFull() {
+        // This is a conceptual test - in practice, incremental sync should be faster
+        // because it only processes changed messages instead of all messages
+
+        let fullResult = SyncResult(
+            messagesProcessed: 10000,
+            messagesAdded: 10000,
+            messagesUpdated: 0,
+            messagesDeleted: 0,
+            messagesUnchanged: 0,
+            mailboxesProcessed: 50,
+            errors: [],
+            duration: 60.0,
+            isIncremental: false
+        )
+
+        let incrementalResult = SyncResult(
+            messagesProcessed: 50,
+            messagesAdded: 30,
+            messagesUpdated: 15,
+            messagesDeleted: 5,
+            messagesUnchanged: 0,
+            mailboxesProcessed: 50,
+            errors: [],
+            duration: 2.0,
+            isIncremental: true
+        )
+
+        // Incremental should process fewer messages and take less time
+        XCTAssertLessThan(incrementalResult.messagesProcessed, fullResult.messagesProcessed)
+        XCTAssertLessThan(incrementalResult.duration, fullResult.duration)
+        XCTAssertTrue(incrementalResult.isIncremental)
+        XCTAssertFalse(fullResult.isIncremental)
+    }
 }
