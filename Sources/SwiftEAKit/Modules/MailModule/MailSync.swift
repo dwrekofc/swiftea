@@ -324,32 +324,53 @@ public final class MailSync: @unchecked Sendable {
     }
 
     private func queryMessages(since: Date?) throws -> [MessageRow] {
-        // Query only core message columns that exist across Mail versions
+        // Query message columns with JOINs to resolve subject/sender foreign keys
+        // The messages.subject and messages.sender columns are FK integers, not text
         // Attachment detection is done during .emlx parsing instead
         var sql = """
-            SELECT ROWID, subject, sender, date_received, date_sent,
-                   message_id, mailbox, read, flagged
-            FROM messages
+            SELECT m.ROWID, s.subject, a.address AS sender_email, a.comment AS sender_name,
+                   m.date_received, m.date_sent, m.message_id, m.mailbox, m.read, m.flagged
+            FROM messages m
+            LEFT JOIN subjects s ON m.subject = s.ROWID
+            LEFT JOIN addresses a ON m.sender = a.ROWID
             """
 
         if let sinceDate = since {
             let timestamp = sinceDate.timeIntervalSince1970
-            sql += " WHERE date_received > \(timestamp)"
+            sql += " WHERE m.date_received > \(timestamp)"
         }
 
-        sql += " ORDER BY date_received DESC"
+        sql += " ORDER BY m.date_received DESC"
 
         let rows = try executeQuery(sql)
 
         return rows.compactMap { row -> MessageRow? in
             guard let rowId = row["ROWID"] as? Int64 else { return nil }
 
+            // Reconstruct sender string from email/name for downstream parsing
+            let senderEmail = row["sender_email"] as? String
+            let senderName = row["sender_name"] as? String
+            var sender: String? = nil
+            if let email = senderEmail {
+                if let name = senderName, !name.isEmpty {
+                    sender = "\"\(name)\" <\(email)>"
+                } else {
+                    sender = email
+                }
+            }
+
+            // Dates are stored as Int64 in SQLite, convert to Double for TimeInterval
+            let dateReceived: Double? = (row["date_received"] as? Int64).map { Double($0) }
+                ?? (row["date_received"] as? Double)
+            let dateSent: Double? = (row["date_sent"] as? Int64).map { Double($0) }
+                ?? (row["date_sent"] as? Double)
+
             return MessageRow(
                 rowId: rowId,
                 subject: row["subject"] as? String,
-                sender: row["sender"] as? String,
-                dateReceived: row["date_received"] as? Double,
-                dateSent: row["date_sent"] as? Double,
+                sender: sender,
+                dateReceived: dateReceived,
+                dateSent: dateSent,
                 messageId: row["message_id"] as? String,
                 mailboxId: row["mailbox"] as? Int64,
                 isRead: (row["read"] as? Int64 ?? 0) == 1,
