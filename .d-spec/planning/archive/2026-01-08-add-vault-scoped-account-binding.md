@@ -67,3 +67,8 @@ Out of scope (for first iteration):
 - How are conflicts handled when the same account is bound to multiple vaults (read-only allowed, but action side effects)?
 - Do we require vault-local DB state (e.g., libSQL file in-vault) or “export-only” mode for some vaults?
 - What is the canonical folder layout inside a vault (emails/events/contacts/derived summaries/attachments)?
+
+## Follow-ups (Beads)
+
+- swiftea-294.12: Route mail/calendar sync/export to the vault-local DB and vault layout
+- swiftea-294.13: Update docs/help text with vault usage examples
