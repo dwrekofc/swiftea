@@ -19,7 +19,8 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0")
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
+        .package(url: "https://github.com/tursodatabase/libsql-swift", from: "0.3.0")
     ],
     targets: [
         .executableTarget(
@@ -38,7 +39,9 @@ let package = Package(
         ),
         .target(
             name: "SwiftEAKit",
-            dependencies: []
+            dependencies: [
+                .product(name: "Libsql", package: "libsql-swift")
+            ]
         ),
         .testTarget(
             name: "SwiftEAKitTests",
