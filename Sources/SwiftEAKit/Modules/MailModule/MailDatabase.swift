@@ -337,6 +337,66 @@ public final class MailDatabase: @unchecked Sendable {
 
     // MARK: - Sync Status Operations
 
+    /// Sync status key constants
+    public enum SyncStatusKey {
+        public static let state = "sync_state"
+        public static let lastSyncTime = "last_sync_time"
+        public static let lastSyncStartTime = "last_sync_start_time"
+        public static let lastSyncEndTime = "last_sync_end_time"
+        public static let lastSyncError = "last_sync_error"
+        public static let lastSyncMessagesAdded = "last_sync_messages_added"
+        public static let lastSyncMessagesUpdated = "last_sync_messages_updated"
+        public static let lastSyncMessagesDeleted = "last_sync_messages_deleted"
+        public static let lastSyncDuration = "last_sync_duration"
+        public static let lastSyncIsIncremental = "last_sync_is_incremental"
+    }
+
+    /// Sync state values
+    public enum SyncState: String {
+        case idle = "idle"
+        case running = "running"
+        case success = "success"
+        case failed = "failed"
+    }
+
+    /// Summary of sync status for reporting
+    public struct SyncStatusSummary {
+        public let state: SyncState
+        public let lastSyncTime: Date?
+        public let lastSyncStartTime: Date?
+        public let lastSyncEndTime: Date?
+        public let lastSyncError: String?
+        public let messagesAdded: Int
+        public let messagesUpdated: Int
+        public let messagesDeleted: Int
+        public let duration: TimeInterval?
+        public let isIncremental: Bool?
+
+        public init(
+            state: SyncState,
+            lastSyncTime: Date? = nil,
+            lastSyncStartTime: Date? = nil,
+            lastSyncEndTime: Date? = nil,
+            lastSyncError: String? = nil,
+            messagesAdded: Int = 0,
+            messagesUpdated: Int = 0,
+            messagesDeleted: Int = 0,
+            duration: TimeInterval? = nil,
+            isIncremental: Bool? = nil
+        ) {
+            self.state = state
+            self.lastSyncTime = lastSyncTime
+            self.lastSyncStartTime = lastSyncStartTime
+            self.lastSyncEndTime = lastSyncEndTime
+            self.lastSyncError = lastSyncError
+            self.messagesAdded = messagesAdded
+            self.messagesUpdated = messagesUpdated
+            self.messagesDeleted = messagesDeleted
+            self.duration = duration
+            self.isIncremental = isIncremental
+        }
+    }
+
     /// Get a sync status value
     public func getSyncStatus(key: String) throws -> String? {
         guard let conn = connection else {
@@ -378,7 +438,87 @@ public final class MailDatabase: @unchecked Sendable {
 
     /// Set the last sync timestamp
     public func setLastSyncTime(_ date: Date) throws {
-        try setSyncStatus(key: "last_sync_time", value: String(date.timeIntervalSince1970))
+        try setSyncStatus(key: SyncStatusKey.lastSyncTime, value: String(date.timeIntervalSince1970))
+    }
+
+    /// Record that a sync operation has started
+    public func recordSyncStart(isIncremental: Bool) throws {
+        let now = Date()
+        try setSyncStatus(key: SyncStatusKey.state, value: SyncState.running.rawValue)
+        try setSyncStatus(key: SyncStatusKey.lastSyncStartTime, value: String(now.timeIntervalSince1970))
+        try setSyncStatus(key: SyncStatusKey.lastSyncIsIncremental, value: isIncremental ? "1" : "0")
+        // Clear previous error
+        try setSyncStatus(key: SyncStatusKey.lastSyncError, value: "")
+    }
+
+    /// Record successful sync completion
+    public func recordSyncSuccess(result: SyncResult) throws {
+        let now = Date()
+        try setSyncStatus(key: SyncStatusKey.state, value: SyncState.success.rawValue)
+        try setSyncStatus(key: SyncStatusKey.lastSyncEndTime, value: String(now.timeIntervalSince1970))
+        try setSyncStatus(key: SyncStatusKey.lastSyncTime, value: String(now.timeIntervalSince1970))
+        try setSyncStatus(key: SyncStatusKey.lastSyncMessagesAdded, value: String(result.messagesAdded))
+        try setSyncStatus(key: SyncStatusKey.lastSyncMessagesUpdated, value: String(result.messagesUpdated))
+        try setSyncStatus(key: SyncStatusKey.lastSyncMessagesDeleted, value: String(result.messagesDeleted))
+        try setSyncStatus(key: SyncStatusKey.lastSyncDuration, value: String(result.duration))
+        try setSyncStatus(key: SyncStatusKey.lastSyncError, value: "")
+    }
+
+    /// Record sync failure
+    public func recordSyncFailure(error: Error) throws {
+        let now = Date()
+        try setSyncStatus(key: SyncStatusKey.state, value: SyncState.failed.rawValue)
+        try setSyncStatus(key: SyncStatusKey.lastSyncEndTime, value: String(now.timeIntervalSince1970))
+        try setSyncStatus(key: SyncStatusKey.lastSyncError, value: error.localizedDescription)
+    }
+
+    /// Get a summary of the current sync status
+    public func getSyncStatusSummary() throws -> SyncStatusSummary {
+        let stateStr = try getSyncStatus(key: SyncStatusKey.state)
+        let state = stateStr.flatMap { SyncState(rawValue: $0) } ?? .idle
+
+        let lastSyncTime = try getSyncStatus(key: SyncStatusKey.lastSyncTime)
+            .flatMap { Double($0) }
+            .map { Date(timeIntervalSince1970: $0) }
+
+        let lastSyncStartTime = try getSyncStatus(key: SyncStatusKey.lastSyncStartTime)
+            .flatMap { Double($0) }
+            .map { Date(timeIntervalSince1970: $0) }
+
+        let lastSyncEndTime = try getSyncStatus(key: SyncStatusKey.lastSyncEndTime)
+            .flatMap { Double($0) }
+            .map { Date(timeIntervalSince1970: $0) }
+
+        let lastSyncError = try getSyncStatus(key: SyncStatusKey.lastSyncError)
+            .flatMap { $0.isEmpty ? nil : $0 }
+
+        let messagesAdded = try getSyncStatus(key: SyncStatusKey.lastSyncMessagesAdded)
+            .flatMap { Int($0) } ?? 0
+
+        let messagesUpdated = try getSyncStatus(key: SyncStatusKey.lastSyncMessagesUpdated)
+            .flatMap { Int($0) } ?? 0
+
+        let messagesDeleted = try getSyncStatus(key: SyncStatusKey.lastSyncMessagesDeleted)
+            .flatMap { Int($0) } ?? 0
+
+        let duration = try getSyncStatus(key: SyncStatusKey.lastSyncDuration)
+            .flatMap { Double($0) }
+
+        let isIncremental = try getSyncStatus(key: SyncStatusKey.lastSyncIsIncremental)
+            .map { $0 == "1" }
+
+        return SyncStatusSummary(
+            state: state,
+            lastSyncTime: lastSyncTime,
+            lastSyncStartTime: lastSyncStartTime,
+            lastSyncEndTime: lastSyncEndTime,
+            lastSyncError: lastSyncError,
+            messagesAdded: messagesAdded,
+            messagesUpdated: messagesUpdated,
+            messagesDeleted: messagesDeleted,
+            duration: duration,
+            isIncremental: isIncremental
+        )
     }
 
     // MARK: - Mailbox Operations

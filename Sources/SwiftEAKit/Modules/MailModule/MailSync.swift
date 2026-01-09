@@ -124,6 +124,40 @@ public final class MailSync: @unchecked Sendable {
         var messagesUnchanged = 0
         var mailboxesProcessed = 0
 
+        // Record sync start
+        try mailDatabase.recordSyncStart(isIncremental: incremental)
+
+        do {
+            return try performSync(
+                incremental: incremental,
+                startTime: startTime,
+                errors: &errors,
+                messagesProcessed: &messagesProcessed,
+                messagesAdded: &messagesAdded,
+                messagesUpdated: &messagesUpdated,
+                messagesDeleted: &messagesDeleted,
+                messagesUnchanged: &messagesUnchanged,
+                mailboxesProcessed: &mailboxesProcessed
+            )
+        } catch {
+            // Record sync failure
+            try? mailDatabase.recordSyncFailure(error: error)
+            throw error
+        }
+    }
+
+    /// Internal sync implementation
+    private func performSync(
+        incremental: Bool,
+        startTime: Date,
+        errors: inout [String],
+        messagesProcessed: inout Int,
+        messagesAdded: inout Int,
+        messagesUpdated: inout Int,
+        messagesDeleted: inout Int,
+        messagesUnchanged: inout Int,
+        mailboxesProcessed: inout Int
+    ) throws -> SyncResult {
         // Discover envelope index
         reportProgress(.discovering, 0, 1, "Discovering Apple Mail database...")
         let info = try discovery.discover()
@@ -182,12 +216,9 @@ public final class MailSync: @unchecked Sendable {
             }
         }
 
-        // Update last sync time
-        try mailDatabase.setLastSyncTime(Date())
-
         reportProgress(.complete, messagesProcessed, messagesProcessed, "Sync complete")
 
-        return SyncResult(
+        let result = SyncResult(
             messagesProcessed: messagesProcessed,
             messagesAdded: messagesAdded,
             messagesUpdated: messagesUpdated,
@@ -198,6 +229,11 @@ public final class MailSync: @unchecked Sendable {
             duration: Date().timeIntervalSince(startTime),
             isIncremental: incremental
         )
+
+        // Record successful sync completion with all stats
+        try mailDatabase.recordSyncSuccess(result: result)
+
+        return result
     }
 
     // MARK: - Incremental Sync

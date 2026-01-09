@@ -276,6 +276,109 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertNil(retrieved)
     }
 
+    // MARK: - Sync Status Tracking
+
+    func testRecordSyncStart() throws {
+        try database.initialize()
+
+        try database.recordSyncStart(isIncremental: true)
+
+        let summary = try database.getSyncStatusSummary()
+        XCTAssertEqual(summary.state, .running)
+        XCTAssertNotNil(summary.lastSyncStartTime)
+        XCTAssertEqual(summary.isIncremental, true)
+        XCTAssertNil(summary.lastSyncError)
+    }
+
+    func testRecordSyncSuccess() throws {
+        try database.initialize()
+
+        try database.recordSyncStart(isIncremental: false)
+
+        let result = SyncResult(
+            messagesProcessed: 100,
+            messagesAdded: 50,
+            messagesUpdated: 30,
+            messagesDeleted: 5,
+            messagesUnchanged: 15,
+            mailboxesProcessed: 10,
+            errors: [],
+            duration: 5.5,
+            isIncremental: false
+        )
+
+        try database.recordSyncSuccess(result: result)
+
+        let summary = try database.getSyncStatusSummary()
+        XCTAssertEqual(summary.state, .success)
+        XCTAssertNotNil(summary.lastSyncTime)
+        XCTAssertNotNil(summary.lastSyncEndTime)
+        XCTAssertEqual(summary.messagesAdded, 50)
+        XCTAssertEqual(summary.messagesUpdated, 30)
+        XCTAssertEqual(summary.messagesDeleted, 5)
+        XCTAssertNotNil(summary.duration)
+        XCTAssertEqual(summary.duration!, 5.5, accuracy: 0.01)
+        XCTAssertNil(summary.lastSyncError)
+    }
+
+    func testRecordSyncFailure() throws {
+        try database.initialize()
+
+        try database.recordSyncStart(isIncremental: true)
+
+        let error = NSError(domain: "MailSync", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Test sync failure"
+        ])
+        try database.recordSyncFailure(error: error)
+
+        let summary = try database.getSyncStatusSummary()
+        XCTAssertEqual(summary.state, .failed)
+        XCTAssertNotNil(summary.lastSyncEndTime)
+        XCTAssertNotNil(summary.lastSyncError)
+        XCTAssertTrue(summary.lastSyncError?.contains("Test sync failure") ?? false)
+    }
+
+    func testGetSyncStatusSummaryWhenNoSync() throws {
+        try database.initialize()
+
+        let summary = try database.getSyncStatusSummary()
+        XCTAssertEqual(summary.state, .idle)
+        XCTAssertNil(summary.lastSyncTime)
+        XCTAssertNil(summary.lastSyncStartTime)
+        XCTAssertNil(summary.lastSyncEndTime)
+        XCTAssertNil(summary.lastSyncError)
+        XCTAssertEqual(summary.messagesAdded, 0)
+        XCTAssertEqual(summary.messagesUpdated, 0)
+        XCTAssertEqual(summary.messagesDeleted, 0)
+    }
+
+    func testSyncStatusClearsErrorOnSuccess() throws {
+        try database.initialize()
+
+        // First, record a failure
+        try database.recordSyncStart(isIncremental: true)
+        let error = NSError(domain: "MailSync", code: 1, userInfo: [
+            NSLocalizedDescriptionKey: "Previous failure"
+        ])
+        try database.recordSyncFailure(error: error)
+
+        // Then record success
+        try database.recordSyncStart(isIncremental: false)
+        let result = SyncResult(
+            messagesProcessed: 10,
+            messagesAdded: 10,
+            messagesUpdated: 0,
+            mailboxesProcessed: 1,
+            errors: [],
+            duration: 1.0
+        )
+        try database.recordSyncSuccess(result: result)
+
+        let summary = try database.getSyncStatusSummary()
+        XCTAssertEqual(summary.state, .success)
+        XCTAssertNil(summary.lastSyncError)
+    }
+
     // MARK: - Mailbox Operations
 
     func testUpsertAndGetMailboxes() throws {
