@@ -33,8 +33,14 @@ struct MailSyncCommand: ParsableCommand {
         abstract: "Sync mail data from Apple Mail"
     )
 
-    @Flag(name: .long, help: "Watch for changes (not yet implemented)")
+    @Flag(name: .long, help: "Install and start watch daemon for continuous sync")
     var watch: Bool = false
+
+    @Flag(name: .long, help: "Stop the watch daemon")
+    var stop: Bool = false
+
+    @Flag(name: .long, help: "Show sync status and watch daemon state")
+    var status: Bool = false
 
     @Flag(name: .long, help: "Only sync messages changed since last sync")
     var incremental: Bool = false
@@ -49,9 +55,28 @@ struct MailSyncCommand: ParsableCommand {
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
+        defer { mailDatabase.close() }
 
         if verbose {
             print("Mail database: \(mailDbPath)")
+        }
+
+        // Handle --status flag
+        if status {
+            try showSyncStatus(mailDatabase: mailDatabase, vault: vault)
+            return
+        }
+
+        // Handle --watch flag
+        if watch {
+            try installWatchDaemon(vault: vault, verbose: verbose)
+            return
+        }
+
+        // Handle --stop flag
+        if stop {
+            try stopWatchDaemon(verbose: verbose)
+            return
         }
 
         // Create sync engine
@@ -82,10 +107,247 @@ struct MailSyncCommand: ParsableCommand {
             print("Sync failed: \(error.localizedDescription)")
             throw ExitCode.failure
         }
+    }
 
-        if watch {
-            print("\nWatch mode not yet implemented")
+    // MARK: - Status
+
+    private func showSyncStatus(mailDatabase: MailDatabase, vault: VaultContext) throws {
+        let summary = try mailDatabase.getSyncStatusSummary()
+        let daemonStatus = getDaemonStatus()
+
+        print("Mail Sync Status")
+        print("================")
+        print("")
+
+        // Daemon status
+        print("Watch Daemon: \(daemonStatus.isRunning ? "running" : "stopped")")
+        if let pid = daemonStatus.pid {
+            print("  PID: \(pid)")
         }
+        print("")
+
+        // Sync state
+        print("Last Sync:")
+        print("  State: \(summary.state.rawValue)")
+
+        if let lastSync = summary.lastSyncTime {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .medium
+            print("  Time: \(formatter.string(from: lastSync))")
+        } else {
+            print("  Time: Never")
+        }
+
+        if let duration = summary.duration {
+            print("  Duration: \(String(format: "%.2f", duration))s")
+        }
+
+        if let isIncremental = summary.isIncremental {
+            print("  Type: \(isIncremental ? "incremental" : "full")")
+        }
+
+        // Message counts
+        if summary.messagesAdded > 0 || summary.messagesUpdated > 0 || summary.messagesDeleted > 0 {
+            print("  Messages: +\(summary.messagesAdded) ~\(summary.messagesUpdated) -\(summary.messagesDeleted)")
+        }
+
+        // Error if any
+        if let error = summary.lastSyncError {
+            print("")
+            print("Last Error: \(error)")
+        }
+
+        // Database location
+        print("")
+        print("Database: \(vault.dataFolderPath)/mail.db")
+    }
+
+    private struct DaemonStatus {
+        let isRunning: Bool
+        let pid: Int?
+    }
+
+    private func getDaemonStatus() -> DaemonStatus {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["list", "com.swiftea.mail.sync"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            if process.terminationStatus == 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let output = String(data: data, encoding: .utf8) {
+                    // Parse PID from launchctl output (format: "PID\tStatus\tLabel")
+                    let components = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\t")
+                    if components.count >= 1, let pid = Int(components[0]), pid > 0 {
+                        return DaemonStatus(isRunning: true, pid: pid)
+                    }
+                    // Job exists but not running (PID is "-")
+                    return DaemonStatus(isRunning: false, pid: nil)
+                }
+            }
+        } catch {
+            // launchctl failed, daemon not loaded
+        }
+
+        return DaemonStatus(isRunning: false, pid: nil)
+    }
+
+    // MARK: - Watch Daemon
+
+    private static let launchAgentLabel = "com.swiftea.mail.sync"
+    private static let syncIntervalSeconds = 300 // 5 minutes
+
+    private func getLaunchAgentPath() -> String {
+        let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(homeDir)/Library/LaunchAgents/\(Self.launchAgentLabel).plist"
+    }
+
+    private func installWatchDaemon(vault: VaultContext, verbose: Bool) throws {
+        let launchAgentPath = getLaunchAgentPath()
+        let executablePath = ProcessInfo.processInfo.arguments[0]
+
+        // Resolve to absolute path if needed
+        let absoluteExecutablePath: String
+        if executablePath.hasPrefix("/") {
+            absoluteExecutablePath = executablePath
+        } else {
+            let currentDir = FileManager.default.currentDirectoryPath
+            absoluteExecutablePath = (currentDir as NSString).appendingPathComponent(executablePath)
+        }
+
+        // Create LaunchAgents directory if needed
+        let launchAgentsDir = (getLaunchAgentPath() as NSString).deletingLastPathComponent
+        if !FileManager.default.fileExists(atPath: launchAgentsDir) {
+            try FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
+        }
+
+        // Create log directory
+        let logDir = "\(vault.dataFolderPath)/logs"
+        if !FileManager.default.fileExists(atPath: logDir) {
+            try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        }
+
+        // Generate plist content
+        let plist = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>\(Self.launchAgentLabel)</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>\(absoluteExecutablePath)</string>
+                    <string>mail</string>
+                    <string>sync</string>
+                    <string>--incremental</string>
+                </array>
+                <key>StartInterval</key>
+                <integer>\(Self.syncIntervalSeconds)</integer>
+                <key>RunAtLoad</key>
+                <true/>
+                <key>StandardOutPath</key>
+                <string>\(logDir)/mail-sync.log</string>
+                <key>StandardErrorPath</key>
+                <string>\(logDir)/mail-sync.log</string>
+                <key>WorkingDirectory</key>
+                <string>\(vault.rootPath)</string>
+                <key>EnvironmentVariables</key>
+                <dict>
+                    <key>PATH</key>
+                    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+                </dict>
+            </dict>
+            </plist>
+            """
+
+        // Write plist file
+        try plist.write(toFile: launchAgentPath, atomically: true, encoding: .utf8)
+
+        if verbose {
+            print("Created LaunchAgent: \(launchAgentPath)")
+        }
+
+        // Unload if already loaded (ignore errors)
+        let unloadProcess = Process()
+        unloadProcess.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        unloadProcess.arguments = ["unload", launchAgentPath]
+        unloadProcess.standardOutput = FileHandle.nullDevice
+        unloadProcess.standardError = FileHandle.nullDevice
+        try? unloadProcess.run()
+        unloadProcess.waitUntilExit()
+
+        // Load the LaunchAgent
+        let loadProcess = Process()
+        loadProcess.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        loadProcess.arguments = ["load", launchAgentPath]
+
+        let errorPipe = Pipe()
+        loadProcess.standardError = errorPipe
+
+        try loadProcess.run()
+        loadProcess.waitUntilExit()
+
+        if loadProcess.terminationStatus != 0 {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            print("Failed to load LaunchAgent: \(errorOutput)")
+            throw ExitCode.failure
+        }
+
+        print("Watch daemon installed and started")
+        print("  Syncing every \(Self.syncIntervalSeconds / 60) minutes")
+        print("  Logs: \(logDir)/mail-sync.log")
+        print("")
+        print("Use 'swiftea mail sync --status' to check status")
+        print("Use 'swiftea mail sync --stop' to stop the daemon")
+    }
+
+    private func stopWatchDaemon(verbose: Bool) throws {
+        let launchAgentPath = getLaunchAgentPath()
+
+        // Check if plist exists
+        guard FileManager.default.fileExists(atPath: launchAgentPath) else {
+            print("Watch daemon is not installed")
+            return
+        }
+
+        // Unload the LaunchAgent
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["unload", launchAgentPath]
+
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            // Check if it was already unloaded
+            if !errorOutput.contains("Could not find specified service") {
+                print("Warning: \(errorOutput.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+
+        // Remove the plist file
+        try? FileManager.default.removeItem(atPath: launchAgentPath)
+
+        if verbose {
+            print("Removed LaunchAgent: \(launchAgentPath)")
+        }
+
+        print("Watch daemon stopped and uninstalled")
     }
 }
 
