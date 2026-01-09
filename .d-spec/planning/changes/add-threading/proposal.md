@@ -1,4 +1,17 @@
+---
+title: Add Email Threading Support
+goals:
+  - SG-2  # Cross-Module Intelligence
+status: approved
+beads: swiftea-az6
+---
+
 # Change: Add Email Threading Support
+
+## Goal Alignment
+
+This change advances:
+- **SG-2 (Cross-Module Intelligence)**: Threading connects related emails into conversations, enabling search and linking across conversation context
 
 ## Why
 Currently, emails are viewed as individual items without conversation context. Users need to see email conversations as threaded discussions to understand context, follow discussions, and make better decisions. Email threading is essential for effective email triage and ClaudEA workflows.

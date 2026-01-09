@@ -1,4 +1,13 @@
+---
+type: master-plan
+status: approved
+upstream_context: claudea-swiftea-ecosystem-master-plan.md
+last_updated: 2026-01-09
+---
+
 # SwiftEA - Architecture & Design Document
+
+> **Upstream Context**: This CLI toolkit serves the [ClaudEA ecosystem](./claudea-swiftea-ecosystem-master-plan.md), providing programmatic access to macOS PIM data for AI-powered executive assistant workflows.
 
 ## Executive Summary
 
@@ -13,14 +22,31 @@
 ### Primary Vision
 Transform fragmented macOS data sources (Mail, Calendar, Contacts) into a unified, searchable, AI-accessible knowledge base that enables ClaudEA to function as a true executive assistant.
 
-### Strategic Goals
+### Strategic Goals (Traceable)
 
-1. **Unified Knowledge Access**: Single interface to query across all personal data types
-2. **Cross-Module Intelligence**: Link and search across emails, events, contacts, tasks, and notes
-3. **ClaudEA Integration**: Provide the foundation for AI-powered workflows
-4. **Data Liberation**: Export all data to open formats (markdown, JSON)
-5. **Custom Intelligence Layer**: Add AI insights and metadata across all data types
-6. **Future-Proof Architecture**: Modular design that scales as new data sources are added
+These goals drive all SwiftEA development. Every change proposal must reference at least one.
+
+#### Core Goals
+
+##### SG-1: Unified PIM Access
+Provide programmatic CLI access to all macOS PIM data (Mail, Calendar, Contacts, Reminders, Notes) through a single tool.
+
+##### SG-2: Cross-Module Intelligence
+Enable search, linking, and queries across all data types. Build the unified knowledge graph foundation.
+
+##### SG-3: Data Liberation
+Export all data to open formats (markdown, JSON) for use by ClaudEA, Obsidian, or any downstream tool.
+
+#### Supporting Goals
+
+##### SG-4: ClaudEA-Ready Output
+Ensure all commands produce JSON output parseable by AI agents. Enable ClaudEA automation workflows.
+
+##### SG-5: Local-First Architecture
+All data stored locally. No cloud dependencies. Privacy-preserving by design.
+
+##### SG-6: Modular Extensibility
+Maintain clean module boundaries. New data sources can be added without disrupting existing functionality.
 
 ### Non-Goals (Out of Scope)
 

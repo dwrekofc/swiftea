@@ -1,4 +1,19 @@
+---
+title: Add Mail Actions via AppleScript
+goals:
+  - SG-4  # ClaudEA-Ready Output
+  - SG-6  # Modular Extensibility
+status: approved
+beads: swiftea-01t
+---
+
 # Change: Add Mail Actions via AppleScript
+
+## Goal Alignment
+
+This change advances:
+- **SG-4 (ClaudEA-Ready Output)**: Enables ClaudEA agent to take actions on email (archive, delete, move, flag) autonomously via scriptable commands
+- **SG-6 (Modular Extensibility)**: Scriptable actions that can be composed into automated workflows, maintaining clean module boundaries
 
 ## Why
 Reading and exporting mail is not enough for day-to-day workflows. SwiftEA needs safe, scriptable “write” operations (archive, delete, move, flag, reply, send) to enable executive-assistant routines and ClaudEA-driven automation.
