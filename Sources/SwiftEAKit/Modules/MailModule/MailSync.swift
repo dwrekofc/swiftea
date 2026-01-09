@@ -262,8 +262,9 @@ public final class MailSync: @unchecked Sendable {
 
     private func syncMailboxes() throws -> Int {
         // Query mailboxes from Apple Mail database
+        // Only select ROWID and url which are guaranteed to exist across Mail versions
         let sql = """
-            SELECT ROWID, url, account, total_count, unread_count
+            SELECT ROWID, url
             FROM mailboxes
             WHERE url IS NOT NULL
             """
@@ -277,20 +278,18 @@ public final class MailSync: @unchecked Sendable {
                 continue
             }
 
-            let accountId = row["account"] as? String ?? ""
-
             // Extract mailbox name from URL
             let name = extractMailboxName(from: url)
             let fullPath = url
 
             let mailbox = Mailbox(
                 id: Int(rowId),
-                accountId: accountId,
+                accountId: "",
                 name: name,
                 fullPath: fullPath,
                 parentId: nil,
-                messageCount: (row["total_count"] as? Int64).map { Int($0) } ?? 0,
-                unreadCount: (row["unread_count"] as? Int64).map { Int($0) } ?? 0
+                messageCount: 0,
+                unreadCount: 0
             )
 
             try mailDatabase.upsertMailbox(mailbox)
@@ -325,19 +324,20 @@ public final class MailSync: @unchecked Sendable {
     }
 
     private func queryMessages(since: Date?) throws -> [MessageRow] {
+        // Query only core message columns that exist across Mail versions
+        // Attachment detection is done during .emlx parsing instead
         var sql = """
-            SELECT m.ROWID, m.subject, m.sender, m.date_received, m.date_sent,
-                   m.message_id, m.mailbox, m.read, m.flagged,
-                   (SELECT COUNT(*) FROM attachments a WHERE a.message_id = m.ROWID) as attachment_count
-            FROM messages m
+            SELECT ROWID, subject, sender, date_received, date_sent,
+                   message_id, mailbox, read, flagged
+            FROM messages
             """
 
         if let sinceDate = since {
             let timestamp = sinceDate.timeIntervalSince1970
-            sql += " WHERE m.date_received > \(timestamp)"
+            sql += " WHERE date_received > \(timestamp)"
         }
 
-        sql += " ORDER BY m.date_received DESC"
+        sql += " ORDER BY date_received DESC"
 
         let rows = try executeQuery(sql)
 
@@ -354,7 +354,7 @@ public final class MailSync: @unchecked Sendable {
                 mailboxId: row["mailbox"] as? Int64,
                 isRead: (row["read"] as? Int64 ?? 0) == 1,
                 isFlagged: (row["flagged"] as? Int64 ?? 0) == 1,
-                hasAttachments: (row["attachment_count"] as? Int64 ?? 0) > 0
+                hasAttachments: false  // Detected during .emlx parsing
             )
         }
     }

@@ -174,13 +174,13 @@ public final class MailDatabase: @unchecked Sendable {
             _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_mailboxes_account_id ON mailboxes(account_id)")
 
             // Create FTS5 virtual table for full-text search
+            // Note: Using external content table (content='messages') means FTS reads from messages table
             _ = try conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                     subject,
                     sender_name,
                     sender_email,
                     body_text,
-                    attachment_names,
                     content='messages',
                     content_rowid='rowid',
                     tokenize='porter unicode61'
