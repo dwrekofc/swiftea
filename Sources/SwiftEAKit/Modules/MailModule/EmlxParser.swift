@@ -247,9 +247,13 @@ public final class EmlxParser: @unchecked Sendable {
         var currentValue: String = ""
         var bodyStartIndex: String.Index? = nil
 
-        let lines = message.components(separatedBy: "\r\n").isEmpty
-            ? message.components(separatedBy: "\n")
-            : message.components(separatedBy: "\r\n")
+        // Detect line ending style: if \r\n exists, use it; otherwise use \n
+        let lines: [String]
+        if message.contains("\r\n") {
+            lines = message.components(separatedBy: "\r\n")
+        } else {
+            lines = message.components(separatedBy: "\n")
+        }
 
         var index = 0
         for line in lines {
@@ -527,11 +531,14 @@ public final class EmlxParser: @unchecked Sendable {
                 let parts = body.components(separatedBy: "--\(boundary)")
 
                 for part in parts {
-                    if part.hasPrefix("--") || part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // Skip closing boundary and empty parts
+                    let trimmedPart = part.trimmingCharacters(in: .newlines)
+                    if trimmedPart.hasPrefix("--") || trimmedPart.isEmpty {
                         continue
                     }
 
-                    let (partHeaders, partBody) = parseRfc822(part)
+                    // Parse part (trim leading newlines that follow the boundary)
+                    let (partHeaders, partBody) = parseRfc822(trimmedPart)
                     let partContentType = partHeaders["content-type"]?.lowercased() ?? ""
 
                     if partContentType.contains("text/plain") {

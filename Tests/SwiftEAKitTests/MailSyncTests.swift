@@ -319,9 +319,9 @@ final class MailSyncTests: XCTestCase {
         let parser = EmlxParser()
         let idGenerator = StableIdGenerator()
 
-        // Create test file
+        // Create test file (byte count 241 = length of RFC822 message portion)
         let emlxContent = """
-358
+241
 Message-ID: <test123@example.com>
 From: John Doe <john@example.com>
 To: Jane Smith <jane@example.com>
