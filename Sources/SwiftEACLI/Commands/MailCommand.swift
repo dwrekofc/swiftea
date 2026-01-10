@@ -20,7 +20,15 @@ public struct Mail: ParsableCommand {
             MailSyncCommand.self,
             MailSearchCommand.self,
             MailShowCommand.self,
-            MailExportCommand.self
+            MailExportCommand.self,
+            // Action commands
+            MailArchiveCommand.self,
+            MailDeleteCommand.self,
+            MailMoveCommand.self,
+            MailFlagCommand.self,
+            MailMarkCommand.self,
+            MailReplyCommand.self,
+            MailComposeCommand.self
         ]
     )
 
@@ -645,54 +653,25 @@ struct MailExportCommand: ParsableCommand {
     }
 
     private func generateFilename(for message: MailMessage, format: String) -> String {
-        // Format: YYYY-MM-DD-subject-slug.ext
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let datePrefix = message.dateSent.map { dateFormatter.string(from: $0) } ?? "unknown-date"
-
-        let slug = slugify(message.subject)
+        // Flat filename using message ID for uniqueness and idempotent overwrites
         let ext = format.lowercased() == "json" ? "json" : "md"
-
-        // Include message ID prefix to ensure uniqueness
-        let shortId = String(message.id.prefix(8))
-        return "\(datePrefix)-\(shortId)-\(slug).\(ext)"
-    }
-
-    private func slugify(_ text: String) -> String {
-        var slug = text.lowercased()
-        // Replace non-alphanumeric with hyphens
-        slug = slug.replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
-        // Remove leading/trailing hyphens
-        slug = slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        // Limit length
-        if slug.count > 50 {
-            slug = String(slug.prefix(50))
-            // Don't end with hyphen
-            slug = slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        }
-        return slug.isEmpty ? "untitled" : slug
+        return "\(message.id).\(ext)"
     }
 
     private func formatAsMarkdown(_ message: MailMessage) -> String {
         var lines: [String] = []
 
-        // YAML frontmatter
+        // Minimal YAML frontmatter: id, subject, from, date, aliases
         lines.append("---")
+        lines.append("id: \"\(message.id)\"")
         lines.append("subject: \"\(escapeYaml(message.subject))\"")
         lines.append("from: \"\(escapeYaml(formatSender(message)))\"")
         if let date = message.dateSent {
             lines.append("date: \(date.iso8601String)")
         }
-        if let messageId = message.messageId {
-            lines.append("message_id: \"\(escapeYaml(messageId))\"")
-        }
-        if let mailbox = message.mailboxName {
-            lines.append("mailbox: \"\(escapeYaml(mailbox))\"")
-        }
-        lines.append("is_read: \(message.isRead)")
-        lines.append("is_flagged: \(message.isFlagged)")
-        lines.append("has_attachments: \(message.hasAttachments)")
-        lines.append("swiftea_id: \"\(message.id)\"")
+        // aliases: use subject as an alias for linking by topic
+        lines.append("aliases:")
+        lines.append("  - \"\(escapeYaml(message.subject))\"")
         lines.append("---")
         lines.append("")
 
@@ -767,5 +746,444 @@ struct MailExportCommand: ParsableCommand {
         result = result.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         result = result.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Mail Action Commands
+
+/// Error thrown when action validation fails
+enum MailActionError: Error, LocalizedError {
+    case messageNotFound(String)
+    case mailboxRequired
+    case confirmationRequired(action: String)
+    case invalidFlagOperation
+    case invalidMarkOperation
+
+    var errorDescription: String? {
+        switch self {
+        case .messageNotFound(let id):
+            return "Message not found: \(id)"
+        case .mailboxRequired:
+            return "Target mailbox is required. Use --mailbox to specify destination."
+        case .confirmationRequired(let action):
+            return "Destructive action '\(action)' requires --yes to confirm or --dry-run to preview."
+        case .invalidFlagOperation:
+            return "Specify either --set or --clear for flag operation."
+        case .invalidMarkOperation:
+            return "Specify either --read or --unread for mark operation."
+        }
+    }
+}
+
+struct MailArchiveCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "archive",
+        abstract: "Archive a mail message",
+        discussion: """
+            Moves the specified message to the Archive mailbox in Mail.app.
+
+            DESTRUCTIVE ACTION: This command modifies your mailbox.
+            Use --dry-run to preview the action without making changes.
+            Use --yes to confirm the action.
+            """
+    )
+
+    @Option(name: .long, help: "Message ID to archive (required)")
+    var id: String
+
+    @Flag(name: .long, help: "Confirm the destructive action")
+    var yes: Bool = false
+
+    @Flag(name: .long, help: "Preview the action without making changes")
+    var dryRun: Bool = false
+
+    func validate() throws {
+        // Validate that either --yes or --dry-run is provided
+        if !yes && !dryRun {
+            throw MailActionError.confirmationRequired(action: "archive")
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database to validate message exists
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        guard let message = try mailDatabase.getMessage(id: id) else {
+            throw MailActionError.messageNotFound(id)
+        }
+
+        if dryRun {
+            print("[DRY RUN] Would archive message:")
+            print("  ID: \(message.id)")
+            print("  Subject: \(message.subject)")
+            print("  From: \(message.senderEmail ?? "Unknown")")
+            print("  Current mailbox: \(message.mailboxName ?? "Unknown")")
+            return
+        }
+
+        // TODO: Implement AppleScript execution (swiftea-01t.2)
+        print("Archiving message: \(message.id)")
+        print("  Subject: \(message.subject)")
+        print("Action: Archive via AppleScript (not yet implemented)")
+    }
+}
+
+struct MailDeleteCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete a mail message",
+        discussion: """
+            Moves the specified message to the Trash mailbox in Mail.app.
+
+            DESTRUCTIVE ACTION: This command modifies your mailbox.
+            Use --dry-run to preview the action without making changes.
+            Use --yes to confirm the action.
+            """
+    )
+
+    @Option(name: .long, help: "Message ID to delete (required)")
+    var id: String
+
+    @Flag(name: .long, help: "Confirm the destructive action")
+    var yes: Bool = false
+
+    @Flag(name: .long, help: "Preview the action without making changes")
+    var dryRun: Bool = false
+
+    func validate() throws {
+        // Validate that either --yes or --dry-run is provided
+        if !yes && !dryRun {
+            throw MailActionError.confirmationRequired(action: "delete")
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database to validate message exists
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        guard let message = try mailDatabase.getMessage(id: id) else {
+            throw MailActionError.messageNotFound(id)
+        }
+
+        if dryRun {
+            print("[DRY RUN] Would delete message:")
+            print("  ID: \(message.id)")
+            print("  Subject: \(message.subject)")
+            print("  From: \(message.senderEmail ?? "Unknown")")
+            print("  Current mailbox: \(message.mailboxName ?? "Unknown")")
+            return
+        }
+
+        // TODO: Implement AppleScript execution (swiftea-01t.2)
+        print("Deleting message: \(message.id)")
+        print("  Subject: \(message.subject)")
+        print("Action: Delete via AppleScript (not yet implemented)")
+    }
+}
+
+struct MailMoveCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "move",
+        abstract: "Move a mail message to a different mailbox",
+        discussion: """
+            Moves the specified message to the target mailbox in Mail.app.
+
+            DESTRUCTIVE ACTION: This command modifies your mailbox.
+            Use --dry-run to preview the action without making changes.
+            Use --yes to confirm the action.
+            """
+    )
+
+    @Option(name: .long, help: "Message ID to move (required)")
+    var id: String
+
+    @Option(name: .long, help: "Target mailbox name (required)")
+    var mailbox: String?
+
+    @Flag(name: .long, help: "Confirm the destructive action")
+    var yes: Bool = false
+
+    @Flag(name: .long, help: "Preview the action without making changes")
+    var dryRun: Bool = false
+
+    func validate() throws {
+        // Validate mailbox is provided
+        guard mailbox != nil else {
+            throw MailActionError.mailboxRequired
+        }
+
+        // Validate that either --yes or --dry-run is provided
+        if !yes && !dryRun {
+            throw MailActionError.confirmationRequired(action: "move")
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database to validate message exists
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        guard let message = try mailDatabase.getMessage(id: id) else {
+            throw MailActionError.messageNotFound(id)
+        }
+
+        let targetMailbox = mailbox!
+
+        if dryRun {
+            print("[DRY RUN] Would move message:")
+            print("  ID: \(message.id)")
+            print("  Subject: \(message.subject)")
+            print("  From: \(message.senderEmail ?? "Unknown")")
+            print("  Current mailbox: \(message.mailboxName ?? "Unknown")")
+            print("  Target mailbox: \(targetMailbox)")
+            return
+        }
+
+        // TODO: Implement AppleScript execution (swiftea-01t.2)
+        print("Moving message: \(message.id)")
+        print("  Subject: \(message.subject)")
+        print("  To mailbox: \(targetMailbox)")
+        print("Action: Move via AppleScript (not yet implemented)")
+    }
+}
+
+struct MailFlagCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "flag",
+        abstract: "Set or clear the flag on a mail message",
+        discussion: """
+            Sets or clears the flag (star) on the specified message in Mail.app.
+
+            Use --set to flag the message.
+            Use --clear to remove the flag.
+            """
+    )
+
+    @Option(name: .long, help: "Message ID to flag/unflag (required)")
+    var id: String
+
+    @Flag(name: .long, help: "Set the flag on the message")
+    var set: Bool = false
+
+    @Flag(name: .long, help: "Clear the flag from the message")
+    var clear: Bool = false
+
+    func validate() throws {
+        // Exactly one of --set or --clear must be provided
+        if set == clear {
+            throw MailActionError.invalidFlagOperation
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database to validate message exists
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        guard let message = try mailDatabase.getMessage(id: id) else {
+            throw MailActionError.messageNotFound(id)
+        }
+
+        let action = set ? "Setting flag on" : "Clearing flag from"
+        print("\(action) message: \(message.id)")
+        print("  Subject: \(message.subject)")
+        print("  Current flag status: \(message.isFlagged ? "flagged" : "not flagged")")
+
+        // TODO: Implement AppleScript execution (swiftea-01t.2)
+        print("Action: \(set ? "Set" : "Clear") flag via AppleScript (not yet implemented)")
+    }
+}
+
+struct MailMarkCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "mark",
+        abstract: "Mark a mail message as read or unread",
+        discussion: """
+            Marks the specified message as read or unread in Mail.app.
+
+            Use --read to mark the message as read.
+            Use --unread to mark the message as unread.
+            """
+    )
+
+    @Option(name: .long, help: "Message ID to mark (required)")
+    var id: String
+
+    @Flag(name: .long, help: "Mark the message as read")
+    var read: Bool = false
+
+    @Flag(name: .long, help: "Mark the message as unread")
+    var unread: Bool = false
+
+    func validate() throws {
+        // Exactly one of --read or --unread must be provided
+        if read == unread {
+            throw MailActionError.invalidMarkOperation
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database to validate message exists
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        guard let message = try mailDatabase.getMessage(id: id) else {
+            throw MailActionError.messageNotFound(id)
+        }
+
+        let action = read ? "Marking as read" : "Marking as unread"
+        print("\(action): \(message.id)")
+        print("  Subject: \(message.subject)")
+        print("  Current status: \(message.isRead ? "read" : "unread")")
+
+        // TODO: Implement AppleScript execution (swiftea-01t.2)
+        print("Action: Mark \(read ? "read" : "unread") via AppleScript (not yet implemented)")
+    }
+}
+
+struct MailReplyCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "reply",
+        abstract: "Create a reply to a mail message",
+        discussion: """
+            Creates a reply draft for the specified message in Mail.app.
+
+            By default, opens the reply in Mail.app for editing.
+            Use --send to send the reply immediately (requires --body).
+
+            The reply will be addressed to the original sender and include
+            the original message as quoted text.
+            """
+    )
+
+    @Option(name: .long, help: "Message ID to reply to (required)")
+    var id: String
+
+    @Option(name: .long, help: "Reply body text (required if using --send)")
+    var body: String?
+
+    @Flag(name: .long, help: "Reply to all recipients")
+    var all: Bool = false
+
+    @Flag(name: .long, help: "Send the reply immediately instead of opening a draft")
+    var send: Bool = false
+
+    func validate() throws {
+        // If --send is specified, --body is required
+        if send && body == nil {
+            throw ValidationError("--body is required when using --send")
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database to validate message exists
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        guard let message = try mailDatabase.getMessage(id: id) else {
+            throw MailActionError.messageNotFound(id)
+        }
+
+        let replyType = all ? "Reply All" : "Reply"
+        print("Creating \(replyType.lowercased()) to message: \(message.id)")
+        print("  Subject: \(message.subject)")
+        print("  Original sender: \(message.senderEmail ?? "Unknown")")
+
+        if let replyBody = body {
+            print("  Reply body: \(replyBody.prefix(50))...")
+        }
+
+        if send {
+            print("  Mode: Send immediately")
+        } else {
+            print("  Mode: Open draft in Mail.app")
+        }
+
+        // TODO: Implement AppleScript execution (swiftea-01t.2)
+        print("Action: \(replyType) via AppleScript (not yet implemented)")
+    }
+}
+
+struct MailComposeCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "compose",
+        abstract: "Compose a new mail message",
+        discussion: """
+            Creates a new email draft in Mail.app.
+
+            By default, opens the compose window in Mail.app for editing.
+            Use --send to send the message immediately.
+            """
+    )
+
+    @Option(name: .long, help: "Recipient email address (required)")
+    var to: String
+
+    @Option(name: .long, help: "Email subject (required)")
+    var subject: String
+
+    @Option(name: .long, help: "Email body text")
+    var body: String?
+
+    @Option(name: .long, help: "CC recipients (comma-separated)")
+    var cc: String?
+
+    @Option(name: .long, help: "BCC recipients (comma-separated)")
+    var bcc: String?
+
+    @Flag(name: .long, help: "Send the message immediately instead of opening a draft")
+    var send: Bool = false
+
+    func run() throws {
+        _ = try VaultContext.require()
+
+        print("Composing new message:")
+        print("  To: \(to)")
+        print("  Subject: \(subject)")
+
+        if let ccRecipients = cc {
+            print("  CC: \(ccRecipients)")
+        }
+        if let bccRecipients = bcc {
+            print("  BCC: \(bccRecipients)")
+        }
+        if let messageBody = body {
+            print("  Body: \(messageBody.prefix(50))...")
+        }
+
+        if send {
+            print("  Mode: Send immediately")
+        } else {
+            print("  Mode: Open draft in Mail.app")
+        }
+
+        // TODO: Implement AppleScript execution (swiftea-01t.2)
+        print("Action: Compose via AppleScript (not yet implemented)")
     }
 }
