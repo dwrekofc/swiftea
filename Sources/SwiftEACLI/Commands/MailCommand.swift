@@ -56,7 +56,62 @@ struct MailSyncCommand: ParsableCommand {
     @Flag(name: .long, help: "Show detailed progress")
     var verbose: Bool = false
 
+    // MARK: - Daemon-safe Logging
+
+    /// Detect if running as a LaunchAgent daemon (no TTY attached)
+    private var isDaemonMode: Bool {
+        // When run by launchd, there's no TTY and stdout is not interactive
+        // isatty() returns non-zero if stdout is connected to a terminal, 0 otherwise
+        return isatty(STDOUT_FILENO) == 0
+    }
+
+    /// Log a message with optional timestamp prefix for daemon mode.
+    /// Ensures output is flushed immediately so logs are captured.
+    private func log(_ message: String) {
+        if isDaemonMode {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            fputs("[\(timestamp)] \(message)\n", stdout)
+            fflush(stdout)
+        } else {
+            print(message)
+        }
+    }
+
+    /// Log an error message to stderr, ensuring it's flushed for daemon mode.
+    private func logError(_ message: String) {
+        if isDaemonMode {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            fputs("[\(timestamp)] ERROR: \(message)\n", stderr)
+            fflush(stderr)
+        } else {
+            fputs("Error: \(message)\n", stderr)
+        }
+    }
+
     func run() throws {
+        // Log startup for daemon mode debugging
+        if isDaemonMode {
+            log("mail sync started (daemon mode, pid=\(ProcessInfo.processInfo.processIdentifier))")
+            log("working directory: \(FileManager.default.currentDirectoryPath)")
+        }
+
+        // Wrap entire run in error handling for daemon mode
+        do {
+            try executeSync()
+        } catch {
+            logError("\(error.localizedDescription)")
+            if isDaemonMode {
+                log("mail sync failed")
+            }
+            throw error
+        }
+
+        if isDaemonMode {
+            log("mail sync completed successfully")
+        }
+    }
+
+    private func executeSync() throws {
         let vault = try VaultContext.require()
 
         // Create mail database in vault's data folder
@@ -65,8 +120,8 @@ struct MailSyncCommand: ParsableCommand {
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        if verbose {
-            print("Mail database: \(mailDbPath)")
+        if verbose || isDaemonMode {
+            log("Mail database: \(mailDbPath)")
         }
 
         // Handle --status flag
@@ -90,29 +145,29 @@ struct MailSyncCommand: ParsableCommand {
         // Create sync engine
         let sync = MailSync(mailDatabase: mailDatabase)
 
-        print("Syncing mail from Apple Mail...")
+        log("Syncing mail from Apple Mail...")
 
         do {
             let result = try sync.sync(incremental: incremental)
 
-            print("Sync complete:")
-            print("  Messages processed: \(result.messagesProcessed)")
-            print("  Messages added: \(result.messagesAdded)")
-            print("  Messages updated: \(result.messagesUpdated)")
-            print("  Mailboxes: \(result.mailboxesProcessed)")
-            print("  Duration: \(String(format: "%.2f", result.duration))s")
+            log("Sync complete:")
+            log("  Messages processed: \(result.messagesProcessed)")
+            log("  Messages added: \(result.messagesAdded)")
+            log("  Messages updated: \(result.messagesUpdated)")
+            log("  Mailboxes: \(result.mailboxesProcessed)")
+            log("  Duration: \(String(format: "%.2f", result.duration))s")
 
             if !result.errors.isEmpty {
-                print("\nWarnings/Errors:")
+                log("\nWarnings/Errors:")
                 for error in result.errors.prefix(10) {
-                    print("  - \(error)")
+                    log("  - \(error)")
                 }
                 if result.errors.count > 10 {
-                    print("  ... and \(result.errors.count - 10) more")
+                    log("  ... and \(result.errors.count - 10) more")
                 }
             }
         } catch let error as MailSyncError {
-            print("Sync failed: \(error.localizedDescription)")
+            logError("Sync failed: \(error.localizedDescription)")
             throw ExitCode.failure
         }
     }
@@ -177,9 +232,11 @@ struct MailSyncCommand: ParsableCommand {
     }
 
     private func getDaemonStatus() -> DaemonStatus {
+        // Use `launchctl list` (all services) to get tab-separated format
+        // Note: `launchctl list SERVICE_NAME` returns dictionary format, not tabular
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = ["list", "com.swiftea.mail.sync"]
+        process.arguments = ["list"]
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -192,13 +249,21 @@ struct MailSyncCommand: ParsableCommand {
             if process.terminationStatus == 0 {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 if let output = String(data: data, encoding: .utf8) {
-                    // Parse PID from launchctl output (format: "PID\tStatus\tLabel")
-                    let components = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\t")
-                    if components.count >= 1, let pid = Int(components[0]), pid > 0 {
-                        return DaemonStatus(isRunning: true, pid: pid)
+                    // Find the line containing our service label
+                    // Format: "PID\tStatus\tLabel" where PID is "-" if not running
+                    for line in output.split(separator: "\n") {
+                        if line.contains("com.swiftea.mail.sync") {
+                            let components = line.split(separator: "\t")
+                            if components.count >= 3 {
+                                let pidStr = String(components[0])
+                                if pidStr != "-", let pid = Int(pidStr), pid > 0 {
+                                    return DaemonStatus(isRunning: true, pid: pid)
+                                }
+                                // Job exists but not running (PID is "-")
+                                return DaemonStatus(isRunning: false, pid: nil)
+                            }
+                        }
                     }
-                    // Job exists but not running (PID is "-")
-                    return DaemonStatus(isRunning: false, pid: nil)
                 }
             }
         } catch {
@@ -459,6 +524,16 @@ struct MailShowCommand: ParsableCommand {
                 print("No .emlx path available for this message")
                 throw ExitCode.failure
             }
+
+            // Check for EWS (Exchange) mailbox paths which contain "ews:" prefix
+            // These are cloud-based mailboxes that don't have local .emlx files
+            if emlxPath.contains("ews:") || emlxPath.contains("/ews:/") {
+                print("Raw .emlx viewing is not available for Exchange (EWS) mailboxes.")
+                print("Exchange messages are stored on the server, not as local .emlx files.")
+                print("Use 'mail show \(id)' without --raw to view the message content.")
+                throw ExitCode.failure
+            }
+
             guard let content = try? String(contentsOfFile: emlxPath, encoding: .utf8) else {
                 print("Could not read .emlx file: \(emlxPath)")
                 throw ExitCode.failure
@@ -615,8 +690,8 @@ struct MailExportCommand: ParsableCommand {
             // Export messages matching query
             messages = try mailDatabase.searchMessages(query: searchQuery, limit: limit)
         } else {
-            // Export all messages (up to limit) - use a broad search
-            messages = try mailDatabase.searchMessages(query: "*", limit: limit)
+            // Export all messages (up to limit) - use direct query without FTS
+            messages = try mailDatabase.getAllMessages(limit: limit)
         }
 
         if messages.isEmpty {

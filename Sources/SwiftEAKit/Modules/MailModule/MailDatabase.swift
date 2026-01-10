@@ -39,6 +39,15 @@ public final class MailDatabase: @unchecked Sendable {
         do {
             database = try Database(databasePath)
             connection = try database?.connect()
+
+            // Enable WAL mode for concurrent access (allows readers while writing)
+            // This prevents "database is locked" errors when daemon and manual sync run concurrently
+            if let conn = connection {
+                _ = try conn.query("PRAGMA journal_mode=WAL")
+                // Set busy timeout to 5 seconds to wait for locks instead of failing immediately
+                _ = try conn.query("PRAGMA busy_timeout=5000")
+            }
+
             try runMigrations()
         } catch {
             throw MailDatabaseError.connectionFailed(underlying: error)
@@ -313,6 +322,36 @@ public final class MailDatabase: @unchecked Sendable {
             LIMIT \(limit) OFFSET \(offset)
             """)
 
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
+    /// Get all non-deleted messages (for export without search query)
+    /// - Parameters:
+    ///   - limit: Maximum number of messages to return
+    ///   - offset: Number of messages to skip for pagination
+    /// - Returns: Array of messages ordered by date received (newest first)
+    public func getAllMessages(limit: Int = 100, offset: Int = 0) throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let query = """
+            SELECT id, apple_rowid, message_id, mailbox_id, subject, sender_name, sender_email,
+                   recipients, date_sent, date_received, is_read, is_flagged, is_deleted,
+                   body_text, body_html, emlx_path, export_path, created_at, updated_at
+            FROM messages
+            WHERE is_deleted = 0
+            ORDER BY date_received DESC
+            LIMIT \(limit) OFFSET \(offset)
+            """
+
+        let result = try conn.query(query)
         var messages: [MailMessage] = []
         for row in result {
             if let message = try? rowToMessage(row) {
