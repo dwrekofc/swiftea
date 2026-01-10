@@ -1,6 +1,24 @@
 import XCTest
 @testable import SwiftEAKit
 
+/// Mock FileManager that simulates missing Apple Mail directory
+/// Used to test sync failure paths without actually accessing the filesystem
+private class MockFileManagerNoMail: FileManager {
+    override var homeDirectoryForCurrentUser: URL {
+        // Return a temp directory that won't have Apple Mail
+        return URL(fileURLWithPath: NSTemporaryDirectory())
+    }
+
+    override func fileExists(atPath path: String) -> Bool {
+        // Apple Mail directory doesn't exist
+        return false
+    }
+
+    override func isReadableFile(atPath path: String) -> Bool {
+        return false
+    }
+}
+
 final class MailSyncTests: XCTestCase {
     var testDir: String!
     var mailDatabase: MailDatabase!
@@ -8,11 +26,15 @@ final class MailSyncTests: XCTestCase {
     override func setUp() {
         super.setUp()
         testDir = NSTemporaryDirectory() + "swiftea-sync-test-\(UUID().uuidString)"
-        try? FileManager.default.createDirectory(atPath: testDir, withIntermediateDirectories: true)
+        try! FileManager.default.createDirectory(atPath: testDir, withIntermediateDirectories: true)
 
         let dbPath = (testDir as NSString).appendingPathComponent("mail.db")
         mailDatabase = MailDatabase(databasePath: dbPath)
-        try? mailDatabase.initialize()
+        do {
+            try mailDatabase.initialize()
+        } catch {
+            XCTFail("Failed to initialize mail database: \(error)")
+        }
     }
 
     override func tearDown() {
@@ -217,7 +239,10 @@ final class MailSyncTests: XCTestCase {
         // This test verifies that sync fails gracefully when Apple Mail
         // database is not accessible (which is the case in test environment)
 
-        let sync = MailSync(mailDatabase: mailDatabase)
+        // Use mock FileManager that simulates missing Apple Mail directory
+        let mockFileManager = MockFileManagerNoMail()
+        let mockDiscovery = EnvelopeIndexDiscovery(fileManager: mockFileManager)
+        let sync = MailSync(mailDatabase: mailDatabase, discovery: mockDiscovery)
 
         XCTAssertThrowsError(try sync.sync()) { error in
             // Should throw some form of discovery or connection error
@@ -232,7 +257,10 @@ final class MailSyncTests: XCTestCase {
     // MARK: - Incremental Sync Flag
 
     func testSyncAcceptsIncrementalFlag() {
-        let sync = MailSync(mailDatabase: mailDatabase)
+        // Use mock FileManager that simulates missing Apple Mail directory
+        let mockFileManager = MockFileManagerNoMail()
+        let mockDiscovery = EnvelopeIndexDiscovery(fileManager: mockFileManager)
+        let sync = MailSync(mailDatabase: mailDatabase, discovery: mockDiscovery)
 
         // Verify that incremental parameter is accepted
         // Actual behavior requires Apple Mail access
