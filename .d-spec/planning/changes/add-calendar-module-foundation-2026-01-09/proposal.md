@@ -94,8 +94,19 @@ ClaudEA's `meeting_notes.calendar_event_ref` and `tasks.source_ref` reference Sw
 - **Migration needed**: None (new module)
 - **Existing code reuse**: VaultContext, database patterns from MailDatabase, CLI command structure from MailCommand
 
+## Dependencies
+
+Based on [research findings](./research-swift-eventkit-patterns.md), these packages are recommended:
+
+| Package | Purpose | License |
+|---------|---------|---------|
+| GRDB.swift | SQLite persistence with FTS5, migrations, reactive observation | MIT |
+| RWMRecurrenceRule | RRULE parsing for offline recurrence expansion | MIT |
+| ICalendarKit | ICS export (RFC 5545) | MIT |
+
 ## References
 
+- **Research**: `./research-swift-eventkit-patterns.md` (EventKit patterns, CLI tools, SQLite schemas)
 - Master plan: `.d-spec/swiftea-architecture-master-plan.md` (Phase 2 - Calendar)
 - Roadmap: `.d-spec/roadmap.md` (Phase 2 - Calendar & Unified Search)
 - Mail spec (pattern to follow): `.d-spec/planning/specs/mail/spec.md`

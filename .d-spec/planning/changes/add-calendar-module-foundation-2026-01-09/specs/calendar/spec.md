@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: EventKit Data Access
-The calendar module SHALL use EventKit framework for accessing macOS calendar data. The system SHALL request calendar access permission on first use and SHALL fail with actionable guidance when permission is denied.
+The calendar module SHALL use EventKit framework for accessing macOS calendar data. The system SHALL use a singleton `EKEventStore` instance throughout the application lifecycle. The system SHALL request calendar access permission on first use and SHALL fail with actionable guidance when permission is denied.
 
 #### Scenario: Permission granted
 - **WHEN** the user runs `swiftea cal sync` for the first time
@@ -21,6 +21,34 @@ The calendar module SHALL use EventKit framework for accessing macOS calendar da
 - **WHEN** the user runs any `swiftea cal` command for the first time
 - **THEN** the system SHALL request full calendar access via EventKit
 - **AND** SHALL wait for user response before proceeding
+
+#### Scenario: macOS version-specific permission API
+- **WHEN** requesting calendar access on macOS 14+
+- **THEN** the system SHALL use `requestFullAccessToEvents()`
+- **WHEN** requesting calendar access on earlier macOS versions
+- **THEN** the system SHALL use `requestAccess(to: .event)`
+
+#### Scenario: MainActor state updates
+- **WHEN** a permission callback completes
+- **THEN** the system SHALL hop to MainActor before updating state
+- **AND** SHALL NOT assume the callback runs on the main thread
+
+### Requirement: Info.plist Calendar Keys
+The application SHALL include required Info.plist keys for calendar access descriptions.
+
+#### Scenario: Info.plist validation
+- **WHEN** the application is built
+- **THEN** the Info.plist SHALL include `NSCalendarsFullAccessUsageDescription`
+- **AND** SHALL include `NSCalendarsWriteOnlyAccessUsageDescription`
+
+### Requirement: Calendar Discovery Filtering
+The system SHALL filter out invalid calendars during discovery.
+
+#### Scenario: Siri Suggestions calendar exclusion
+- **WHEN** discovering calendars
+- **AND** a calendar has no valid identifier (e.g., Siri Suggestions calendar)
+- **THEN** the system SHALL exclude that calendar from the list
+- **AND** SHALL NOT attempt to sync events from it
 
 ### Requirement: Calendar Mirror Database
 The system SHALL mirror EventKit calendar data into a libSQL database. The mirror SHALL include calendars, events, attendees, reminders, and sync status.
@@ -43,8 +71,14 @@ The system SHALL mirror EventKit calendar data into a libSQL database. The mirro
 - **THEN** the system SHALL create `calendar.db` in the vault's data folder
 - **AND** SHALL use the same libSQL driver as the mail module
 
-### Requirement: Stable Event Identifiers
-Each mirrored event SHALL have a stable, public ID. The system SHALL use the iCalendar UID (`calendarItemExternalIdentifier`) as primary identifier. When unavailable, the system SHALL generate a deterministic hash from calendar_id + summary + start_time.
+### Requirement: Stable Event Identifiers (Multi-ID Strategy)
+Each mirrored event SHALL store multiple identifiers for robust lookup and reconciliation. The system SHALL use `calendarItemExternalIdentifier` as the primary stable ID when available. The system SHALL store `eventIdentifier` for fast local lookups. When `calendarItemExternalIdentifier` is unavailable, the system SHALL generate a deterministic hash.
+
+#### Scenario: Multi-ID storage
+- **WHEN** an event is synced
+- **THEN** the system SHALL store `eventIdentifier` (for fast local lookup)
+- **AND** SHALL store `calendarItemExternalIdentifier` when non-nil (most stable)
+- **AND** SHALL store `calendarIdentifier` (calendar-level reference)
 
 #### Scenario: ID generation with iCalendar UID
 - **WHEN** an event has a valid `calendarItemExternalIdentifier`
@@ -52,7 +86,7 @@ Each mirrored event SHALL have a stable, public ID. The system SHALL use the iCa
 - **AND** SHALL store the EventKit identifier for reverse lookup
 
 #### Scenario: ID generation without iCalendar UID
-- **WHEN** an event lacks a `calendarItemExternalIdentifier`
+- **WHEN** an event lacks a `calendarItemExternalIdentifier` (e.g., before iCloud sync)
 - **THEN** the system SHALL generate a SHA-256 hash from calendar_id + summary + start_time
 - **AND** SHALL log a warning about fallback ID generation
 
@@ -61,8 +95,38 @@ Each mirrored event SHALL have a stable, public ID. The system SHALL use the iCa
 - **THEN** the system SHALL generate the same stable ID each time
 - **AND** SHALL NOT create duplicate event records
 
-### Requirement: Full-Text Search Index
-The mirror SHALL include an FTS5 index with columns for summary, description, location, and attendee_names. Search SHALL query all indexed fields by default.
+#### Scenario: ID reconciliation after iCloud sync
+- **WHEN** an event's `eventIdentifier` changes after iCloud sync
+- **AND** the event's `calendarItemExternalIdentifier` remains the same
+- **THEN** the system SHALL match the event using `calendarItemExternalIdentifier`
+- **AND** SHALL update the stored `eventIdentifier` to the new value
+
+#### Scenario: Recurring event instance ID
+- **WHEN** a recurring event instance is synced
+- **THEN** the system SHALL combine the UID with `occurrenceDate` for unique identification
+- **AND** SHALL store the `master_event_id` reference to the parent event
+
+### Requirement: UTC Timestamp Storage
+The system SHALL store all event timestamps in UTC and preserve the original timezone for display conversion.
+
+#### Scenario: Timestamp storage
+- **WHEN** an event is synced
+- **THEN** the system SHALL convert start and end times to UTC Unix timestamps
+- **AND** SHALL store in `start_date_utc` and `end_date_utc` columns
+- **AND** SHALL preserve the original timezone in `start_timezone` and `end_timezone` columns
+
+#### Scenario: Timestamp display
+- **WHEN** displaying event times in CLI or export output
+- **THEN** the system SHALL convert UTC timestamps to the user's local timezone
+- **AND** SHALL format according to the original timezone when available
+
+#### Scenario: Date range queries
+- **WHEN** filtering events by date range
+- **THEN** the system SHALL compare against UTC timestamps
+- **AND** SHALL handle timezone boundaries correctly
+
+### Requirement: Full-Text Search Index (GRDB Synchronized)
+The mirror SHALL include an FTS5 index with columns for summary, description, location, and attendee_names. The FTS index SHALL use GRDB.swift's `synchronize(withTable:)` pattern to automatically stay in sync with the events table. Search SHALL query all indexed fields by default.
 
 #### Scenario: Search across event fields
 - **WHEN** a user runs `swiftea cal search "standup"`
@@ -209,6 +273,12 @@ The system SHALL provide `swiftea cal sync --watch` to install and run a LaunchA
 - **AND** the configured interval (default: 5 minutes) elapses
 - **THEN** the system SHALL run an incremental sync
 
+#### Scenario: Change notification sync
+- **WHEN** watch mode is active
+- **AND** `EKEventStoreChangedNotification` is received
+- **THEN** the system SHALL run an incremental sync immediately
+- **AND** SHALL NOT wait for the periodic interval
+
 #### Scenario: Watch status
 - **WHEN** the user runs `swiftea cal sync --watch-status`
 - **THEN** the system SHALL display whether the LaunchAgent is installed and running
@@ -306,24 +376,28 @@ The system SHALL handle recurring events by storing both the master event and ex
 - **THEN** the system SHALL expand only within the configured window (default: 1 year)
 - **AND** SHALL NOT create occurrences beyond the window
 
-### Requirement: Database Schema
-The mirror database SHALL include the following tables: calendars, events, attendees, reminders, sync_status.
+### Requirement: Database Schema (GRDB.swift)
+The mirror database SHALL use GRDB.swift for persistence with type-safe migrations. The database SHALL include the following tables: calendars, events, attendees, reminders, sync_status.
 
 #### Scenario: Events table structure
 - **WHEN** the calendar module initializes
 - **THEN** the system SHALL create an `events` table with columns:
-  - `id` TEXT PRIMARY KEY (stable ID)
-  - `eventkit_id` TEXT (EventKit internal identifier)
+  - `id` TEXT PRIMARY KEY (stable public ID)
+  - `eventkit_id` TEXT (EKEvent.eventIdentifier for fast local lookup)
+  - `external_id` TEXT (calendarItemExternalIdentifier, may be NULL)
   - `calendar_id` TEXT FOREIGN KEY
   - `summary` TEXT
   - `description` TEXT
   - `location` TEXT
   - `url` TEXT
-  - `start_date` INTEGER (timestamp)
-  - `end_date` INTEGER (timestamp)
+  - `start_date_utc` INTEGER (Unix timestamp in UTC)
+  - `end_date_utc` INTEGER (Unix timestamp in UTC)
+  - `start_timezone` TEXT (original timezone)
+  - `end_timezone` TEXT (original timezone)
   - `is_all_day` INTEGER (boolean)
-  - `recurrence_rule` TEXT (iCalendar RRULE)
+  - `recurrence_rule` TEXT (iCalendar RRULE, for reference)
   - `master_event_id` TEXT (for occurrences)
+  - `occurrence_date` INTEGER (for recurring instances)
   - `status` TEXT (confirmed, tentative, cancelled)
   - `created_at` INTEGER
   - `updated_at` INTEGER
@@ -345,11 +419,31 @@ The mirror database SHALL include the following tables: calendars, events, atten
 - **WHEN** the calendar module initializes
 - **THEN** the system SHALL create an `attendees` table with columns:
   - `id` INTEGER PRIMARY KEY AUTOINCREMENT
-  - `event_id` TEXT FOREIGN KEY
+  - `event_id` TEXT FOREIGN KEY with ON DELETE CASCADE
   - `name` TEXT
   - `email` TEXT
-  - `response_status` TEXT (accepted, declined, tentative, none)
+  - `response_status` TEXT (accepted, declined, tentative, needsAction)
   - `is_organizer` INTEGER (boolean)
+  - `is_optional` INTEGER (boolean, default 0)
+
+### Requirement: Optimized Database Indexes
+The system SHALL create indexes optimized for common query patterns including date range searches, recurring event lookups, and sync operations.
+
+#### Scenario: Date range query index
+- **WHEN** the calendar module initializes
+- **THEN** the system SHALL create a composite index `idx_events_date_range` on (calendar_id, start_date_utc, end_date_utc)
+
+#### Scenario: External ID index
+- **WHEN** the calendar module initializes
+- **THEN** the system SHALL create a partial index `idx_events_external_id` on external_id WHERE external_id IS NOT NULL
+
+#### Scenario: Recurring event index
+- **WHEN** the calendar module initializes
+- **THEN** the system SHALL create a partial index `idx_events_master` on master_event_id WHERE master_event_id IS NOT NULL
+
+#### Scenario: Sync query index
+- **WHEN** the calendar module initializes
+- **THEN** the system SHALL create an index `idx_events_updated` on updated_at for incremental sync queries
 
 ### Requirement: Performance
 Sync and search operations SHALL perform efficiently for calendars with 10k+ events.
@@ -390,3 +484,27 @@ JSON output SHALL be designed for ClaudEA consumption, supporting daily briefing
 - **WHEN** ClaudEA creates a meeting note
 - **THEN** ClaudEA SHALL use the stable event ID for `meeting_notes.calendar_event_ref`
 - **AND** the ID SHALL remain valid across sync cycles
+
+## Known Limitations
+
+The following limitations are documented based on research findings:
+
+### Limitation: macOS 15.4+ Calendar Update Regression
+- **WHAT**: On iOS 18.4+/macOS 15.4+, updating an event's calendar to another account or detaching recurring events throws "Access denied"
+- **IMPACT**: Write operations may fail on newer macOS versions
+- **MITIGATION**: This module is read-only in scope; write operations are deferred to a future proposal
+
+### Limitation: TCC Differences for CLI Binaries
+- **WHAT**: TCC/permissions behave differently for unsigned CLI binaries vs signed app bundles
+- **IMPACT**: Permission prompts may not appear reliably for unsigned CLI tools
+- **MITIGATION**: Document troubleshooting steps; consider signed app bundle target in future
+
+### Limitation: EKEventStoreChangedNotification Has No Change Metadata
+- **WHAT**: The notification does not specify which events changed
+- **IMPACT**: Full reload of changed calendars required on each notification
+- **MITIGATION**: Use incremental sync based on modification timestamps
+
+### Limitation: EKCalendar Is Not Sendable
+- **WHAT**: EKCalendar objects cannot be safely passed across concurrency boundaries
+- **IMPACT**: Cannot cache EKCalendar objects directly in actor-isolated contexts
+- **MITIGATION**: Cache only calendar identifiers and properties, not EKCalendar objects
