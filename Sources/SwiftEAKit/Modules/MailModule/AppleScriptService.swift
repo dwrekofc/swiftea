@@ -30,6 +30,9 @@ public enum AppleScriptError: Error, LocalizedError {
     /// An unexpected error occurred
     case unexpected(underlying: Error)
 
+    /// Mail.app failed to launch within the timeout period
+    case mailLaunchTimeout(seconds: Int)
+
     public var errorDescription: String? {
         switch self {
         case .automationPermissionDenied(let guidance):
@@ -52,6 +55,8 @@ public enum AppleScriptError: Error, LocalizedError {
             return "AppleScript execution failed (error \(code)): \(message)"
         case .unexpected(let underlying):
             return "Unexpected error: \(underlying.localizedDescription)"
+        case .mailLaunchTimeout(let seconds):
+            return "Mail.app failed to launch within \(seconds) seconds"
         }
     }
 
@@ -74,6 +79,8 @@ public enum AppleScriptError: Error, LocalizedError {
             return "Try using --message-id with the RFC822 Message-ID for exact matching."
         case .mailboxNotFound:
             return "Check mailbox name with 'swiftea mail mailboxes' (if available) or use the full path."
+        case .mailLaunchTimeout:
+            return "Try launching Mail.app manually or check if macOS is prompting for permissions."
         default:
             return nil
         }
@@ -94,11 +101,6 @@ public struct AppleScriptResult {
     public static func success(_ output: String? = nil) -> AppleScriptResult {
         AppleScriptResult(success: true, output: output)
     }
-
-    /// Create a failure result (use throw instead for errors)
-    public static func failure(_ message: String) -> AppleScriptResult {
-        AppleScriptResult(success: false, output: message)
-    }
 }
 
 // MARK: - AppleScript Service
@@ -109,7 +111,7 @@ public struct AppleScriptResult {
 /// - Structured error handling with actionable messages
 /// - Automation permission detection and guidance
 /// - Mail.app specific error mapping
-public final class AppleScriptService: @unchecked Sendable {
+public final class AppleScriptService: Sendable {
 
     /// Shared instance for convenience (stateless, so sharing is safe)
     public static let shared = AppleScriptService()

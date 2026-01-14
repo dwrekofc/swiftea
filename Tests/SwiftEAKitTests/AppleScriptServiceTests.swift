@@ -105,12 +105,6 @@ final class AppleScriptServiceTests: XCTestCase {
         XCTAssertNil(result.output)
     }
 
-    func testAppleScriptResultFailure() {
-        let result = AppleScriptResult.failure("error message")
-        XCTAssertFalse(result.success)
-        XCTAssertEqual(result.output, "error message")
-    }
-
     // MARK: - MailActionScripts Tests
 
     // MARK: Message Resolution Helper Tests
