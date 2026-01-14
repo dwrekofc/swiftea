@@ -13,6 +13,14 @@ extension Date {
     }
 }
 
+// MARK: - Standard Error Output Helper
+
+/// Write a message to stderr for error/warning output.
+/// This ensures errors dont corrupt stdout when piping (e.g., JSON output to jq).
+private func printError(_ message: String) {
+    fputs("\(message)\n", stderr)
+}
+
 public struct Mail: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "mail",
@@ -152,6 +160,13 @@ struct MailSyncCommand: ParsableCommand {
             fflush(stderr)
         } else {
             fputs("Error: \(message)\n", stderr)
+        }
+    }
+
+    func validate() throws {
+        // --watch and --stop are mutually exclusive
+        if watch && stop {
+            throw MailValidationError.watchAndStopMutuallyExclusive
         }
     }
 
@@ -333,7 +348,7 @@ struct MailSyncCommand: ParsableCommand {
         // Error if any
         if let error = summary.lastSyncError {
             print("")
-            print("Last Error: \(error)")
+            printError("Last Error: \(error)")
         }
 
         // Database location
@@ -445,8 +460,8 @@ struct MailSyncCommand: ParsableCommand {
                 print("  Warnings: \(result.errors.count)")
             }
         } catch {
-            print("Warning: Initial sync failed: \(error.localizedDescription)")
-            print("The daemon will retry on its first run.")
+            printError("Warning: Initial sync failed: \(error.localizedDescription)")
+            printError("The daemon will retry on its first run.")
         }
 
         mailDatabase.close()
@@ -517,7 +532,7 @@ struct MailSyncCommand: ParsableCommand {
         if loadProcess.terminationStatus != 0 {
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
-            print("Failed to load LaunchAgent: \(errorOutput)")
+            printError("Failed to load LaunchAgent: \(errorOutput)")
             throw ExitCode.failure
         }
 
@@ -555,7 +570,7 @@ struct MailSyncCommand: ParsableCommand {
             let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
             // Check if it was already unloaded
             if !errorOutput.contains("Could not find specified service") {
-                print("Warning: \(errorOutput.trimmingCharacters(in: .whitespacesAndNewlines))")
+                printError("Warning: \(errorOutput.trimmingCharacters(in: .whitespacesAndNewlines))")
             }
         }
 
@@ -873,6 +888,13 @@ struct MailSearchCommand: ParsableCommand {
     @Flag(name: .long, help: "Output as JSON")
     var json: Bool = false
 
+    func validate() throws {
+        // --limit must be a positive integer
+        if limit <= 0 {
+            throw MailValidationError.invalidLimit
+        }
+    }
+
     func run() throws {
         let vault = try VaultContext.require()
 
@@ -895,7 +917,7 @@ struct MailSearchCommand: ParsableCommand {
         }
 
         if results.isEmpty {
-            print("No messages found for: \(query)")
+            printError("No messages found for: \(query)")
             return
         }
 
@@ -993,28 +1015,28 @@ struct MailShowCommand: ParsableCommand {
         defer { mailDatabase.close() }
 
         guard let message = try mailDatabase.getMessage(id: id) else {
-            print("Message not found: \(id)")
+            printError("Message not found: \(id)")
             throw ExitCode.failure
         }
 
         // Handle --raw flag: read original .emlx file
         if raw {
             guard let emlxPath = message.emlxPath else {
-                print("No .emlx path available for this message")
+                printError("No .emlx path available for this message")
                 throw ExitCode.failure
             }
 
             // Check for EWS (Exchange) mailbox paths which contain "ews:" prefix
             // These are cloud-based mailboxes that don't have local .emlx files
             if emlxPath.contains("ews:") || emlxPath.contains("/ews:/") {
-                print("Raw .emlx viewing is not available for Exchange (EWS) mailboxes.")
-                print("Exchange messages are stored on the server, not as local .emlx files.")
-                print("Use 'mail show \(id)' without --raw to view the message content.")
+                printError("Raw .emlx viewing is not available for Exchange (EWS) mailboxes.")
+                printError("Exchange messages are stored on the server, not as local .emlx files.")
+                printError("Use 'mail show \(id)' without --raw to view the message content.")
                 throw ExitCode.failure
             }
 
             guard let content = try? String(contentsOfFile: emlxPath, encoding: .utf8) else {
-                print("Could not read .emlx file: \(emlxPath)")
+                printError("Could not read .emlx file: \(emlxPath)")
                 throw ExitCode.failure
             }
             print(content)
@@ -1110,6 +1132,35 @@ struct MailShowCommand: ParsableCommand {
     }
 }
 
+/// Output format for mail export command.
+/// Conforms to ExpressibleByArgument for ArgumentParser integration,
+/// enabling type-safe parsing with automatic validation.
+public enum OutputFormat: String, CaseIterable, ExpressibleByArgument {
+    case markdown
+    case md
+    case json
+
+    /// All valid format values for help text and error messages
+    public static var allValueStrings: [String] {
+        allCases.map { $0.rawValue }
+    }
+
+    /// Check if this format produces JSON output
+    var isJson: Bool {
+        self == .json
+    }
+
+    /// Check if this format produces Markdown output
+    var isMarkdown: Bool {
+        self == .markdown || self == .md
+    }
+
+    /// File extension for this format
+    var fileExtension: String {
+        isJson ? "json" : "md"
+    }
+}
+
 struct MailExportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "export",
@@ -1122,8 +1173,8 @@ struct MailExportCommand: ParsableCommand {
             """
     )
 
-    @Option(name: .long, help: "Export format (markdown, json)")
-    var format: String = "markdown"
+    @Option(name: .long, help: "Export format: \(OutputFormat.allValueStrings.joined(separator: ", "))")
+    var format: OutputFormat = .markdown
 
     @Option(name: .long, help: "Message ID to export (or 'all' for all synced messages)")
     var id: String = "all"
@@ -1139,6 +1190,14 @@ struct MailExportCommand: ParsableCommand {
 
     @Flag(name: .long, help: "Extract and save attachment files")
     var includeAttachments: Bool = false
+
+    func validate() throws {
+        // --limit must be a positive integer
+        if limit <= 0 {
+            throw MailValidationError.invalidLimit
+        }
+        // Note: --format validation is handled automatically by ArgumentParser via OutputFormat enum
+    }
 
     func run() throws {
         let vault = try VaultContext.require()
@@ -1171,7 +1230,7 @@ struct MailExportCommand: ParsableCommand {
             if let message = try mailDatabase.getMessage(id: id) {
                 messages = [message]
             } else {
-                print("Message not found: \(id)")
+                printError("Message not found: \(id)")
                 throw ExitCode.failure
             }
         } else if let searchQuery = query {
@@ -1183,7 +1242,7 @@ struct MailExportCommand: ParsableCommand {
         }
 
         if messages.isEmpty {
-            print("No messages to export")
+            printError("No messages to export")
             return
         }
 
@@ -1194,18 +1253,14 @@ struct MailExportCommand: ParsableCommand {
         let emlxParser = EmlxParser()
 
         for message in messages {
-            let filename = generateFilename(for: message, format: format)
+            let filename = generateFilename(for: message)
             let filePath = (outputDir as NSString).appendingPathComponent(filename)
 
             let content: String
-            switch format.lowercased() {
-            case "json":
+            if format.isJson {
                 content = formatAsJson(message)
-            case "markdown", "md":
+            } else {
                 content = formatAsMarkdown(message)
-            default:
-                print("Unknown format: \(format). Use 'markdown' or 'json'.")
-                throw ExitCode.failure
             }
 
             try content.write(toFile: filePath, atomically: true, encoding: .utf8)
@@ -1240,7 +1295,7 @@ struct MailExportCommand: ParsableCommand {
                     }
                 } catch {
                     // Log warning but continue exporting
-                    print("  Warning: Could not extract attachments from \(message.id): \(error.localizedDescription)")
+                    printError("  Warning: Could not extract attachments from \(message.id): \(error.localizedDescription)")
                 }
             }
         }
@@ -1251,10 +1306,9 @@ struct MailExportCommand: ParsableCommand {
         }
     }
 
-    private func generateFilename(for message: MailMessage, format: String) -> String {
+    private func generateFilename(for message: MailMessage) -> String {
         // Flat filename using message ID for uniqueness and idempotent overwrites
-        let ext = format.lowercased() == "json" ? "json" : "md"
-        return "\(message.id).\(ext)"
+        return "\(message.id).\(format.fileExtension)"
     }
 
     private func formatAsMarkdown(_ message: MailMessage) -> String {
@@ -1345,6 +1399,26 @@ struct MailExportCommand: ParsableCommand {
         result = result.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         result = result.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Mail Validation Errors
+
+/// Error thrown when CLI input validation fails
+public enum MailValidationError: Error, LocalizedError, Equatable {
+    case invalidLimit
+    case emptyRecipient
+    case watchAndStopMutuallyExclusive
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidLimit:
+            return "--limit must be a positive integer"
+        case .emptyRecipient:
+            return "--to requires a non-empty email address"
+        case .watchAndStopMutuallyExclusive:
+            return "--watch and --stop cannot be used together"
+        }
     }
 }
 
@@ -1861,6 +1935,13 @@ struct MailComposeCommand: ParsableCommand {
 
     @Flag(name: .long, help: "Preview the action without making changes")
     var dryRun: Bool = false
+
+    func validate() throws {
+        // --to requires a non-empty email address
+        if to.trimmingCharacters(in: .whitespaces).isEmpty {
+            throw MailValidationError.emptyRecipient
+        }
+    }
 
     func run() throws {
         _ = try VaultContext.require()
