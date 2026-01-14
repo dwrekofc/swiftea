@@ -173,4 +173,175 @@ final class VaultManagerTests: XCTestCase {
         let found = manager.findVaultRoot(from: nonVaultPath)
         XCTAssertNil(found)
     }
+
+    // MARK: - Calendar Settings Tests
+
+    func testCalendarSettingsDefaults() {
+        let settings = CalendarSettings()
+
+        XCTAssertNil(settings.defaultCalendar)
+        XCTAssertEqual(settings.dateRangeDays, 365)
+        XCTAssertEqual(settings.syncIntervalMinutes, 5)
+        XCTAssertTrue(settings.expandRecurring)
+        XCTAssertEqual(settings.exportFormat, "markdown")
+        XCTAssertNil(settings.exportOutputDir)
+    }
+
+    func testCalendarSettingsGetValue() {
+        let settings = CalendarSettings(
+            defaultCalendar: "Work",
+            dateRangeDays: 180,
+            syncIntervalMinutes: 10,
+            expandRecurring: false,
+            exportFormat: "json",
+            exportOutputDir: "/exports"
+        )
+
+        XCTAssertEqual(settings.getValue(for: "calendar.defaultCalendar"), "Work")
+        XCTAssertEqual(settings.getValue(for: "calendar.dateRangeDays"), "180")
+        XCTAssertEqual(settings.getValue(for: "calendar.syncIntervalMinutes"), "10")
+        XCTAssertEqual(settings.getValue(for: "calendar.expandRecurring"), "false")
+        XCTAssertEqual(settings.getValue(for: "calendar.export.format"), "json")
+        XCTAssertEqual(settings.getValue(for: "calendar.export.outputDir"), "/exports")
+        XCTAssertNil(settings.getValue(for: "calendar.unknown"))
+    }
+
+    func testCalendarSettingsSetValueDefaultCalendar() {
+        var settings = CalendarSettings()
+
+        let error = settings.setValue("Personal", for: "calendar.defaultCalendar")
+        XCTAssertNil(error)
+        XCTAssertEqual(settings.defaultCalendar, "Personal")
+
+        // Empty value should clear the setting
+        let error2 = settings.setValue("", for: "calendar.defaultCalendar")
+        XCTAssertNil(error2)
+        XCTAssertNil(settings.defaultCalendar)
+    }
+
+    func testCalendarSettingsSetValueDateRangeDays() {
+        var settings = CalendarSettings()
+
+        // Valid value
+        let error = settings.setValue("180", for: "calendar.dateRangeDays")
+        XCTAssertNil(error)
+        XCTAssertEqual(settings.dateRangeDays, 180)
+
+        // Too small
+        let error2 = settings.setValue("0", for: "calendar.dateRangeDays")
+        XCTAssertNotNil(error2)
+
+        // Too large
+        let error3 = settings.setValue("5000", for: "calendar.dateRangeDays")
+        XCTAssertNotNil(error3)
+
+        // Invalid
+        let error4 = settings.setValue("abc", for: "calendar.dateRangeDays")
+        XCTAssertNotNil(error4)
+    }
+
+    func testCalendarSettingsSetValueSyncInterval() {
+        var settings = CalendarSettings()
+
+        // Valid value
+        let error = settings.setValue("15", for: "calendar.syncIntervalMinutes")
+        XCTAssertNil(error)
+        XCTAssertEqual(settings.syncIntervalMinutes, 15)
+
+        // Too small
+        let error2 = settings.setValue("0", for: "calendar.syncIntervalMinutes")
+        XCTAssertNotNil(error2)
+
+        // Invalid
+        let error3 = settings.setValue("abc", for: "calendar.syncIntervalMinutes")
+        XCTAssertNotNil(error3)
+    }
+
+    func testCalendarSettingsSetValueExpandRecurring() {
+        var settings = CalendarSettings()
+
+        // Set to false
+        let error = settings.setValue("false", for: "calendar.expandRecurring")
+        XCTAssertNil(error)
+        XCTAssertFalse(settings.expandRecurring)
+
+        // Set back to true
+        let error2 = settings.setValue("true", for: "calendar.expandRecurring")
+        XCTAssertNil(error2)
+        XCTAssertTrue(settings.expandRecurring)
+
+        // Alternative values
+        var settings2 = CalendarSettings()
+        _ = settings2.setValue("yes", for: "calendar.expandRecurring")
+        XCTAssertTrue(settings2.expandRecurring)
+
+        var settings3 = CalendarSettings()
+        _ = settings3.setValue("no", for: "calendar.expandRecurring")
+        XCTAssertFalse(settings3.expandRecurring)
+
+        // Invalid
+        var settings4 = CalendarSettings()
+        let error4 = settings4.setValue("maybe", for: "calendar.expandRecurring")
+        XCTAssertNotNil(error4)
+    }
+
+    func testCalendarSettingsSetValueExportFormat() {
+        var settings = CalendarSettings()
+
+        // Valid formats
+        let error = settings.setValue("json", for: "calendar.export.format")
+        XCTAssertNil(error)
+        XCTAssertEqual(settings.exportFormat, "json")
+
+        let error2 = settings.setValue("ics", for: "calendar.export.format")
+        XCTAssertNil(error2)
+        XCTAssertEqual(settings.exportFormat, "ics")
+
+        let error3 = settings.setValue("md", for: "calendar.export.format")
+        XCTAssertNil(error3)
+        XCTAssertEqual(settings.exportFormat, "markdown") // md -> markdown normalization
+
+        // Invalid
+        let error4 = settings.setValue("xml", for: "calendar.export.format")
+        XCTAssertNotNil(error4)
+    }
+
+    func testCalendarSettingsSetValueUnknownKey() {
+        var settings = CalendarSettings()
+        let error = settings.setValue("value", for: "calendar.unknown")
+        XCTAssertNotNil(error)
+        XCTAssertTrue(error!.contains("Unknown key"))
+    }
+
+    func testCalendarSettingsConfigKeys() {
+        let keys = CalendarSettings.keys
+
+        XCTAssertTrue(keys.keys.contains("calendar.defaultCalendar"))
+        XCTAssertTrue(keys.keys.contains("calendar.dateRangeDays"))
+        XCTAssertTrue(keys.keys.contains("calendar.syncIntervalMinutes"))
+        XCTAssertTrue(keys.keys.contains("calendar.expandRecurring"))
+        XCTAssertTrue(keys.keys.contains("calendar.export.format"))
+        XCTAssertTrue(keys.keys.contains("calendar.export.outputDir"))
+    }
+
+    func testVaultConfigIncludesCalendarSettings() throws {
+        let vaultPath = testDir + "/calendar-config-test"
+        try FileManager.default.createDirectory(atPath: vaultPath, withIntermediateDirectories: true)
+        _ = try manager.initializeVault(at: vaultPath)
+
+        // Read initial config
+        var config = try manager.readConfig(from: vaultPath)
+
+        // Modify calendar settings
+        config.calendar.dateRangeDays = 90
+        config.calendar.syncIntervalMinutes = 10
+        config.calendar.exportFormat = "json"
+        try manager.writeConfig(config, to: vaultPath)
+
+        // Read again and verify
+        let updatedConfig = try manager.readConfig(from: vaultPath)
+        XCTAssertEqual(updatedConfig.calendar.dateRangeDays, 90)
+        XCTAssertEqual(updatedConfig.calendar.syncIntervalMinutes, 10)
+        XCTAssertEqual(updatedConfig.calendar.exportFormat, "json")
+    }
 }

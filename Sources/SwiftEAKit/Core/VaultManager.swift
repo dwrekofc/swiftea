@@ -35,21 +35,29 @@ public struct VaultConfig: Codable {
     public let createdAt: Date
     public var accounts: [BoundAccount]
     public var mail: MailSettings
+    public var calendar: CalendarSettings
 
-    public init(version: String = "1.0", accounts: [BoundAccount] = [], mail: MailSettings = MailSettings()) {
+    public init(
+        version: String = "1.0",
+        accounts: [BoundAccount] = [],
+        mail: MailSettings = MailSettings(),
+        calendar: CalendarSettings = CalendarSettings()
+    ) {
         self.version = version
         self.createdAt = Date()
         self.accounts = accounts
         self.mail = mail
+        self.calendar = calendar
     }
 
-    /// Handle decoding with optional mail settings for backward compatibility
+    /// Handle decoding with optional settings for backward compatibility
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decode(String.self, forKey: .version)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         accounts = try container.decodeIfPresent([BoundAccount].self, forKey: .accounts) ?? []
         mail = try container.decodeIfPresent(MailSettings.self, forKey: .mail) ?? MailSettings()
+        calendar = try container.decodeIfPresent(CalendarSettings.self, forKey: .calendar) ?? CalendarSettings()
     }
 }
 
@@ -152,6 +160,123 @@ public struct MailSettings: Codable {
                 return nil
             }
             return "Invalid value: \(value). Must be 'true' or 'false'."
+        default:
+            return "Unknown key: \(key)"
+        }
+    }
+
+    private func parseBool(_ value: String) -> Bool? {
+        switch value.lowercased() {
+        case "true", "1", "yes", "on":
+            return true
+        case "false", "0", "no", "off":
+            return false
+        default:
+            return nil
+        }
+    }
+}
+
+/// Calendar-specific configuration settings
+public struct CalendarSettings: Codable {
+    /// Default calendar for new events (nil = system default)
+    public var defaultCalendar: String?
+
+    /// Date range in days for sync (how far forward to sync)
+    public var dateRangeDays: Int
+
+    /// Sync interval in minutes for watch daemon
+    public var syncIntervalMinutes: Int
+
+    /// Whether to expand recurring events during sync
+    public var expandRecurring: Bool
+
+    /// Default export format ("markdown", "json", or "ics")
+    public var exportFormat: String
+
+    /// Default export output directory (relative to vault or absolute)
+    public var exportOutputDir: String?
+
+    /// Available config keys for calendar settings
+    public static let keys: [String: String] = [
+        "calendar.defaultCalendar": "Default calendar for new events (empty = system default)",
+        "calendar.dateRangeDays": "Date range in days for sync (default: 365)",
+        "calendar.syncIntervalMinutes": "Sync interval in minutes (default: 5, min: 1)",
+        "calendar.expandRecurring": "Expand recurring events during sync: true or false",
+        "calendar.export.format": "Default export format: markdown, json, or ics",
+        "calendar.export.outputDir": "Default export output directory"
+    ]
+
+    public init(
+        defaultCalendar: String? = nil,
+        dateRangeDays: Int = 365,
+        syncIntervalMinutes: Int = 5,
+        expandRecurring: Bool = true,
+        exportFormat: String = "markdown",
+        exportOutputDir: String? = nil
+    ) {
+        self.defaultCalendar = defaultCalendar
+        self.dateRangeDays = dateRangeDays
+        self.syncIntervalMinutes = syncIntervalMinutes
+        self.expandRecurring = expandRecurring
+        self.exportFormat = exportFormat
+        self.exportOutputDir = exportOutputDir
+    }
+
+    /// Get a setting value by key
+    public func getValue(for key: String) -> String? {
+        switch key {
+        case "calendar.defaultCalendar":
+            return defaultCalendar ?? ""
+        case "calendar.dateRangeDays":
+            return String(dateRangeDays)
+        case "calendar.syncIntervalMinutes":
+            return String(syncIntervalMinutes)
+        case "calendar.expandRecurring":
+            return expandRecurring ? "true" : "false"
+        case "calendar.export.format":
+            return exportFormat
+        case "calendar.export.outputDir":
+            return exportOutputDir ?? ""
+        default:
+            return nil
+        }
+    }
+
+    /// Set a setting value by key, returns error message if invalid
+    public mutating func setValue(_ value: String, for key: String) -> String? {
+        switch key {
+        case "calendar.defaultCalendar":
+            defaultCalendar = value.isEmpty ? nil : value
+            return nil
+        case "calendar.dateRangeDays":
+            if let days = Int(value), days >= 1 && days <= 3650 {
+                dateRangeDays = days
+                return nil
+            }
+            return "Invalid value: \(value). Must be a number between 1 and 3650."
+        case "calendar.syncIntervalMinutes":
+            if let minutes = Int(value), minutes >= 1 {
+                syncIntervalMinutes = minutes
+                return nil
+            }
+            return "Invalid value: \(value). Must be a number >= 1."
+        case "calendar.expandRecurring":
+            if let bool = parseBool(value) {
+                expandRecurring = bool
+                return nil
+            }
+            return "Invalid value: \(value). Must be 'true' or 'false'."
+        case "calendar.export.format":
+            let validFormats = ["markdown", "md", "json", "ics"]
+            if validFormats.contains(value.lowercased()) {
+                exportFormat = value.lowercased() == "md" ? "markdown" : value.lowercased()
+                return nil
+            }
+            return "Invalid format: \(value). Must be 'markdown', 'json', or 'ics'."
+        case "calendar.export.outputDir":
+            exportOutputDir = value.isEmpty ? nil : value
+            return nil
         default:
             return "Unknown key: \(key)"
         }
