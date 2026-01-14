@@ -113,6 +113,81 @@ final class AppleScriptServiceTests: XCTestCase {
 
     // MARK: - MailActionScripts Tests
 
+    // MARK: Message Resolution Helper Tests
+
+    /// Tests that the message resolution helper generates correct AppleScript fragment.
+    /// The helper is private but we can verify its output through the public methods.
+    func testMessageResolutionHelperGeneratesCorrectScript() {
+        // All action scripts should contain the same resolution pattern
+        let testMessageId = "<test-resolution@example.com>"
+
+        let deleteScript = MailActionScripts.deleteMessage(byMessageId: testMessageId)
+        let moveScript = MailActionScripts.moveMessage(byMessageId: testMessageId, toMailbox: "Archive")
+        let flagScript = MailActionScripts.setFlag(byMessageId: testMessageId, flagged: true)
+        let readScript = MailActionScripts.setReadStatus(byMessageId: testMessageId, read: true)
+        let replyScript = MailActionScripts.createReply(byMessageId: testMessageId, replyToAll: false, body: nil, send: false)
+
+        // All scripts should have the same message resolution pattern
+        let expectedResolutionComponents = [
+            "set targetMessages to (every message whose message id is \"\(testMessageId)\")",
+            "if (count of targetMessages) = 0 then",
+            "error \"Message not found: \(testMessageId)\" number -1728",
+            "if (count of targetMessages) > 1 then",
+            "error \"Multiple messages found with Message-ID\" number -1",
+            "set theMessage to item 1 of targetMessages"
+        ]
+
+        // Verify delete script contains resolution pattern
+        for component in expectedResolutionComponents {
+            XCTAssertTrue(deleteScript.contains(component), "deleteMessage should contain: \(component)")
+        }
+
+        // Verify move script contains resolution pattern
+        for component in expectedResolutionComponents {
+            XCTAssertTrue(moveScript.contains(component), "moveMessage should contain: \(component)")
+        }
+
+        // Verify flag script contains resolution pattern
+        for component in expectedResolutionComponents {
+            XCTAssertTrue(flagScript.contains(component), "setFlag should contain: \(component)")
+        }
+
+        // Verify read status script contains resolution pattern
+        for component in expectedResolutionComponents {
+            XCTAssertTrue(readScript.contains(component), "setReadStatus should contain: \(component)")
+        }
+
+        // Verify reply script contains resolution pattern
+        for component in expectedResolutionComponents {
+            XCTAssertTrue(replyScript.contains(component), "createReply should contain: \(component)")
+        }
+    }
+
+    /// Tests that all action methods use theMessage variable after resolution
+    func testAllActionMethodsUseTheMessageVariable() {
+        let testMessageId = "<var-test@example.com>"
+
+        // deleteMessage should use theMessage
+        let deleteScript = MailActionScripts.deleteMessage(byMessageId: testMessageId)
+        XCTAssertTrue(deleteScript.contains("delete theMessage"), "deleteMessage should use theMessage variable")
+
+        // moveMessage should use theMessage
+        let moveScript = MailActionScripts.moveMessage(byMessageId: testMessageId, toMailbox: "Archive")
+        XCTAssertTrue(moveScript.contains("move theMessage"), "moveMessage should use theMessage variable")
+
+        // setFlag should use theMessage
+        let flagScript = MailActionScripts.setFlag(byMessageId: testMessageId, flagged: true)
+        XCTAssertTrue(flagScript.contains("flagged status of theMessage"), "setFlag should use theMessage variable")
+
+        // setReadStatus should use theMessage
+        let readScript = MailActionScripts.setReadStatus(byMessageId: testMessageId, read: true)
+        XCTAssertTrue(readScript.contains("read status of theMessage"), "setReadStatus should use theMessage variable")
+
+        // createReply should use theMessage
+        let replyScript = MailActionScripts.createReply(byMessageId: testMessageId, replyToAll: false, body: nil, send: false)
+        XCTAssertTrue(replyScript.contains("reply to theMessage"), "createReply should use theMessage variable")
+    }
+
     func testDeleteMessageScript() {
         let script = MailActionScripts.deleteMessage(byMessageId: "<test@example.com>")
         XCTAssertTrue(script.contains("<test@example.com>"))

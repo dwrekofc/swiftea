@@ -291,8 +291,29 @@ public final class AppleScriptService: @unchecked Sendable {
 /// Pre-built AppleScript templates for common Mail.app actions
 public struct MailActionScripts {
 
-    /// Generate script to delete a message by Message-ID
-    public static func deleteMessage(byMessageId messageId: String) -> String {
+    // MARK: - Private Helpers
+
+    /// Generate the AppleScript fragment for resolving a message by its Message-ID.
+    ///
+    /// This helper consolidates the common boilerplate for finding a message and
+    /// validating that exactly one match exists. It sets `theMessage` variable to
+    /// the resolved message.
+    ///
+    /// - Parameter messageId: The RFC822 Message-ID to search for
+    /// - Returns: AppleScript fragment that sets `theMessage` to the found message
+    ///
+    /// Generated script pattern:
+    /// ```applescript
+    /// set targetMessages to (every message whose message id is "<messageId>")
+    /// if (count of targetMessages) = 0 then
+    ///     error "Message not found: <messageId>" number -1728
+    /// end if
+    /// if (count of targetMessages) > 1 then
+    ///     error "Multiple messages found with Message-ID" number -1
+    /// end if
+    /// set theMessage to item 1 of targetMessages
+    /// ```
+    private static func messageResolutionScript(messageId: String) -> String {
         """
         set targetMessages to (every message whose message id is "\(escapeAppleScriptString(messageId))")
         if (count of targetMessages) = 0 then
@@ -301,7 +322,17 @@ public struct MailActionScripts {
         if (count of targetMessages) > 1 then
             error "Multiple messages found with Message-ID" number -1
         end if
-        delete (item 1 of targetMessages)
+        set theMessage to item 1 of targetMessages
+        """
+    }
+
+    // MARK: - Public API
+
+    /// Generate script to delete a message by Message-ID
+    public static func deleteMessage(byMessageId messageId: String) -> String {
+        """
+        \(messageResolutionScript(messageId: messageId))
+        delete theMessage
         return "deleted"
         """
     }
@@ -316,15 +347,9 @@ public struct MailActionScripts {
         }
 
         return """
-        set targetMessages to (every message whose message id is "\(escapeAppleScriptString(messageId))")
-        if (count of targetMessages) = 0 then
-            error "Message not found: \(escapeAppleScriptString(messageId))" number -1728
-        end if
-        if (count of targetMessages) > 1 then
-            error "Multiple messages found with Message-ID" number -1
-        end if
+        \(messageResolutionScript(messageId: messageId))
         set targetMailbox to \(mailboxRef)
-        move (item 1 of targetMessages) to targetMailbox
+        move theMessage to targetMailbox
         return "moved"
         """
     }
@@ -332,14 +357,8 @@ public struct MailActionScripts {
     /// Generate script to set flag status on a message
     public static func setFlag(byMessageId messageId: String, flagged: Bool) -> String {
         """
-        set targetMessages to (every message whose message id is "\(escapeAppleScriptString(messageId))")
-        if (count of targetMessages) = 0 then
-            error "Message not found: \(escapeAppleScriptString(messageId))" number -1728
-        end if
-        if (count of targetMessages) > 1 then
-            error "Multiple messages found with Message-ID" number -1
-        end if
-        set flagged status of (item 1 of targetMessages) to \(flagged)
+        \(messageResolutionScript(messageId: messageId))
+        set flagged status of theMessage to \(flagged)
         return "\(flagged ? "flagged" : "unflagged")"
         """
     }
@@ -347,14 +366,8 @@ public struct MailActionScripts {
     /// Generate script to set read status on a message
     public static func setReadStatus(byMessageId messageId: String, read: Bool) -> String {
         """
-        set targetMessages to (every message whose message id is "\(escapeAppleScriptString(messageId))")
-        if (count of targetMessages) = 0 then
-            error "Message not found: \(escapeAppleScriptString(messageId))" number -1728
-        end if
-        if (count of targetMessages) > 1 then
-            error "Multiple messages found with Message-ID" number -1
-        end if
-        set read status of (item 1 of targetMessages) to \(read)
+        \(messageResolutionScript(messageId: messageId))
+        set read status of theMessage to \(read)
         return "\(read ? "read" : "unread")"
         """
     }
@@ -366,14 +379,7 @@ public struct MailActionScripts {
         let sendClause = send ? "send theReply" : "open theReply"
 
         return """
-        set targetMessages to (every message whose message id is "\(escapeAppleScriptString(messageId))")
-        if (count of targetMessages) = 0 then
-            error "Message not found: \(escapeAppleScriptString(messageId))" number -1728
-        end if
-        if (count of targetMessages) > 1 then
-            error "Multiple messages found with Message-ID" number -1
-        end if
-        set theMessage to item 1 of targetMessages
+        \(messageResolutionScript(messageId: messageId))
         set theReply to \(replyType) theMessage
         \(bodyClause)
         \(sendClause)
