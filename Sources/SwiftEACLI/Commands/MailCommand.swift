@@ -1,3 +1,4 @@
+import AppKit
 import ArgumentParser
 import Foundation
 import SwiftEAKit
@@ -55,6 +56,9 @@ struct MailSyncCommand: ParsableCommand {
 
     @Flag(name: .long, help: "Show detailed progress")
     var verbose: Bool = false
+
+    @Flag(name: .long, help: "Run as persistent daemon with sleep/wake detection (internal use)")
+    var daemon: Bool = false
 
     // MARK: - Retry Configuration (for daemon mode)
 
@@ -203,6 +207,12 @@ struct MailSyncCommand: ParsableCommand {
         // Handle --stop flag
         if stop {
             try stopWatchDaemon(verbose: verbose)
+            return
+        }
+
+        // Handle --daemon flag: run as persistent daemon with sleep/wake detection
+        if daemon {
+            try runPersistentDaemon(mailDatabase: mailDatabase)
             return
         }
 
@@ -401,6 +411,8 @@ struct MailSyncCommand: ParsableCommand {
         mailDatabase.close()
 
         // Generate plist content
+        // Uses --daemon mode for a persistent process with sleep/wake detection.
+        // KeepAlive ensures the daemon is restarted if it exits.
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -413,11 +425,11 @@ struct MailSyncCommand: ParsableCommand {
                     <string>\(absoluteExecutablePath)</string>
                     <string>mail</string>
                     <string>sync</string>
-                    <string>--incremental</string>
+                    <string>--daemon</string>
                 </array>
-                <key>StartInterval</key>
-                <integer>\(Self.syncIntervalSeconds)</integer>
                 <key>RunAtLoad</key>
+                <true/>
+                <key>KeepAlive</key>
                 <true/>
                 <key>StandardOutPath</key>
                 <string>\(logDir)/mail-sync.log</string>
@@ -469,7 +481,8 @@ struct MailSyncCommand: ParsableCommand {
         }
 
         print("Watch daemon installed and started")
-        print("  Syncing every \(Self.syncIntervalSeconds / 60) minutes")
+        print("  Mode: Persistent daemon with sleep/wake detection")
+        print("  Syncing every \(Self.syncIntervalSeconds / 60) minutes + on wake")
         print("  Logs: \(logDir)/mail-sync.log")
         print("")
         print("Use 'swiftea mail sync --status' to check status")
@@ -513,6 +526,269 @@ struct MailSyncCommand: ParsableCommand {
         }
 
         print("Watch daemon stopped and uninstalled")
+    }
+
+    // MARK: - Persistent Daemon with Sleep/Wake Detection
+
+    /// Run as a persistent daemon that syncs on startup, on a schedule, and on system wake.
+    /// This mode is used internally by the LaunchAgent for sleep/wake-aware syncing.
+    private func runPersistentDaemon(mailDatabase: MailDatabase) throws {
+        log("Starting persistent mail sync daemon (pid=\(ProcessInfo.processInfo.processIdentifier))")
+
+        // Run initial incremental sync on startup
+        log("Running initial sync...")
+        performDaemonSync(mailDatabase: mailDatabase)
+
+        // Create a daemon controller to handle sleep/wake events
+        let controller = MailSyncDaemonController(mailDatabase: mailDatabase, logger: log)
+
+        // Start the run loop - this blocks until the daemon is terminated
+        controller.startRunLoop()
+
+        log("Daemon shutting down")
+    }
+}
+
+// MARK: - Mail Sync Daemon Controller
+
+/// Controls the mail sync daemon with sleep/wake detection.
+/// Uses NSWorkspace notifications to detect system wake and trigger incremental sync.
+final class MailSyncDaemonController: NSObject {
+    private let mailDatabase: MailDatabase
+    private let logger: (String) -> Void
+    private var isSyncing = false
+    private let syncQueue = DispatchQueue(label: "com.swiftea.mail.sync.daemon")
+    private var syncTimer: Timer?
+
+    /// Interval between scheduled syncs (5 minutes)
+    private static let syncIntervalSeconds: TimeInterval = 300
+
+    /// Minimum interval between syncs to prevent rapid-fire syncing
+    private static let minSyncIntervalSeconds: TimeInterval = 30
+
+    /// Track last sync time to debounce wake events
+    private var lastSyncTime: Date?
+
+    init(mailDatabase: MailDatabase, logger: @escaping (String) -> Void) {
+        self.mailDatabase = mailDatabase
+        self.logger = logger
+        super.init()
+
+        // Register for sleep/wake notifications
+        registerForPowerNotifications()
+    }
+
+    deinit {
+        unregisterForPowerNotifications()
+        syncTimer?.invalidate()
+    }
+
+    /// Start the run loop. Blocks until the daemon is terminated.
+    func startRunLoop() {
+        // Schedule periodic sync timer
+        scheduleSyncTimer()
+
+        // Run the main run loop to receive notifications
+        // This blocks until the process is terminated
+        RunLoop.current.run()
+    }
+
+    // MARK: - Power Notifications
+
+    private func registerForPowerNotifications() {
+        let workspace = NSWorkspace.shared
+        let center = workspace.notificationCenter
+
+        // System woke from sleep
+        center.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+
+        // System is about to sleep
+        center.addObserver(
+            self,
+            selector: #selector(systemWillSleep(_:)),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+
+        logger("Registered for sleep/wake notifications")
+    }
+
+    private func unregisterForPowerNotifications() {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func systemDidWake(_ notification: Notification) {
+        logger("System woke from sleep - triggering catch-up sync")
+        triggerSync(reason: "wake")
+    }
+
+    @objc private func systemWillSleep(_ notification: Notification) {
+        logger("System going to sleep")
+        // Cancel any pending sync timer - we'll sync on wake instead
+        syncTimer?.invalidate()
+        syncTimer = nil
+    }
+
+    // MARK: - Sync Timer
+
+    private func scheduleSyncTimer() {
+        // Invalidate existing timer
+        syncTimer?.invalidate()
+
+        // Schedule new timer on the main run loop
+        syncTimer = Timer.scheduledTimer(withTimeInterval: Self.syncIntervalSeconds, repeats: true) { [weak self] _ in
+            self?.triggerSync(reason: "scheduled")
+        }
+
+        logger("Scheduled sync timer (every \(Int(Self.syncIntervalSeconds))s)")
+    }
+
+    // MARK: - Sync Execution
+
+    /// Trigger a sync, debouncing rapid-fire requests.
+    private func triggerSync(reason: String) {
+        // Debounce: don't sync if we synced very recently
+        if let lastSync = lastSyncTime {
+            let elapsed = Date().timeIntervalSince(lastSync)
+            if elapsed < Self.minSyncIntervalSeconds {
+                logger("Skipping \(reason) sync (last sync was \(Int(elapsed))s ago)")
+                return
+            }
+        }
+
+        // Don't spawn duplicate syncs
+        syncQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            if self.isSyncing {
+                self.logger("Sync already in progress, skipping \(reason) sync")
+                return
+            }
+
+            self.isSyncing = true
+            self.lastSyncTime = Date()
+
+            self.performSync(reason: reason)
+
+            self.isSyncing = false
+
+            // Re-schedule timer after wake (in case it was cancelled during sleep)
+            if reason == "wake" {
+                DispatchQueue.main.async {
+                    self.scheduleSyncTimer()
+                }
+            }
+        }
+    }
+
+    /// Perform the actual sync with retry logic.
+    private func performSync(reason: String) {
+        logger("Starting \(reason) sync...")
+
+        let maxRetryAttempts = 5
+        let baseRetryDelay: TimeInterval = 2.0
+        let maxRetryDelay: TimeInterval = 60.0
+
+        var attempt = 0
+        var lastError: Error?
+
+        while attempt < maxRetryAttempts {
+            do {
+                let sync = MailSync(mailDatabase: mailDatabase)
+                let result = try sync.sync(incremental: true)
+
+                logger("Sync complete: +\(result.messagesAdded) ~\(result.messagesUpdated) (\(String(format: "%.2f", result.duration))s)")
+
+                if !result.errors.isEmpty {
+                    logger("  \(result.errors.count) warning(s)")
+                }
+                return
+
+            } catch {
+                lastError = error
+                attempt += 1
+
+                // Check if error is transient
+                let description = error.localizedDescription.lowercased()
+                let isTransient = description.contains("locked") ||
+                                  description.contains("busy") ||
+                                  description.contains("timeout") ||
+                                  description.contains("temporarily") ||
+                                  description.contains("try again")
+
+                if isTransient && attempt < maxRetryAttempts {
+                    let delay = min(baseRetryDelay * pow(2.0, Double(attempt - 1)), maxRetryDelay)
+                    let jitter = delay * Double.random(in: 0.1...0.2)
+                    let totalDelay = delay + jitter
+
+                    logger("Transient error (attempt \(attempt)/\(maxRetryAttempts)): \(error.localizedDescription)")
+                    logger("Retrying in \(String(format: "%.1f", totalDelay))s...")
+
+                    Thread.sleep(forTimeInterval: totalDelay)
+                } else {
+                    break
+                }
+            }
+        }
+
+        if let error = lastError {
+            logger("ERROR: Sync failed after \(attempt) attempt(s): \(error.localizedDescription)")
+        }
+    }
+}
+
+/// Perform a sync in daemon mode with retry logic.
+/// This is a standalone function for use during daemon startup.
+private func performDaemonSync(mailDatabase: MailDatabase) {
+    let maxRetryAttempts = 5
+    let baseRetryDelay: TimeInterval = 2.0
+    let maxRetryDelay: TimeInterval = 60.0
+
+    var attempt = 0
+
+    while attempt < maxRetryAttempts {
+        do {
+            let sync = MailSync(mailDatabase: mailDatabase)
+            let result = try sync.sync(incremental: true)
+
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            fputs("[\(timestamp)] Sync complete: +\(result.messagesAdded) ~\(result.messagesUpdated) (\(String(format: "%.2f", result.duration))s)\n", stdout)
+            fflush(stdout)
+            return
+
+        } catch {
+            attempt += 1
+
+            let description = error.localizedDescription.lowercased()
+            let isTransient = description.contains("locked") ||
+                              description.contains("busy") ||
+                              description.contains("timeout") ||
+                              description.contains("temporarily") ||
+                              description.contains("try again")
+
+            if isTransient && attempt < maxRetryAttempts {
+                let delay = min(baseRetryDelay * pow(2.0, Double(attempt - 1)), maxRetryDelay)
+                let jitter = delay * Double.random(in: 0.1...0.2)
+                let totalDelay = delay + jitter
+
+                let timestamp = ISO8601DateFormatter().string(from: Date())
+                fputs("[\(timestamp)] Transient error (attempt \(attempt)/\(maxRetryAttempts)): \(error.localizedDescription)\n", stdout)
+                fputs("[\(timestamp)] Retrying in \(String(format: "%.1f", totalDelay))s...\n", stdout)
+                fflush(stdout)
+
+                Thread.sleep(forTimeInterval: totalDelay)
+            } else {
+                let timestamp = ISO8601DateFormatter().string(from: Date())
+                fputs("[\(timestamp)] ERROR: Initial sync failed: \(error.localizedDescription)\n", stderr)
+                fflush(stderr)
+                return
+            }
+        }
     }
 }
 
