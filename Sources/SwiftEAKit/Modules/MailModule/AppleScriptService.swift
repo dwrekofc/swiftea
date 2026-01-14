@@ -182,28 +182,61 @@ public final class AppleScriptService: Sendable {
         }
     }
 
+    /// Default timeout for waiting for Mail.app to launch (in seconds)
+    public static let defaultMailLaunchTimeout: Int = 10
+
+    /// Default polling interval when waiting for Mail.app to launch (in microseconds)
+    public static let defaultMailPollIntervalMicroseconds: UInt32 = 100_000  // 100ms
+
     /// Ensure Mail.app is running
     ///
-    /// Launches Mail.app if it's not running. Note that this may trigger
-    /// a permission prompt if automation permission is not yet granted.
+    /// Launches Mail.app if it's not running and waits for it to be ready.
+    /// Uses polling instead of a fixed delay for optimal performance:
+    /// - If Mail is already running, returns immediately (no delay)
+    /// - If Mail needs to launch, polls every 100ms until ready or timeout
     ///
+    /// - Parameter timeout: Maximum seconds to wait for Mail.app to launch (default: 10)
+    /// - Throws: `AppleScriptError.mailLaunchTimeout` if Mail.app doesn't start within timeout
     /// - Throws: `AppleScriptError` if Mail.app cannot be launched
-    public func ensureMailRunning() throws {
-        let script = """
+    public func ensureMailRunning(timeout: Int = AppleScriptService.defaultMailLaunchTimeout) throws {
+        // First, check if Mail is already running (fast path)
+        let checkRunningScript = """
             tell application "Mail"
-                if not running then
-                    launch
-                    delay 1
-                end if
                 return running
             end tell
             """
 
-        let result = try execute(script)
-
-        if result.output?.lowercased() != "true" {
-            throw AppleScriptError.mailAppNotResponding(underlying: "Failed to launch Mail.app")
+        let initialCheck = try execute(checkRunningScript)
+        if initialCheck.output?.lowercased() == "true" {
+            // Mail is already running, return immediately
+            return
         }
+
+        // Mail is not running, launch it
+        let launchScript = """
+            tell application "Mail"
+                launch
+            end tell
+            """
+        _ = try execute(launchScript)
+
+        // Poll until Mail.app is running or timeout
+        let startTime = Date()
+        let timeoutInterval = TimeInterval(timeout)
+
+        while Date().timeIntervalSince(startTime) < timeoutInterval {
+            let checkResult = try execute(checkRunningScript)
+            if checkResult.output?.lowercased() == "true" {
+                // Mail is now running
+                return
+            }
+
+            // Wait before next poll (100ms)
+            usleep(Self.defaultMailPollIntervalMicroseconds)
+        }
+
+        // Timeout reached
+        throw AppleScriptError.mailLaunchTimeout(seconds: timeout)
     }
 
     // MARK: - Error Mapping

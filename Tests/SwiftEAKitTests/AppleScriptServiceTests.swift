@@ -632,4 +632,41 @@ final class AppleScriptServiceTests: XCTestCase {
         XCTAssertTrue(openedCompose.contains("return \"opened\""))
         XCTAssertTrue(sentCompose.contains("return \"sent\""))
     }
+
+    // MARK: - Mail Launch Timeout Error Tests
+
+    func testMailLaunchTimeoutErrorDescription() {
+        let error = AppleScriptError.mailLaunchTimeout(seconds: 10)
+        XCTAssertNotNil(error.errorDescription)
+        XCTAssertTrue(error.errorDescription!.contains("10"))
+        XCTAssertTrue(error.errorDescription!.contains("failed to launch"))
+    }
+
+    func testMailLaunchTimeoutHasRecoveryGuidance() {
+        let error = AppleScriptError.mailLaunchTimeout(seconds: 5)
+        XCTAssertNotNil(error.recoveryGuidance)
+        XCTAssertTrue(error.recoveryGuidance!.contains("manually") || error.recoveryGuidance!.contains("permissions"))
+    }
+
+    // MARK: - ensureMailRunning Configuration Tests
+
+    func testDefaultMailLaunchTimeoutIsReasonable() {
+        // Verify default timeout is 10 seconds as specified in acceptance criteria
+        XCTAssertEqual(AppleScriptService.defaultMailLaunchTimeout, 10)
+    }
+
+    func testDefaultMailPollIntervalIsReasonable() {
+        // Verify default poll interval is 100ms (100,000 microseconds)
+        XCTAssertEqual(AppleScriptService.defaultMailPollIntervalMicroseconds, 100_000)
+    }
+
+    func testEnsureMailRunningAcceptsCustomTimeout() {
+        // This test verifies the method signature accepts a timeout parameter
+        // We can't actually test the full behavior without Mail.app, but we can
+        // verify the API exists and compiles correctly
+        let service = AppleScriptService()
+        // The method should accept an optional timeout parameter
+        // Note: This will actually try to launch Mail.app, so we just verify it compiles
+        _ = type(of: service.ensureMailRunning(timeout:))
+    }
 }
