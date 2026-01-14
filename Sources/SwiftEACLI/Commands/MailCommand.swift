@@ -17,6 +17,47 @@ public struct Mail: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "mail",
         abstract: "Mail operations (sync, search, show, export, actions)",
+        discussion: """
+            SwiftEA mail commands interact with Apple Mail.app to sync, search,
+            and perform actions on your email.
+
+            AUTOMATION PERMISSION
+            Action commands (archive, delete, move, flag, mark, reply, compose)
+            require macOS Automation permission for Mail.app. On first run, macOS
+            will prompt you to grant permission. To grant permission manually:
+
+              1. Open System Settings > Privacy & Security > Automation
+              2. Find SwiftEA (or Terminal if running from terminal)
+              3. Enable the toggle for Mail.app
+
+            SAFETY FLAGS
+            Destructive actions (archive, delete, move) require explicit confirmation:
+
+              --dry-run    Preview what would happen without making changes
+              --yes        Confirm the action and execute it
+
+            Running a destructive action without --yes or --dry-run will show an
+            error explaining the requirement.
+
+            EXAMPLES
+              # Sync mail from Apple Mail
+              swiftea mail sync
+
+              # Search for emails from a specific sender
+              swiftea mail search "from:alice@example.com"
+
+              # Preview archiving a message (no changes made)
+              swiftea mail archive --id mail-abc123 --dry-run
+
+              # Archive a message (requires confirmation)
+              swiftea mail archive --id mail-abc123 --yes
+
+              # Flag a message
+              swiftea mail flag --id mail-abc123 --set
+
+              # Compose a new email draft
+              swiftea mail compose --to bob@example.com --subject "Hello"
+            """,
         subcommands: [
             MailSyncCommand.self,
             MailSearchCommand.self,
@@ -1365,29 +1406,53 @@ struct MailArchiveCommand: ParsableCommand {
     func run() throws {
         let vault = try VaultContext.require()
 
-        // Open mail database to validate message exists
+        // Open mail database
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        guard let message = try mailDatabase.getMessage(id: id) else {
-            throw MailActionError.messageNotFound(id)
-        }
+        // Resolve message to Mail.app reference
+        let resolver = MessageResolver(database: mailDatabase)
+        let resolved = try resolver.resolve(id: id)
 
         if dryRun {
             print("[DRY RUN] Would archive message:")
-            print("  ID: \(message.id)")
-            print("  Subject: \(message.subject)")
-            print("  From: \(message.senderEmail ?? "Unknown")")
-            print("  Current mailbox: \(message.mailboxName ?? "Unknown")")
+            print("  ID: \(resolved.swiftEAId)")
+            print("  Message-ID: \(resolved.messageId)")
+            print("  Subject: \(resolved.message.subject)")
+            print("  From: \(resolved.message.senderEmail ?? "Unknown")")
+            print("  Current mailbox: \(resolved.message.mailboxName ?? "Unknown")")
             return
         }
 
-        // TODO: Implement AppleScript execution (swiftea-01t.2)
-        print("Archiving message: \(message.id)")
-        print("  Subject: \(message.subject)")
-        print("Action: Archive via AppleScript (not yet implemented)")
+        // Execute archive via AppleScript
+        // Archive in Mail.app moves to the account's Archive mailbox
+        let script = """
+            set targetMessages to (every message whose message id is "\(escapeAppleScript(resolved.messageId))")
+            if (count of targetMessages) = 0 then
+                error "Message not found" number -1728
+            end if
+            set theMessage to item 1 of targetMessages
+            set theAccount to account of mailbox of theMessage
+            set archiveMailbox to mailbox "Archive" of theAccount
+            move theMessage to archiveMailbox
+            return "archived"
+            """
+
+        let appleScriptService = AppleScriptService.shared
+        let result = try appleScriptService.executeMailScript(script)
+
+        if result.success {
+            print("Archived message: \(resolved.swiftEAId)")
+            print("  Subject: \(resolved.message.subject)")
+        }
+    }
+
+    private func escapeAppleScript(_ string: String) -> String {
+        string
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
     }
 }
 
@@ -1423,29 +1488,36 @@ struct MailDeleteCommand: ParsableCommand {
     func run() throws {
         let vault = try VaultContext.require()
 
-        // Open mail database to validate message exists
+        // Open mail database
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        guard let message = try mailDatabase.getMessage(id: id) else {
-            throw MailActionError.messageNotFound(id)
-        }
+        // Resolve message to Mail.app reference
+        let resolver = MessageResolver(database: mailDatabase)
+        let resolved = try resolver.resolve(id: id)
 
         if dryRun {
             print("[DRY RUN] Would delete message:")
-            print("  ID: \(message.id)")
-            print("  Subject: \(message.subject)")
-            print("  From: \(message.senderEmail ?? "Unknown")")
-            print("  Current mailbox: \(message.mailboxName ?? "Unknown")")
+            print("  ID: \(resolved.swiftEAId)")
+            print("  Message-ID: \(resolved.messageId)")
+            print("  Subject: \(resolved.message.subject)")
+            print("  From: \(resolved.message.senderEmail ?? "Unknown")")
+            print("  Current mailbox: \(resolved.message.mailboxName ?? "Unknown")")
             return
         }
 
-        // TODO: Implement AppleScript execution (swiftea-01t.2)
-        print("Deleting message: \(message.id)")
-        print("  Subject: \(message.subject)")
-        print("Action: Delete via AppleScript (not yet implemented)")
+        // Execute delete via AppleScript
+        let script = MailActionScripts.deleteMessage(byMessageId: resolved.messageId)
+
+        let appleScriptService = AppleScriptService.shared
+        let result = try appleScriptService.executeMailScript(script)
+
+        if result.success {
+            print("Deleted message: \(resolved.swiftEAId)")
+            print("  Subject: \(resolved.message.subject)")
+        }
     }
 }
 
@@ -1489,33 +1561,41 @@ struct MailMoveCommand: ParsableCommand {
     func run() throws {
         let vault = try VaultContext.require()
 
-        // Open mail database to validate message exists
+        // Open mail database
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        guard let message = try mailDatabase.getMessage(id: id) else {
-            throw MailActionError.messageNotFound(id)
-        }
+        // Resolve message to Mail.app reference
+        let resolver = MessageResolver(database: mailDatabase)
+        let resolved = try resolver.resolve(id: id)
 
         let targetMailbox = mailbox!
 
         if dryRun {
             print("[DRY RUN] Would move message:")
-            print("  ID: \(message.id)")
-            print("  Subject: \(message.subject)")
-            print("  From: \(message.senderEmail ?? "Unknown")")
-            print("  Current mailbox: \(message.mailboxName ?? "Unknown")")
+            print("  ID: \(resolved.swiftEAId)")
+            print("  Message-ID: \(resolved.messageId)")
+            print("  Subject: \(resolved.message.subject)")
+            print("  From: \(resolved.message.senderEmail ?? "Unknown")")
+            print("  Current mailbox: \(resolved.message.mailboxName ?? "Unknown")")
             print("  Target mailbox: \(targetMailbox)")
             return
         }
 
-        // TODO: Implement AppleScript execution (swiftea-01t.2)
-        print("Moving message: \(message.id)")
-        print("  Subject: \(message.subject)")
-        print("  To mailbox: \(targetMailbox)")
-        print("Action: Move via AppleScript (not yet implemented)")
+        // Execute move via AppleScript
+        // Use the same account as the source message for the target mailbox
+        let script = MailActionScripts.moveMessage(byMessageId: resolved.messageId, toMailbox: targetMailbox)
+
+        let appleScriptService = AppleScriptService.shared
+        let result = try appleScriptService.executeMailScript(script)
+
+        if result.success {
+            print("Moved message: \(resolved.swiftEAId)")
+            print("  Subject: \(resolved.message.subject)")
+            print("  To mailbox: \(targetMailbox)")
+        }
     }
 }
 
@@ -1528,6 +1608,7 @@ struct MailFlagCommand: ParsableCommand {
 
             Use --set to flag the message.
             Use --clear to remove the flag.
+            Use --dry-run to preview the action without making changes.
             """
     )
 
@@ -1540,6 +1621,9 @@ struct MailFlagCommand: ParsableCommand {
     @Flag(name: .long, help: "Clear the flag from the message")
     var clear: Bool = false
 
+    @Flag(name: .long, help: "Preview the action without making changes")
+    var dryRun: Bool = false
+
     func validate() throws {
         // Exactly one of --set or --clear must be provided
         if set == clear {
@@ -1550,23 +1634,38 @@ struct MailFlagCommand: ParsableCommand {
     func run() throws {
         let vault = try VaultContext.require()
 
-        // Open mail database to validate message exists
+        // Open mail database
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        guard let message = try mailDatabase.getMessage(id: id) else {
-            throw MailActionError.messageNotFound(id)
+        // Resolve message to Mail.app reference
+        let resolver = MessageResolver(database: mailDatabase)
+        let resolved = try resolver.resolve(id: id)
+
+        let willFlag = set
+        let action = willFlag ? "flag" : "unflag"
+
+        if dryRun {
+            print("[DRY RUN] Would \(action) message:")
+            print("  ID: \(resolved.swiftEAId)")
+            print("  Message-ID: \(resolved.messageId)")
+            print("  Subject: \(resolved.message.subject)")
+            print("  Current flag status: \(resolved.message.isFlagged ? "flagged" : "not flagged")")
+            return
         }
 
-        let action = set ? "Setting flag on" : "Clearing flag from"
-        print("\(action) message: \(message.id)")
-        print("  Subject: \(message.subject)")
-        print("  Current flag status: \(message.isFlagged ? "flagged" : "not flagged")")
+        // Execute flag via AppleScript
+        let script = MailActionScripts.setFlag(byMessageId: resolved.messageId, flagged: willFlag)
 
-        // TODO: Implement AppleScript execution (swiftea-01t.2)
-        print("Action: \(set ? "Set" : "Clear") flag via AppleScript (not yet implemented)")
+        let appleScriptService = AppleScriptService.shared
+        let result = try appleScriptService.executeMailScript(script)
+
+        if result.success {
+            print("\(willFlag ? "Flagged" : "Unflagged") message: \(resolved.swiftEAId)")
+            print("  Subject: \(resolved.message.subject)")
+        }
     }
 }
 
@@ -1579,6 +1678,7 @@ struct MailMarkCommand: ParsableCommand {
 
             Use --read to mark the message as read.
             Use --unread to mark the message as unread.
+            Use --dry-run to preview the action without making changes.
             """
     )
 
@@ -1591,6 +1691,9 @@ struct MailMarkCommand: ParsableCommand {
     @Flag(name: .long, help: "Mark the message as unread")
     var unread: Bool = false
 
+    @Flag(name: .long, help: "Preview the action without making changes")
+    var dryRun: Bool = false
+
     func validate() throws {
         // Exactly one of --read or --unread must be provided
         if read == unread {
@@ -1601,23 +1704,38 @@ struct MailMarkCommand: ParsableCommand {
     func run() throws {
         let vault = try VaultContext.require()
 
-        // Open mail database to validate message exists
+        // Open mail database
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        guard let message = try mailDatabase.getMessage(id: id) else {
-            throw MailActionError.messageNotFound(id)
+        // Resolve message to Mail.app reference
+        let resolver = MessageResolver(database: mailDatabase)
+        let resolved = try resolver.resolve(id: id)
+
+        let markAsRead = read
+        let action = markAsRead ? "mark as read" : "mark as unread"
+
+        if dryRun {
+            print("[DRY RUN] Would \(action) message:")
+            print("  ID: \(resolved.swiftEAId)")
+            print("  Message-ID: \(resolved.messageId)")
+            print("  Subject: \(resolved.message.subject)")
+            print("  Current status: \(resolved.message.isRead ? "read" : "unread")")
+            return
         }
 
-        let action = read ? "Marking as read" : "Marking as unread"
-        print("\(action): \(message.id)")
-        print("  Subject: \(message.subject)")
-        print("  Current status: \(message.isRead ? "read" : "unread")")
+        // Execute mark via AppleScript
+        let script = MailActionScripts.setReadStatus(byMessageId: resolved.messageId, read: markAsRead)
 
-        // TODO: Implement AppleScript execution (swiftea-01t.2)
-        print("Action: Mark \(read ? "read" : "unread") via AppleScript (not yet implemented)")
+        let appleScriptService = AppleScriptService.shared
+        let result = try appleScriptService.executeMailScript(script)
+
+        if result.success {
+            print("Marked message as \(markAsRead ? "read" : "unread"): \(resolved.swiftEAId)")
+            print("  Subject: \(resolved.message.subject)")
+        }
     }
 }
 
@@ -1630,6 +1748,7 @@ struct MailReplyCommand: ParsableCommand {
 
             By default, opens the reply in Mail.app for editing.
             Use --send to send the reply immediately (requires --body).
+            Use --dry-run to preview the action without making changes.
 
             The reply will be addressed to the original sender and include
             the original message as quoted text.
@@ -1648,6 +1767,9 @@ struct MailReplyCommand: ParsableCommand {
     @Flag(name: .long, help: "Send the reply immediately instead of opening a draft")
     var send: Bool = false
 
+    @Flag(name: .long, help: "Preview the action without making changes")
+    var dryRun: Bool = false
+
     func validate() throws {
         // If --send is specified, --body is required
         if send && body == nil {
@@ -1658,33 +1780,51 @@ struct MailReplyCommand: ParsableCommand {
     func run() throws {
         let vault = try VaultContext.require()
 
-        // Open mail database to validate message exists
+        // Open mail database
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        guard let message = try mailDatabase.getMessage(id: id) else {
-            throw MailActionError.messageNotFound(id)
+        // Resolve message to Mail.app reference
+        let resolver = MessageResolver(database: mailDatabase)
+        let resolved = try resolver.resolve(id: id)
+
+        let replyType = all ? "reply all" : "reply"
+
+        if dryRun {
+            print("[DRY RUN] Would create \(replyType) to message:")
+            print("  ID: \(resolved.swiftEAId)")
+            print("  Message-ID: \(resolved.messageId)")
+            print("  Subject: \(resolved.message.subject)")
+            print("  Original sender: \(resolved.message.senderEmail ?? "Unknown")")
+            if let replyBody = body {
+                let preview = replyBody.prefix(100)
+                print("  Body: \(preview)\(replyBody.count > 100 ? "..." : "")")
+            }
+            print("  Mode: \(send ? "Send immediately" : "Open draft in Mail.app")")
+            return
         }
 
-        let replyType = all ? "Reply All" : "Reply"
-        print("Creating \(replyType.lowercased()) to message: \(message.id)")
-        print("  Subject: \(message.subject)")
-        print("  Original sender: \(message.senderEmail ?? "Unknown")")
+        // Execute reply via AppleScript
+        let script = MailActionScripts.createReply(
+            byMessageId: resolved.messageId,
+            replyToAll: all,
+            body: body,
+            send: send
+        )
 
-        if let replyBody = body {
-            print("  Reply body: \(replyBody.prefix(50))...")
+        let appleScriptService = AppleScriptService.shared
+        let result = try appleScriptService.executeMailScript(script)
+
+        if result.success {
+            if send {
+                print("Sent \(replyType) to: \(resolved.message.senderEmail ?? "Unknown")")
+            } else {
+                print("Created \(replyType) draft in Mail.app")
+            }
+            print("  Original subject: \(resolved.message.subject)")
         }
-
-        if send {
-            print("  Mode: Send immediately")
-        } else {
-            print("  Mode: Open draft in Mail.app")
-        }
-
-        // TODO: Implement AppleScript execution (swiftea-01t.2)
-        print("Action: \(replyType) via AppleScript (not yet implemented)")
     }
 }
 
@@ -1697,6 +1837,7 @@ struct MailComposeCommand: ParsableCommand {
 
             By default, opens the compose window in Mail.app for editing.
             Use --send to send the message immediately.
+            Use --dry-run to preview the action without making changes.
             """
     )
 
@@ -1718,30 +1859,50 @@ struct MailComposeCommand: ParsableCommand {
     @Flag(name: .long, help: "Send the message immediately instead of opening a draft")
     var send: Bool = false
 
+    @Flag(name: .long, help: "Preview the action without making changes")
+    var dryRun: Bool = false
+
     func run() throws {
         _ = try VaultContext.require()
 
-        print("Composing new message:")
-        print("  To: \(to)")
-        print("  Subject: \(subject)")
-
-        if let ccRecipients = cc {
-            print("  CC: \(ccRecipients)")
-        }
-        if let bccRecipients = bcc {
-            print("  BCC: \(bccRecipients)")
-        }
-        if let messageBody = body {
-            print("  Body: \(messageBody.prefix(50))...")
-        }
-
-        if send {
-            print("  Mode: Send immediately")
-        } else {
-            print("  Mode: Open draft in Mail.app")
+        if dryRun {
+            print("[DRY RUN] Would compose new message:")
+            print("  To: \(to)")
+            print("  Subject: \(subject)")
+            if let ccRecipients = cc {
+                print("  CC: \(ccRecipients)")
+            }
+            if let bccRecipients = bcc {
+                print("  BCC: \(bccRecipients)")
+            }
+            if let messageBody = body {
+                let preview = messageBody.prefix(100)
+                print("  Body: \(preview)\(messageBody.count > 100 ? "..." : "")")
+            }
+            print("  Mode: \(send ? "Send immediately" : "Open draft in Mail.app")")
+            return
         }
 
-        // TODO: Implement AppleScript execution (swiftea-01t.2)
-        print("Action: Compose via AppleScript (not yet implemented)")
+        // Execute compose via AppleScript
+        let script = MailActionScripts.compose(
+            to: to,
+            subject: subject,
+            body: body,
+            cc: cc,
+            bcc: bcc,
+            send: send
+        )
+
+        let appleScriptService = AppleScriptService.shared
+        let result = try appleScriptService.executeMailScript(script)
+
+        if result.success {
+            if send {
+                print("Sent message to: \(to)")
+            } else {
+                print("Created draft in Mail.app")
+            }
+            print("  Subject: \(subject)")
+        }
     }
 }
