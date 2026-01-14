@@ -1,6 +1,24 @@
 {
-  "originHash" : "eb37bcd6562a13f6c87d31c78c7fc9933333a46958577e27787a400cf45903b7",
+  "originHash" : "a1467ad6a0885d7e7e3233e1d0552928c90686a419b5e059b5daac27c8902c30",
   "pins" : [
+    {
+      "identity" : "grdb.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/groue/GRDB.swift.git",
+      "state" : {
+        "revision" : "aa0079aeb82a4bf00324561a40bffe68c6fe1c26",
+        "version" : "7.9.0"
+      }
+    },
+    {
+      "identity" : "icalendarkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-calendar/icalendarkit.git",
+      "state" : {
+        "revision" : "389fceafc1132ef284c6215118421bc88f1bfc8c",
+        "version" : "1.0.2"
+      }
+    },
     {
       "identity" : "libsql-swift",
       "kind" : "remoteSourceControl",
@@ -17,6 +35,15 @@
       "state" : {
         "revision" : "c5d11a805e765f52ba34ec7284bd4fcd6ba68615",
         "version" : "1.7.0"
+      }
+    },
+    {
+      "identity" : "vcomponentkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-calendar/vcomponentkit.git",
+      "state" : {
+        "revision" : "65b7f5066fd62fb83811e66e26ee21a326a015ac",
+        "version" : "1.0.5"
       }
     }
   ],
