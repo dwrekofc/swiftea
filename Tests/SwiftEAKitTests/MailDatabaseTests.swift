@@ -230,6 +230,127 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertEqual(retrieved?.exportPath, "/exports/email.md")
     }
 
+    // MARK: - Update Message Body (On-Demand Fetching)
+
+    func testUpdateMessageBodyWithBothTextAndHtml() throws {
+        try database.initialize()
+
+        // Insert message without body
+        let message = MailMessage(
+            id: "body-update-test",
+            subject: "Body Update Test",
+            bodyText: nil,
+            bodyHtml: nil
+        )
+        try database.upsertMessage(message)
+
+        // Verify body is initially nil
+        let initialRetrieved = try database.getMessage(id: "body-update-test")
+        XCTAssertNil(initialRetrieved?.bodyText)
+        XCTAssertNil(initialRetrieved?.bodyHtml)
+
+        // Update body
+        try database.updateMessageBody(
+            id: "body-update-test",
+            bodyText: "Plain text body",
+            bodyHtml: "<p>HTML body</p>"
+        )
+
+        // Verify body was updated
+        let retrieved = try database.getMessage(id: "body-update-test")
+        XCTAssertEqual(retrieved?.bodyText, "Plain text body")
+        XCTAssertEqual(retrieved?.bodyHtml, "<p>HTML body</p>")
+    }
+
+    func testUpdateMessageBodyTextOnly() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "text-only-test", subject: "Text Only Test")
+        try database.upsertMessage(message)
+
+        try database.updateMessageBody(
+            id: "text-only-test",
+            bodyText: "Only plain text",
+            bodyHtml: nil
+        )
+
+        let retrieved = try database.getMessage(id: "text-only-test")
+        XCTAssertEqual(retrieved?.bodyText, "Only plain text")
+        XCTAssertNil(retrieved?.bodyHtml)
+    }
+
+    func testUpdateMessageBodyHtmlOnly() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "html-only-test", subject: "HTML Only Test")
+        try database.upsertMessage(message)
+
+        try database.updateMessageBody(
+            id: "html-only-test",
+            bodyText: nil,
+            bodyHtml: "<html><body>HTML content</body></html>"
+        )
+
+        let retrieved = try database.getMessage(id: "html-only-test")
+        XCTAssertNil(retrieved?.bodyText)
+        XCTAssertEqual(retrieved?.bodyHtml, "<html><body>HTML content</body></html>")
+    }
+
+    func testUpdateMessageBodyWithSpecialCharacters() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "special-body-test", subject: "Special Body Test")
+        try database.upsertMessage(message)
+
+        // Body with SQL-injection-like content and special characters
+        let bodyText = "Test with 'quotes' and \"double quotes\" and emoji 🎉 and O'Brien's code"
+        let bodyHtml = "<p>Test's \"content\" with <script>alert('xss')</script></p>"
+
+        try database.updateMessageBody(
+            id: "special-body-test",
+            bodyText: bodyText,
+            bodyHtml: bodyHtml
+        )
+
+        let retrieved = try database.getMessage(id: "special-body-test")
+        XCTAssertEqual(retrieved?.bodyText, bodyText)
+        XCTAssertEqual(retrieved?.bodyHtml, bodyHtml)
+    }
+
+    func testUpdateMessageBodyOverwritesExistingBody() throws {
+        try database.initialize()
+
+        // Insert message with initial body
+        let message = MailMessage(
+            id: "overwrite-body-test",
+            subject: "Overwrite Body Test",
+            bodyText: "Original text",
+            bodyHtml: "<p>Original HTML</p>"
+        )
+        try database.upsertMessage(message)
+
+        // Update body
+        try database.updateMessageBody(
+            id: "overwrite-body-test",
+            bodyText: "New text",
+            bodyHtml: "<p>New HTML</p>"
+        )
+
+        let retrieved = try database.getMessage(id: "overwrite-body-test")
+        XCTAssertEqual(retrieved?.bodyText, "New text")
+        XCTAssertEqual(retrieved?.bodyHtml, "<p>New HTML</p>")
+    }
+
+    func testUpdateMessageBodyBeforeInitializeThrows() throws {
+        // Don't call initialize()
+        XCTAssertThrowsError(try database.updateMessageBody(id: "test", bodyText: "text", bodyHtml: nil)) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized, got \(error)")
+                return
+            }
+        }
+    }
+
     // MARK: - Sync Status
 
     func testSetAndGetSyncStatus() throws {
@@ -547,5 +668,238 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertEqual(retrieved?.subject, "Persist")
 
         newDatabase.close()
+    }
+
+    // MARK: - Batch Insert Tests
+
+    func testBatchUpsertMessagesInsertsAll() throws {
+        try database.initialize()
+
+        let messages = (1...100).map { i in
+            MailMessage(
+                id: "batch-\(i)",
+                appleRowId: i,
+                subject: "Batch Test \(i)",
+                senderEmail: "sender\(i)@example.com",
+                isRead: i % 2 == 0,
+                isFlagged: i % 3 == 0
+            )
+        }
+
+        let result = try database.batchUpsertMessages(messages)
+
+        XCTAssertEqual(result.inserted, 100)
+        XCTAssertEqual(result.updated, 0)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertTrue(result.errors.isEmpty)
+        XCTAssertGreaterThan(result.duration, 0)
+
+        // Verify messages were inserted
+        let retrieved1 = try database.getMessage(id: "batch-1")
+        XCTAssertNotNil(retrieved1)
+        XCTAssertEqual(retrieved1?.subject, "Batch Test 1")
+
+        let retrieved50 = try database.getMessage(id: "batch-50")
+        XCTAssertNotNil(retrieved50)
+        XCTAssertEqual(retrieved50?.subject, "Batch Test 50")
+
+        let retrieved100 = try database.getMessage(id: "batch-100")
+        XCTAssertNotNil(retrieved100)
+        XCTAssertEqual(retrieved100?.subject, "Batch Test 100")
+    }
+
+    func testBatchUpsertMessagesUpdatesExisting() throws {
+        try database.initialize()
+
+        // Insert initial messages
+        let initialMessages = (1...50).map { i in
+            MailMessage(id: "batch-\(i)", subject: "Initial \(i)")
+        }
+        _ = try database.batchUpsertMessages(initialMessages)
+
+        // Update with new messages (some new, some updates)
+        let updateMessages = (25...75).map { i in
+            MailMessage(id: "batch-\(i)", subject: "Updated \(i)")
+        }
+
+        let result = try database.batchUpsertMessages(updateMessages)
+
+        // 25-50 are updates (26 messages), 51-75 are inserts (25 messages)
+        XCTAssertEqual(result.inserted, 25)
+        XCTAssertEqual(result.updated, 26)
+        XCTAssertEqual(result.failed, 0)
+
+        // Verify updates
+        let retrieved25 = try database.getMessage(id: "batch-25")
+        XCTAssertEqual(retrieved25?.subject, "Updated 25")
+
+        let retrieved50 = try database.getMessage(id: "batch-50")
+        XCTAssertEqual(retrieved50?.subject, "Updated 50")
+
+        // Verify original unchanged
+        let retrieved1 = try database.getMessage(id: "batch-1")
+        XCTAssertEqual(retrieved1?.subject, "Initial 1")
+    }
+
+    func testBatchUpsertMessagesWithCustomBatchSize() throws {
+        try database.initialize()
+
+        let messages = (1...500).map { i in
+            MailMessage(id: "custom-batch-\(i)", subject: "Custom Batch \(i)")
+        }
+
+        // Use small batch size
+        let config = MailDatabase.BatchInsertConfig(batchSize: 50)
+        let result = try database.batchUpsertMessages(messages, config: config)
+
+        XCTAssertEqual(result.inserted, 500)
+        XCTAssertEqual(result.updated, 0)
+        XCTAssertEqual(result.failed, 0)
+
+        // Verify all were inserted
+        let retrieved = try database.getMessage(id: "custom-batch-250")
+        XCTAssertNotNil(retrieved)
+        XCTAssertEqual(retrieved?.subject, "Custom Batch 250")
+    }
+
+    func testBatchUpsertMessagesDefaultConfig() {
+        let config = MailDatabase.BatchInsertConfig.default
+        XCTAssertEqual(config.batchSize, 1000)
+    }
+
+    func testBatchUpsertMessagesConfigMinimumBatchSize() {
+        let config = MailDatabase.BatchInsertConfig(batchSize: 0)
+        XCTAssertEqual(config.batchSize, 1)
+
+        let negativeConfig = MailDatabase.BatchInsertConfig(batchSize: -10)
+        XCTAssertEqual(negativeConfig.batchSize, 1)
+    }
+
+    func testBatchUpsertMessagesEmptyArray() throws {
+        try database.initialize()
+
+        let result = try database.batchUpsertMessages([])
+
+        XCTAssertEqual(result.inserted, 0)
+        XCTAssertEqual(result.updated, 0)
+        XCTAssertEqual(result.failed, 0)
+        XCTAssertTrue(result.errors.isEmpty)
+    }
+
+    func testBatchUpsertMessagesWithSpecialCharacters() throws {
+        try database.initialize()
+
+        let messages = [
+            MailMessage(id: "special-1", subject: "Test with 'single quotes'"),
+            MailMessage(id: "special-2", subject: "Test with \"double quotes\""),
+            MailMessage(id: "special-3", subject: "Test with emoji 🎉"),
+            MailMessage(id: "special-4", subject: "Test'; DROP TABLE messages; --")
+        ]
+
+        let result = try database.batchUpsertMessages(messages)
+
+        XCTAssertEqual(result.inserted, 4)
+        XCTAssertEqual(result.failed, 0)
+
+        let retrieved1 = try database.getMessage(id: "special-1")
+        XCTAssertEqual(retrieved1?.subject, "Test with 'single quotes'")
+
+        let retrieved4 = try database.getMessage(id: "special-4")
+        XCTAssertEqual(retrieved4?.subject, "Test'; DROP TABLE messages; --")
+    }
+
+    func testBatchUpsertMessagesPerformance() throws {
+        try database.initialize()
+
+        // Create a large batch of messages
+        let messageCount = 1000
+        let messages = (1...messageCount).map { i in
+            MailMessage(
+                id: "perf-\(i)",
+                appleRowId: i,
+                messageId: "<perf\(i)@test.com>",
+                mailboxId: 1,
+                mailboxName: "INBOX",
+                accountId: "acc-1",
+                subject: "Performance Test \(i)",
+                senderName: "Sender \(i)",
+                senderEmail: "sender\(i)@test.com",
+                dateSent: Date(),
+                dateReceived: Date(),
+                isRead: i % 2 == 0,
+                isFlagged: i % 5 == 0,
+                bodyText: "This is the body text for message \(i)"
+            )
+        }
+
+        // Measure batch insert time
+        let startTime = Date()
+        let result = try database.batchUpsertMessages(messages)
+        let batchDuration = Date().timeIntervalSince(startTime)
+
+        XCTAssertEqual(result.inserted, messageCount)
+        XCTAssertEqual(result.failed, 0)
+
+        // Batch inserts should be fast (less than 5 seconds for 1000 messages)
+        XCTAssertLessThan(batchDuration, 5.0, "Batch insert should complete in less than 5 seconds")
+
+        // Log performance for reference
+        print("Batch insert of \(messageCount) messages took \(batchDuration) seconds")
+        print("Rate: \(Double(messageCount) / batchDuration) messages/second")
+    }
+
+    func testBatchUpsertMailboxes() throws {
+        try database.initialize()
+
+        let mailboxes = [
+            Mailbox(id: 1, accountId: "acc-1", name: "INBOX", fullPath: "INBOX", messageCount: 100, unreadCount: 10),
+            Mailbox(id: 2, accountId: "acc-1", name: "Sent", fullPath: "Sent", messageCount: 50, unreadCount: 0),
+            Mailbox(id: 3, accountId: "acc-1", name: "Archive", fullPath: "Archive", messageCount: 200, unreadCount: 0)
+        ]
+
+        try database.batchUpsertMailboxes(mailboxes)
+
+        let retrieved = try database.getMailboxes()
+        XCTAssertEqual(retrieved.count, 3)
+        XCTAssertTrue(retrieved.contains { $0.name == "INBOX" && $0.messageCount == 100 })
+        XCTAssertTrue(retrieved.contains { $0.name == "Sent" && $0.messageCount == 50 })
+        XCTAssertTrue(retrieved.contains { $0.name == "Archive" && $0.messageCount == 200 })
+    }
+
+    func testBatchUpsertMailboxesUpdatesExisting() throws {
+        try database.initialize()
+
+        // Insert initial mailboxes
+        let initial = [
+            Mailbox(id: 1, accountId: "acc-1", name: "INBOX", fullPath: "INBOX", messageCount: 100, unreadCount: 10)
+        ]
+        try database.batchUpsertMailboxes(initial)
+
+        // Update mailbox
+        let updated = [
+            Mailbox(id: 1, accountId: "acc-1", name: "INBOX", fullPath: "INBOX", messageCount: 150, unreadCount: 5)
+        ]
+        try database.batchUpsertMailboxes(updated)
+
+        let retrieved = try database.getMailboxes()
+        XCTAssertEqual(retrieved.count, 1)
+        XCTAssertEqual(retrieved.first?.messageCount, 150)
+        XCTAssertEqual(retrieved.first?.unreadCount, 5)
+    }
+
+    func testBatchInsertResultInitialization() {
+        let result = MailDatabase.BatchInsertResult(
+            inserted: 10,
+            updated: 5,
+            failed: 2,
+            errors: ["Error 1", "Error 2"],
+            duration: 1.5
+        )
+
+        XCTAssertEqual(result.inserted, 10)
+        XCTAssertEqual(result.updated, 5)
+        XCTAssertEqual(result.failed, 2)
+        XCTAssertEqual(result.errors.count, 2)
+        XCTAssertEqual(result.duration, 1.5)
     }
 }

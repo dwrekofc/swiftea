@@ -97,6 +97,9 @@ public final class MailSync: @unchecked Sendable {
     private var sourceDb: OpaquePointer?
     private var envelopeInfo: EnvelopeIndexInfo?
 
+    /// Sync options (including parallel workers)
+    public var options: MailSyncOptions
+
     /// Progress callback
     public var onProgress: ((SyncProgress) -> Void)?
 
@@ -104,12 +107,14 @@ public final class MailSync: @unchecked Sendable {
         mailDatabase: MailDatabase,
         discovery: EnvelopeIndexDiscovery = EnvelopeIndexDiscovery(),
         emlxParser: EmlxParser = EmlxParser(),
-        idGenerator: StableIdGenerator = StableIdGenerator()
+        idGenerator: StableIdGenerator = StableIdGenerator(),
+        options: MailSyncOptions = .default
     ) {
         self.mailDatabase = mailDatabase
         self.discovery = discovery
         self.emlxParser = emlxParser
         self.idGenerator = idGenerator
+        self.options = options
     }
 
     /// Run a sync from Apple Mail to the mirror database
@@ -191,22 +196,24 @@ public final class MailSync: @unchecked Sendable {
             messagesDeleted = result.deleted
             messagesUnchanged = result.unchanged
         } else {
-            // Full sync: process all messages
+            // Full sync: process all messages with batched database transactions
             reportProgress(.syncingMessages, 0, 1, "Querying messages...")
-            let messages = try queryMessages(since: nil)
-            let totalMessages = messages.count
+            let messageRows = try queryMessages(since: nil)
+            let totalMessages = messageRows.count
 
             reportProgress(.syncingMessages, 0, totalMessages, "Syncing \(totalMessages) messages...")
 
-            let batchSize = 100
-            for (index, messageRow) in messages.enumerated() {
-                do {
-                    let (added, updated) = try processMessage(messageRow, mailBasePath: info.mailBasePath)
-                    if added { messagesAdded += 1 }
-                    if updated { messagesUpdated += 1 }
-                    messagesProcessed += 1
+            // Phase 1: Process all messages into MailMessage objects
+            var processedMessages: [MailMessage] = []
+            processedMessages.reserveCapacity(totalMessages)
 
-                    if index % batchSize == 0 || index == totalMessages - 1 {
+            let progressBatchSize = 100
+            for (index, messageRow) in messageRows.enumerated() {
+                do {
+                    let message = try processMessageToObject(messageRow, mailBasePath: info.mailBasePath)
+                    processedMessages.append(message)
+
+                    if index % progressBatchSize == 0 || index == totalMessages - 1 {
                         reportProgress(.syncingMessages, index + 1, totalMessages,
                                        "Processed \(index + 1)/\(totalMessages) messages")
                     }
@@ -214,6 +221,17 @@ public final class MailSync: @unchecked Sendable {
                     errors.append("Message \(messageRow.rowId): \(error.localizedDescription)")
                 }
             }
+
+            // Phase 2: Batch insert all processed messages
+            reportProgress(.syncingMessages, totalMessages, totalMessages, "Writing \(processedMessages.count) messages to database...")
+
+            let batchConfig = MailDatabase.BatchInsertConfig(batchSize: options.databaseBatchSize)
+            let batchResult = try mailDatabase.batchUpsertMessages(processedMessages, config: batchConfig)
+
+            messagesAdded = batchResult.inserted
+            messagesUpdated = batchResult.updated
+            messagesProcessed = batchResult.inserted + batchResult.updated
+            errors.append(contentsOf: batchResult.errors)
         }
 
         reportProgress(.complete, messagesProcessed, messagesProcessed, "Sync complete")
@@ -260,15 +278,17 @@ public final class MailSync: @unchecked Sendable {
         if !newMessages.isEmpty {
             reportProgress(.syncingMessages, 0, newMessages.count, "Syncing \(newMessages.count) new messages...")
 
-            let batchSize = 100
+            // Process messages into objects
+            var processedMessages: [MailMessage] = []
+            processedMessages.reserveCapacity(newMessages.count)
+
+            let progressBatchSize = 100
             for (index, messageRow) in newMessages.enumerated() {
                 do {
-                    let (added, updated) = try processMessage(messageRow, mailBasePath: info.mailBasePath)
-                    if added { result.added += 1 }
-                    if updated { result.updated += 1 }
-                    result.processed += 1
+                    let message = try processMessageToObject(messageRow, mailBasePath: info.mailBasePath)
+                    processedMessages.append(message)
 
-                    if index % batchSize == 0 || index == newMessages.count - 1 {
+                    if index % progressBatchSize == 0 || index == newMessages.count - 1 {
                         reportProgress(.syncingMessages, index + 1, newMessages.count,
                                        "Processed \(index + 1)/\(newMessages.count) new messages")
                     }
@@ -276,6 +296,15 @@ public final class MailSync: @unchecked Sendable {
                     errors.append("Message \(messageRow.rowId): \(error.localizedDescription)")
                 }
             }
+
+            // Batch insert all processed messages
+            let batchConfig = MailDatabase.BatchInsertConfig(batchSize: options.databaseBatchSize)
+            let batchResult = try mailDatabase.batchUpsertMessages(processedMessages, config: batchConfig)
+
+            result.added = batchResult.inserted
+            result.updated = batchResult.updated
+            result.processed = batchResult.inserted + batchResult.updated
+            errors.append(contentsOf: batchResult.errors)
         }
 
         // Phase 2: Check for status changes on existing messages (read/flagged)
@@ -675,6 +704,88 @@ public final class MailSync: @unchecked Sendable {
         try mailDatabase.upsertMessage(message)
 
         return (added: existing == nil, updated: existing != nil)
+    }
+
+    /// Process a message row into a MailMessage object without database operations.
+    /// Used for batch insert operations.
+    private func processMessageToObject(_ row: MessageRow, mailBasePath: String) throws -> MailMessage {
+        // Generate stable ID
+        let stableId = idGenerator.generateId(
+            messageId: row.messageId,
+            subject: row.subject,
+            sender: row.sender,
+            date: row.dateReceived.map { Date(timeIntervalSince1970: $0) },
+            appleRowId: Int(row.rowId)
+        )
+
+        // Parse sender
+        var senderName: String? = nil
+        var senderEmail: String? = nil
+        if let sender = row.sender {
+            let parsed = parseSenderString(sender)
+            senderName = parsed.name
+            senderEmail = parsed.email
+        }
+
+        // Get mailbox info
+        var mailboxName: String? = nil
+        if let mailboxId = row.mailboxId {
+            let mailboxSql = "SELECT url FROM mailboxes WHERE ROWID = \(mailboxId)"
+            if let mailboxRows = try? executeQuery(mailboxSql),
+               let first = mailboxRows.first,
+               let url = first["url"] as? String {
+                mailboxName = extractMailboxName(from: url)
+            }
+        }
+
+        // Try to get body content from .emlx file
+        var bodyText: String? = nil
+        var bodyHtml: String? = nil
+        var emlxPath: String? = nil
+
+        if let mailboxId = row.mailboxId {
+            // Find mailbox path
+            let mailboxPathSql = "SELECT url FROM mailboxes WHERE ROWID = \(mailboxId)"
+            if let mailboxRows = try? executeQuery(mailboxPathSql),
+               let first = mailboxRows.first,
+               let url = first["url"] as? String {
+                // Convert mailbox URL to file path
+                let mailboxPath = convertMailboxUrlToPath(url, mailBasePath: mailBasePath)
+                emlxPath = discovery.emlxPath(forMessageId: Int(row.rowId), mailboxPath: mailboxPath, mailBasePath: mailBasePath)
+
+                // Try to parse .emlx
+                if let path = emlxPath {
+                    do {
+                        let parsed = try emlxParser.parse(path: path)
+                        bodyText = parsed.bodyText
+                        bodyHtml = parsed.bodyHtml
+                    } catch {
+                        // Log but don't fail - body content is optional
+                    }
+                }
+            }
+        }
+
+        return MailMessage(
+            id: stableId,
+            appleRowId: Int(row.rowId),
+            messageId: row.messageId,
+            mailboxId: row.mailboxId.map { Int($0) },
+            mailboxName: mailboxName,
+            accountId: nil,
+            subject: row.subject ?? "(No Subject)",
+            senderName: senderName,
+            senderEmail: senderEmail,
+            dateSent: row.dateSent.map { Date(timeIntervalSince1970: $0) },
+            dateReceived: row.dateReceived.map { Date(timeIntervalSince1970: $0) },
+            isRead: row.isRead,
+            isFlagged: row.isFlagged,
+            isDeleted: false,
+            hasAttachments: row.hasAttachments,
+            emlxPath: emlxPath,
+            bodyText: bodyText,
+            bodyHtml: bodyHtml
+        )
     }
 
     private func parseSenderString(_ sender: String) -> (name: String?, email: String?) {

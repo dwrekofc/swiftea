@@ -604,6 +604,26 @@ public final class MailDatabase: @unchecked Sendable {
             """)
     }
 
+    /// Update the body content for a message (on-demand fetching)
+    /// - Parameters:
+    ///   - id: The message ID
+    ///   - bodyText: Plain text body content (optional)
+    ///   - bodyHtml: HTML body content (optional)
+    public func updateMessageBody(id: String, bodyText: String?, bodyHtml: String?) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = try conn.execute("""
+            UPDATE messages SET
+                body_text = \(bodyText.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                body_html = \(bodyHtml.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                updated_at = \(now)
+            WHERE id = '\(escapeSql(id))'
+            """)
+    }
+
     // MARK: - Sync Status Operations
 
     /// Sync status key constants
@@ -830,6 +850,205 @@ public final class MailDatabase: @unchecked Sendable {
             }
         }
         return mailboxes
+    }
+
+    // MARK: - Batch Insert Operations
+
+    /// Configuration for batch insert operations
+    public struct BatchInsertConfig: Sendable {
+        /// Number of messages to insert per transaction batch
+        public let batchSize: Int
+
+        /// Default configuration with batch size of 1000
+        public static let `default` = BatchInsertConfig(batchSize: 1000)
+
+        public init(batchSize: Int = 1000) {
+            self.batchSize = max(1, batchSize)  // Ensure at least 1
+        }
+    }
+
+    /// Result of a batch insert operation
+    public struct BatchInsertResult: Sendable {
+        public let inserted: Int
+        public let updated: Int
+        public let failed: Int
+        public let errors: [String]
+        public let duration: TimeInterval
+
+        public init(inserted: Int, updated: Int, failed: Int, errors: [String], duration: TimeInterval) {
+            self.inserted = inserted
+            self.updated = updated
+            self.failed = failed
+            self.errors = errors
+            self.duration = duration
+        }
+    }
+
+    /// Insert or update multiple messages in batched transactions for improved performance.
+    /// Each batch is wrapped in a transaction for atomicity - if any insert in a batch fails,
+    /// the entire batch is rolled back.
+    ///
+    /// - Parameters:
+    ///   - messages: Array of messages to insert/update
+    ///   - config: Batch configuration (default batch size: 1000)
+    /// - Returns: Result with counts and any errors
+    public func batchUpsertMessages(_ messages: [MailMessage], config: BatchInsertConfig = .default) throws -> BatchInsertResult {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let startTime = Date()
+        var totalInserted = 0
+        var totalUpdated = 0
+        var totalFailed = 0
+        var errors: [String] = []
+
+        let now = Int(Date().timeIntervalSince1970)
+
+        // Process in batches
+        let batches = stride(from: 0, to: messages.count, by: config.batchSize).map { startIndex in
+            let endIndex = min(startIndex + config.batchSize, messages.count)
+            return Array(messages[startIndex..<endIndex])
+        }
+
+        for (batchIndex, batch) in batches.enumerated() {
+            do {
+                let (inserted, updated) = try executeBatchTransaction(batch, connection: conn, timestamp: now)
+                totalInserted += inserted
+                totalUpdated += updated
+            } catch {
+                // Batch failed - record error and count all messages in batch as failed
+                totalFailed += batch.count
+                errors.append("Batch \(batchIndex + 1) failed: \(error.localizedDescription)")
+            }
+        }
+
+        let duration = Date().timeIntervalSince(startTime)
+        return BatchInsertResult(
+            inserted: totalInserted,
+            updated: totalUpdated,
+            failed: totalFailed,
+            errors: errors,
+            duration: duration
+        )
+    }
+
+    /// Execute a single batch of inserts within a transaction
+    private func executeBatchTransaction(_ messages: [MailMessage], connection conn: Connection, timestamp: Int) throws -> (inserted: Int, updated: Int) {
+        var inserted = 0
+        var updated = 0
+
+        // Begin transaction
+        _ = try conn.execute("BEGIN TRANSACTION")
+
+        do {
+            for message in messages {
+                // Check if message exists (for tracking insert vs update)
+                let existsResult = try conn.query("SELECT 1 FROM messages WHERE id = '\(escapeSql(message.id))' LIMIT 1")
+                var exists = false
+                for _ in existsResult {
+                    exists = true
+                    break
+                }
+
+                // Execute upsert
+                _ = try conn.execute("""
+                    INSERT INTO messages (
+                        id, apple_rowid, message_id, mailbox_id, mailbox_name, account_id,
+                        subject, sender_name, sender_email, date_sent, date_received,
+                        is_read, is_flagged, is_deleted, has_attachments, emlx_path,
+                        body_text, body_html, synced_at, updated_at
+                    ) VALUES (
+                        '\(escapeSql(message.id))', \(message.appleRowId ?? 0), \(message.messageId.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(message.mailboxId ?? 0), \(message.mailboxName.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(message.accountId.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        '\(escapeSql(message.subject))', \(message.senderName.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(message.senderEmail.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(message.dateSent.map { Int($0.timeIntervalSince1970) } ?? 0),
+                        \(message.dateReceived.map { Int($0.timeIntervalSince1970) } ?? 0),
+                        \(message.isRead ? 1 : 0), \(message.isFlagged ? 1 : 0), \(message.isDeleted ? 1 : 0),
+                        \(message.hasAttachments ? 1 : 0), \(message.emlxPath.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(message.bodyText.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(message.bodyHtml.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(timestamp), \(timestamp)
+                    )
+                    ON CONFLICT(id) DO UPDATE SET
+                        apple_rowid = excluded.apple_rowid,
+                        message_id = excluded.message_id,
+                        mailbox_id = excluded.mailbox_id,
+                        mailbox_name = excluded.mailbox_name,
+                        account_id = excluded.account_id,
+                        subject = excluded.subject,
+                        sender_name = excluded.sender_name,
+                        sender_email = excluded.sender_email,
+                        date_sent = excluded.date_sent,
+                        date_received = excluded.date_received,
+                        is_read = excluded.is_read,
+                        is_flagged = excluded.is_flagged,
+                        is_deleted = excluded.is_deleted,
+                        has_attachments = excluded.has_attachments,
+                        emlx_path = excluded.emlx_path,
+                        body_text = excluded.body_text,
+                        body_html = excluded.body_html,
+                        updated_at = \(timestamp)
+                    """)
+
+                if exists {
+                    updated += 1
+                } else {
+                    inserted += 1
+                }
+            }
+
+            // Commit transaction
+            _ = try conn.execute("COMMIT")
+
+            return (inserted, updated)
+        } catch {
+            // Rollback on any error
+            _ = try? conn.execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Insert or update multiple mailboxes in a single transaction for improved performance.
+    ///
+    /// - Parameter mailboxes: Array of mailboxes to insert/update
+    public func batchUpsertMailboxes(_ mailboxes: [Mailbox]) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+
+        // Begin transaction
+        _ = try conn.execute("BEGIN TRANSACTION")
+
+        do {
+            for mailbox in mailboxes {
+                _ = try conn.execute("""
+                    INSERT INTO mailboxes (id, account_id, name, full_path, parent_id, message_count, unread_count, synced_at)
+                    VALUES (\(mailbox.id), '\(escapeSql(mailbox.accountId))', '\(escapeSql(mailbox.name))',
+                            '\(escapeSql(mailbox.fullPath))', \(mailbox.parentId ?? 0), \(mailbox.messageCount),
+                            \(mailbox.unreadCount), \(now))
+                    ON CONFLICT(id) DO UPDATE SET
+                        account_id = excluded.account_id,
+                        name = excluded.name,
+                        full_path = excluded.full_path,
+                        parent_id = excluded.parent_id,
+                        message_count = excluded.message_count,
+                        unread_count = excluded.unread_count,
+                        synced_at = excluded.synced_at
+                    """)
+            }
+
+            // Commit transaction
+            _ = try conn.execute("COMMIT")
+        } catch {
+            // Rollback on any error
+            _ = try? conn.execute("ROLLBACK")
+            throw error
+        }
     }
 
     // MARK: - Incremental Sync Support
