@@ -44,7 +44,9 @@ let package = Package(
         .target(
             name: "SwiftEAKit",
             dependencies: [
-                .product(name: "Libsql", package: "libsql-swift")
+                .product(name: "Libsql", package: "libsql-swift"),
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "ICalendarKit", package: "icalendarkit")
             ]
         ),
         .testTarget(
