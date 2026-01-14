@@ -304,7 +304,7 @@ final class AppleScriptServiceTests: XCTestCase {
 
     // MARK: - Integration Tests: Script Generation Validation
 
-    func testDeleteMessageScriptIsValidAppleScript() throws {
+    func testDeleteMessageScriptContainsRequiredComponents() throws {
         // Generate script and verify it has required components (but don't execute against Mail.app)
         let script = MailActionScripts.deleteMessage(byMessageId: "<test123@example.com>")
 
@@ -315,7 +315,7 @@ final class AppleScriptServiceTests: XCTestCase {
         XCTAssertTrue(script.contains("error") && script.contains("number -1728"), "Should include error handling for message not found")
     }
 
-    func testMoveMessageScriptIsValidAppleScript() throws {
+    func testMoveMessageScriptContainsRequiredComponents() throws {
         let script = MailActionScripts.moveMessage(byMessageId: "<move-test@example.com>", toMailbox: "INBOX")
 
         // Verify script structure
@@ -325,7 +325,7 @@ final class AppleScriptServiceTests: XCTestCase {
         XCTAssertTrue(script.contains("targetMessages"))
     }
 
-    func testSetFlagScriptIsValidAppleScript() throws {
+    func testSetFlagScriptContainsRequiredComponents() throws {
         let flagScript = MailActionScripts.setFlag(byMessageId: "<flag-test@example.com>", flagged: true)
         let unflagScript = MailActionScripts.setFlag(byMessageId: "<flag-test@example.com>", flagged: false)
 
@@ -335,7 +335,7 @@ final class AppleScriptServiceTests: XCTestCase {
         XCTAssertTrue(unflagScript.contains("to false"))
     }
 
-    func testSetReadStatusScriptIsValidAppleScript() throws {
+    func testSetReadStatusScriptContainsRequiredComponents() throws {
         let readScript = MailActionScripts.setReadStatus(byMessageId: "<read-test@example.com>", read: true)
         let unreadScript = MailActionScripts.setReadStatus(byMessageId: "<read-test@example.com>", read: false)
 
