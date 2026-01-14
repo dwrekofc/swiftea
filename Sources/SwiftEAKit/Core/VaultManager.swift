@@ -34,11 +34,138 @@ public struct VaultConfig: Codable {
     public let version: String
     public let createdAt: Date
     public var accounts: [BoundAccount]
+    public var mail: MailSettings
 
-    public init(version: String = "1.0", accounts: [BoundAccount] = []) {
+    public init(version: String = "1.0", accounts: [BoundAccount] = [], mail: MailSettings = MailSettings()) {
         self.version = version
         self.createdAt = Date()
         self.accounts = accounts
+        self.mail = mail
+    }
+
+    /// Handle decoding with optional mail settings for backward compatibility
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(String.self, forKey: .version)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        accounts = try container.decodeIfPresent([BoundAccount].self, forKey: .accounts) ?? []
+        mail = try container.decodeIfPresent(MailSettings.self, forKey: .mail) ?? MailSettings()
+    }
+}
+
+/// Mail-specific configuration settings
+public struct MailSettings: Codable {
+    /// Custom path to Apple Mail data directory (nil = auto-detect)
+    public var mailDataPath: String?
+
+    /// Default export format ("markdown" or "json")
+    public var exportFormat: String
+
+    /// Default export output directory (relative to vault or absolute)
+    public var exportOutputDir: String?
+
+    /// Whether to include attachments by default in exports
+    public var exportIncludeAttachments: Bool
+
+    /// Watch daemon sync interval in seconds
+    public var watchSyncInterval: Int
+
+    /// Whether watch daemon is enabled
+    public var watchEnabled: Bool
+
+    /// Available config keys for mail settings
+    public static let keys: [String: String] = [
+        "mail.dataPath": "Custom path to Apple Mail data directory (auto-detect if empty)",
+        "mail.export.format": "Default export format: markdown or json",
+        "mail.export.outputDir": "Default export output directory",
+        "mail.export.includeAttachments": "Include attachments by default: true or false",
+        "mail.watch.syncInterval": "Watch sync interval in seconds (default: 300)",
+        "mail.watch.enabled": "Enable watch daemon: true or false"
+    ]
+
+    public init(
+        mailDataPath: String? = nil,
+        exportFormat: String = "markdown",
+        exportOutputDir: String? = nil,
+        exportIncludeAttachments: Bool = false,
+        watchSyncInterval: Int = 300,
+        watchEnabled: Bool = true
+    ) {
+        self.mailDataPath = mailDataPath
+        self.exportFormat = exportFormat
+        self.exportOutputDir = exportOutputDir
+        self.exportIncludeAttachments = exportIncludeAttachments
+        self.watchSyncInterval = watchSyncInterval
+        self.watchEnabled = watchEnabled
+    }
+
+    /// Get a setting value by key
+    public func getValue(for key: String) -> String? {
+        switch key {
+        case "mail.dataPath":
+            return mailDataPath
+        case "mail.export.format":
+            return exportFormat
+        case "mail.export.outputDir":
+            return exportOutputDir
+        case "mail.export.includeAttachments":
+            return exportIncludeAttachments ? "true" : "false"
+        case "mail.watch.syncInterval":
+            return String(watchSyncInterval)
+        case "mail.watch.enabled":
+            return watchEnabled ? "true" : "false"
+        default:
+            return nil
+        }
+    }
+
+    /// Set a setting value by key, returns error message if invalid
+    public mutating func setValue(_ value: String, for key: String) -> String? {
+        switch key {
+        case "mail.dataPath":
+            mailDataPath = value.isEmpty ? nil : value
+            return nil
+        case "mail.export.format":
+            if value != "markdown" && value != "json" {
+                return "Invalid format: \(value). Must be 'markdown' or 'json'."
+            }
+            exportFormat = value
+            return nil
+        case "mail.export.outputDir":
+            exportOutputDir = value.isEmpty ? nil : value
+            return nil
+        case "mail.export.includeAttachments":
+            if let bool = parseBool(value) {
+                exportIncludeAttachments = bool
+                return nil
+            }
+            return "Invalid value: \(value). Must be 'true' or 'false'."
+        case "mail.watch.syncInterval":
+            if let interval = Int(value), interval >= 60 {
+                watchSyncInterval = interval
+                return nil
+            }
+            return "Invalid interval: \(value). Must be a number >= 60."
+        case "mail.watch.enabled":
+            if let bool = parseBool(value) {
+                watchEnabled = bool
+                return nil
+            }
+            return "Invalid value: \(value). Must be 'true' or 'false'."
+        default:
+            return "Unknown key: \(key)"
+        }
+    }
+
+    private func parseBool(_ value: String) -> Bool? {
+        switch value.lowercased() {
+        case "true", "1", "yes", "on":
+            return true
+        case "false", "0", "no", "off":
+            return false
+        default:
+            return nil
+        }
     }
 }
 

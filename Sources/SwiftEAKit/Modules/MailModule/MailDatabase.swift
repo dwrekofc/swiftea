@@ -331,6 +331,236 @@ public final class MailDatabase: @unchecked Sendable {
         return messages
     }
 
+    // MARK: - Structured Query Search
+
+    /// Parsed filter from a structured query
+    public struct SearchFilter {
+        public var from: String?
+        public var to: String?
+        public var subject: String?
+        public var mailbox: String?
+        public var isRead: Bool?
+        public var isFlagged: Bool?
+        public var dateAfter: Date?
+        public var dateBefore: Date?
+        public var hasAttachments: Bool?
+        public var freeText: String?
+
+        public init() {}
+
+        /// Check if any filters are set
+        public var hasFilters: Bool {
+            from != nil || to != nil || subject != nil || mailbox != nil ||
+            isRead != nil || isFlagged != nil || dateAfter != nil ||
+            dateBefore != nil || hasAttachments != nil
+        }
+
+        /// Check if there's free text for FTS
+        public var hasFreeText: Bool {
+            freeText != nil && !freeText!.isEmpty
+        }
+    }
+
+    /// Parse a structured query string into filters
+    /// Supports: from:, to:, subject:, mailbox:, is:read, is:unread, is:flagged, is:unflagged,
+    /// after:, before:, date:, has:attachments
+    public func parseQuery(_ query: String) -> SearchFilter {
+        var filter = SearchFilter()
+
+        // Regex patterns for structured filters
+        let filterPatterns: [(pattern: String, handler: (String, inout SearchFilter) -> Void)] = [
+            // from: filter (email or name)
+            ("from:\"([^\"]+)\"", { value, f in f.from = value }),
+            ("from:(\\S+)", { value, f in f.from = value }),
+
+            // to: filter
+            ("to:\"([^\"]+)\"", { value, f in f.to = value }),
+            ("to:(\\S+)", { value, f in f.to = value }),
+
+            // subject: filter
+            ("subject:\"([^\"]+)\"", { value, f in f.subject = value }),
+            ("subject:(\\S+)", { value, f in f.subject = value }),
+
+            // mailbox: filter
+            ("mailbox:\"([^\"]+)\"", { value, f in f.mailbox = value }),
+            ("mailbox:(\\S+)", { value, f in f.mailbox = value }),
+
+            // is: status filters
+            ("is:read", { _, f in f.isRead = true }),
+            ("is:unread", { _, f in f.isRead = false }),
+            ("is:flagged", { _, f in f.isFlagged = true }),
+            ("is:unflagged", { _, f in f.isFlagged = false }),
+
+            // has: filters
+            ("has:attachments?", { _, f in f.hasAttachments = true }),
+
+            // Date filters (YYYY-MM-DD format)
+            ("after:(\\d{4}-\\d{2}-\\d{2})", { value, f in f.dateAfter = parseDate(value) }),
+            ("before:(\\d{4}-\\d{2}-\\d{2})", { value, f in f.dateBefore = parseDate(value) }),
+            ("date:(\\d{4}-\\d{2}-\\d{2})", { value, f in
+                // date: sets both after and before to cover the whole day
+                if let date = parseDate(value) {
+                    f.dateAfter = date
+                    // Set before to end of day
+                    if let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: date) {
+                        f.dateBefore = endOfDay
+                    }
+                }
+            })
+        ]
+
+        var remainingQuery = query
+
+        // Process each filter pattern
+        for (pattern, handler) in filterPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let range = NSRange(remainingQuery.startIndex..., in: remainingQuery)
+                let matches = regex.matches(in: remainingQuery, options: [], range: range)
+
+                // Process matches in reverse to preserve indices
+                for match in matches.reversed() {
+                    // Extract captured group if present, otherwise use the whole match
+                    let valueRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range
+                    if let swiftRange = Range(valueRange, in: remainingQuery) {
+                        let value = String(remainingQuery[swiftRange])
+                        handler(value, &filter)
+                    } else {
+                        handler("", &filter)
+                    }
+
+                    // Remove matched text from query
+                    if let swiftRange = Range(match.range, in: remainingQuery) {
+                        remainingQuery.removeSubrange(swiftRange)
+                    }
+                }
+            }
+        }
+
+        // Clean up remaining query (free text for FTS)
+        let cleanedFreeText = remainingQuery
+            .trimmingCharacters(in: .whitespaces)
+            .components(separatedBy: .whitespaces)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        if !cleanedFreeText.isEmpty {
+            filter.freeText = cleanedFreeText
+        }
+
+        return filter
+    }
+
+    /// Search messages using structured filters and optional FTS
+    public func searchMessagesWithFilters(_ filter: SearchFilter, limit: Int = 50, offset: Int = 0) throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var whereClauses: [String] = []
+
+        // Build WHERE clauses from filters
+
+        // from: filter (matches sender_name or sender_email)
+        if let from = filter.from {
+            let escaped = escapeSql(from)
+            whereClauses.append("(m.sender_email LIKE '%\(escaped)%' OR m.sender_name LIKE '%\(escaped)%')")
+        }
+
+        // to: filter (requires join with recipients table)
+        // For simplicity, we'll use a subquery
+        if let to = filter.to {
+            let escaped = escapeSql(to)
+            whereClauses.append("""
+                EXISTS (SELECT 1 FROM recipients r WHERE r.message_id = m.id
+                        AND (r.email LIKE '%\(escaped)%' OR r.name LIKE '%\(escaped)%'))
+                """)
+        }
+
+        // subject: filter
+        if let subject = filter.subject {
+            let escaped = escapeSql(subject)
+            whereClauses.append("m.subject LIKE '%\(escaped)%'")
+        }
+
+        // mailbox: filter
+        if let mailbox = filter.mailbox {
+            let escaped = escapeSql(mailbox)
+            whereClauses.append("m.mailbox_name LIKE '%\(escaped)%'")
+        }
+
+        // is:read / is:unread filter
+        if let isRead = filter.isRead {
+            whereClauses.append("m.is_read = \(isRead ? 1 : 0)")
+        }
+
+        // is:flagged / is:unflagged filter
+        if let isFlagged = filter.isFlagged {
+            whereClauses.append("m.is_flagged = \(isFlagged ? 1 : 0)")
+        }
+
+        // has:attachments filter
+        if let hasAttachments = filter.hasAttachments, hasAttachments {
+            whereClauses.append("m.has_attachments = 1")
+        }
+
+        // Date filters
+        if let dateAfter = filter.dateAfter {
+            let timestamp = Int(dateAfter.timeIntervalSince1970)
+            whereClauses.append("m.date_received >= \(timestamp)")
+        }
+
+        if let dateBefore = filter.dateBefore {
+            let timestamp = Int(dateBefore.timeIntervalSince1970)
+            whereClauses.append("m.date_received < \(timestamp)")
+        }
+
+        // Always exclude deleted messages
+        whereClauses.append("m.is_deleted = 0")
+
+        // Build the query
+        var sql: String
+
+        if filter.hasFreeText, let freeText = filter.freeText {
+            // Use FTS with additional filters
+            let whereClause = whereClauses.isEmpty ? "" : "AND " + whereClauses.joined(separator: " AND ")
+            sql = """
+                SELECT m.* FROM messages m
+                JOIN messages_fts fts ON m.rowid = fts.rowid
+                WHERE messages_fts MATCH '\(escapeSql(freeText))'
+                \(whereClause)
+                ORDER BY bm25(messages_fts)
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        } else if !whereClauses.isEmpty {
+            // Filters only, no FTS
+            let whereClause = whereClauses.joined(separator: " AND ")
+            sql = """
+                SELECT m.* FROM messages m
+                WHERE \(whereClause)
+                ORDER BY m.date_received DESC
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        } else {
+            // No filters, return recent messages
+            sql = """
+                SELECT * FROM messages m
+                WHERE m.is_deleted = 0
+                ORDER BY m.date_received DESC
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        }
+
+        let result = try conn.query(sql)
+
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
     /// Get all non-deleted messages (for export without search query)
     /// - Parameters:
     ///   - limit: Maximum number of messages to return
@@ -689,6 +919,17 @@ public final class MailDatabase: @unchecked Sendable {
     private func escapeSql(_ string: String) -> String {
         string.replacingOccurrences(of: "'", with: "''")
     }
+}
+
+/// Parse a date string in YYYY-MM-DD format
+private func parseDate(_ string: String) -> Date? {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.timeZone = TimeZone.current
+    return formatter.date(from: string)
+}
+
+extension MailDatabase {
 
     private func getValue(_ row: Row, _ index: Int32) -> Value? {
         try? row.get(index)

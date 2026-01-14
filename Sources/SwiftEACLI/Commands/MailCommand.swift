@@ -56,6 +56,28 @@ struct MailSyncCommand: ParsableCommand {
     @Flag(name: .long, help: "Show detailed progress")
     var verbose: Bool = false
 
+    // MARK: - Retry Configuration (for daemon mode)
+
+    /// Maximum number of retry attempts for transient errors
+    private static let maxRetryAttempts = 5
+
+    /// Base delay in seconds for exponential backoff
+    private static let baseRetryDelay: TimeInterval = 2.0
+
+    /// Maximum delay in seconds between retries
+    private static let maxRetryDelay: TimeInterval = 60.0
+
+    /// Errors that are considered transient and worth retrying
+    private func isTransientError(_ error: Error) -> Bool {
+        let description = error.localizedDescription.lowercased()
+        // Database lock errors, network timeouts, permission issues that may be temporary
+        return description.contains("locked") ||
+               description.contains("busy") ||
+               description.contains("timeout") ||
+               description.contains("temporarily") ||
+               description.contains("try again")
+    }
+
     // MARK: - Daemon-safe Logging
 
     /// Detect if running as a LaunchAgent daemon (no TTY attached)
@@ -95,19 +117,61 @@ struct MailSyncCommand: ParsableCommand {
             log("working directory: \(FileManager.default.currentDirectoryPath)")
         }
 
-        // Wrap entire run in error handling for daemon mode
-        do {
-            try executeSync()
-        } catch {
-            logError("\(error.localizedDescription)")
-            if isDaemonMode {
-                log("mail sync failed")
+        // In daemon mode, use retry with exponential backoff for transient errors
+        if isDaemonMode {
+            try executeSyncWithRetry()
+        } else {
+            // Interactive mode: no retry, immediate failure feedback
+            do {
+                try executeSync()
+            } catch {
+                logError("\(error.localizedDescription)")
+                throw error
             }
-            throw error
+        }
+    }
+
+    /// Execute sync with exponential backoff retry for transient errors (daemon mode)
+    private func executeSyncWithRetry() throws {
+        var lastError: Error?
+        var attempt = 0
+
+        while attempt < Self.maxRetryAttempts {
+            do {
+                try executeSync()
+                log("mail sync completed successfully")
+                return
+            } catch {
+                lastError = error
+                attempt += 1
+
+                // Check if error is transient and worth retrying
+                if isTransientError(error) && attempt < Self.maxRetryAttempts {
+                    // Calculate exponential backoff delay with jitter
+                    let delay = min(
+                        Self.baseRetryDelay * pow(2.0, Double(attempt - 1)),
+                        Self.maxRetryDelay
+                    )
+                    // Add 10-20% random jitter to prevent thundering herd
+                    let jitter = delay * Double.random(in: 0.1...0.2)
+                    let totalDelay = delay + jitter
+
+                    log("Transient error (attempt \(attempt)/\(Self.maxRetryAttempts)): \(error.localizedDescription)")
+                    log("Retrying in \(String(format: "%.1f", totalDelay)) seconds...")
+
+                    Thread.sleep(forTimeInterval: totalDelay)
+                } else {
+                    // Non-transient error or max retries reached
+                    break
+                }
+            }
         }
 
-        if isDaemonMode {
-            log("mail sync completed successfully")
+        // All retries exhausted or non-transient error
+        if let error = lastError {
+            logError("Sync failed after \(attempt) attempt(s): \(error.localizedDescription)")
+            log("mail sync failed")
+            throw error
         }
     }
 
@@ -308,6 +372,34 @@ struct MailSyncCommand: ParsableCommand {
             try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         }
 
+        // Run initial sync before starting watch daemon (swiftea-7im.12)
+        // This ensures the database is populated before the daemon starts incremental syncs
+        print("Running initial sync before starting watch daemon...")
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+
+        // Check if we have any messages - if not, do a full sync; otherwise incremental
+        let existingMessages = try mailDatabase.getAllMessages(limit: 1)
+        let isFirstSync = existingMessages.isEmpty
+
+        let sync = MailSync(mailDatabase: mailDatabase)
+
+        do {
+            let result = try sync.sync(incremental: !isFirstSync)
+            print("Initial sync complete:")
+            print("  Messages: +\(result.messagesAdded) ~\(result.messagesUpdated)")
+            print("  Duration: \(String(format: "%.2f", result.duration))s")
+            if !result.errors.isEmpty {
+                print("  Warnings: \(result.errors.count)")
+            }
+        } catch {
+            print("Warning: Initial sync failed: \(error.localizedDescription)")
+            print("The daemon will retry on its first run.")
+        }
+
+        mailDatabase.close()
+
         // Generate plist content
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -427,10 +519,35 @@ struct MailSyncCommand: ParsableCommand {
 struct MailSearchCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "search",
-        abstract: "Search mail using full-text search"
+        abstract: "Search mail using full-text search with structured filters",
+        discussion: """
+            Search for mail messages using full-text search and/or structured filters.
+
+            STRUCTURED FILTERS:
+              from:email       - Filter by sender email or name
+              to:email         - Filter by recipient email or name
+              subject:text     - Filter by subject containing text
+              mailbox:name     - Filter by mailbox name
+              is:read          - Show only read messages
+              is:unread        - Show only unread messages
+              is:flagged       - Show only flagged messages
+              is:unflagged     - Show only unflagged messages
+              has:attachments  - Show only messages with attachments
+              after:YYYY-MM-DD - Messages received after date
+              before:YYYY-MM-DD - Messages received before date
+              date:YYYY-MM-DD  - Messages received on specific date
+
+            EXAMPLES:
+              swiftea mail search "from:alice@example.com project"
+              swiftea mail search "is:unread is:flagged"
+              swiftea mail search "after:2024-01-01 before:2024-02-01"
+              swiftea mail search "mailbox:INBOX from:support"
+
+            Use quotes around values with spaces: from:"Alice Smith"
+            """
     )
 
-    @Argument(help: "Search query")
+    @Argument(help: "Search query with optional structured filters")
     var query: String
 
     @Option(name: .long, help: "Maximum results to return")
@@ -446,8 +563,19 @@ struct MailSearchCommand: ParsableCommand {
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
+        defer { mailDatabase.close() }
 
-        let results = try mailDatabase.searchMessages(query: query, limit: limit)
+        // Parse the query for structured filters
+        let filter = mailDatabase.parseQuery(query)
+
+        // Use structured search if we have filters, otherwise fall back to basic FTS
+        let results: [MailMessage]
+        if filter.hasFilters || filter.hasFreeText {
+            results = try mailDatabase.searchMessagesWithFilters(filter, limit: limit)
+        } else {
+            // Empty query - show recent messages
+            results = try mailDatabase.getAllMessages(limit: limit)
+        }
 
         if results.isEmpty {
             print("No messages found for: \(query)")
@@ -455,27 +583,61 @@ struct MailSearchCommand: ParsableCommand {
         }
 
         if json {
-            // Output as JSON
+            // Output as JSON with filter info
             var output: [[String: Any]] = []
             for msg in results {
-                output.append([
+                let msgDict: [String: Any] = [
                     "id": msg.id,
                     "subject": msg.subject,
                     "sender": msg.senderEmail ?? "",
+                    "senderName": msg.senderName ?? "",
                     "date": msg.dateSent?.description ?? "",
-                    "mailbox": msg.mailboxName ?? ""
-                ])
+                    "mailbox": msg.mailboxName ?? "",
+                    "isRead": msg.isRead,
+                    "isFlagged": msg.isFlagged,
+                    "hasAttachments": msg.hasAttachments
+                ]
+                output.append(msgDict)
             }
             if let data = try? JSONSerialization.data(withJSONObject: output, options: .prettyPrinted),
                let jsonString = String(data: data, encoding: .utf8) {
                 print(jsonString)
             }
         } else {
+            // Show filter summary if structured filters were used
+            if filter.hasFilters {
+                var filterDesc: [String] = []
+                if let from = filter.from { filterDesc.append("from:\(from)") }
+                if let to = filter.to { filterDesc.append("to:\(to)") }
+                if let subject = filter.subject { filterDesc.append("subject:\(subject)") }
+                if let mailbox = filter.mailbox { filterDesc.append("mailbox:\(mailbox)") }
+                if let isRead = filter.isRead { filterDesc.append(isRead ? "is:read" : "is:unread") }
+                if let isFlagged = filter.isFlagged { filterDesc.append(isFlagged ? "is:flagged" : "is:unflagged") }
+                if filter.hasAttachments == true { filterDesc.append("has:attachments") }
+                if filter.dateAfter != nil || filter.dateBefore != nil {
+                    let df = DateFormatter()
+                    df.dateFormat = "yyyy-MM-dd"
+                    if let after = filter.dateAfter { filterDesc.append("after:\(df.string(from: after))") }
+                    if let before = filter.dateBefore { filterDesc.append("before:\(df.string(from: before))") }
+                }
+                print("Filters: \(filterDesc.joined(separator: " "))")
+                if let freeText = filter.freeText {
+                    print("Search: \(freeText)")
+                }
+                print("")
+            }
+
             print("Found \(results.count) message(s):\n")
             for msg in results {
                 let date = msg.dateSent.map { DateFormatter.localizedString(from: $0, dateStyle: .short, timeStyle: .short) } ?? "Unknown"
                 let sender = msg.senderName ?? msg.senderEmail ?? "Unknown"
-                print("[\(msg.id)]")
+                var flags: [String] = []
+                if !msg.isRead { flags.append("UNREAD") }
+                if msg.isFlagged { flags.append("FLAGGED") }
+                if msg.hasAttachments { flags.append("ATTACH") }
+                let flagStr = flags.isEmpty ? "" : " [\(flags.joined(separator: ", "))]"
+
+                print("[\(msg.id)]\(flagStr)")
                 print("  Subject: \(msg.subject)")
                 print("  From: \(sender)")
                 print("  Date: \(date)")
@@ -634,7 +796,13 @@ struct MailShowCommand: ParsableCommand {
 struct MailExportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "export",
-        abstract: "Export mail messages to markdown or JSON"
+        abstract: "Export mail messages to markdown or JSON",
+        discussion: """
+            Export mail messages in markdown or JSON format.
+
+            Use --include-attachments to also extract and save attachment files.
+            Attachments are saved in an 'attachments/<message-id>/' subdirectory.
+            """
     )
 
     @Option(name: .long, help: "Export format (markdown, json)")
@@ -651,6 +819,9 @@ struct MailExportCommand: ParsableCommand {
 
     @Option(name: .long, help: "Maximum messages to export (default: 100)")
     var limit: Int = 100
+
+    @Flag(name: .long, help: "Extract and save attachment files")
+    var includeAttachments: Bool = false
 
     func run() throws {
         let vault = try VaultContext.require()
@@ -702,6 +873,9 @@ struct MailExportCommand: ParsableCommand {
         print("Exporting \(messages.count) message(s) to \(outputDir)...")
 
         var exportedCount = 0
+        var attachmentCount = 0
+        let emlxParser = EmlxParser()
+
         for message in messages {
             let filename = generateFilename(for: message, format: format)
             let filePath = (outputDir as NSString).appendingPathComponent(filename)
@@ -722,9 +896,42 @@ struct MailExportCommand: ParsableCommand {
             // Update export path in database
             try mailDatabase.updateExportPath(id: message.id, path: filePath)
             exportedCount += 1
+
+            // Extract attachments if requested
+            if includeAttachments, message.hasAttachments, let emlxPath = message.emlxPath {
+                // Skip EWS/Exchange messages (no local .emlx file)
+                if emlxPath.contains("ews:") || emlxPath.contains("/ews:/") {
+                    continue
+                }
+
+                let attachmentsDir = (outputDir as NSString).appendingPathComponent("attachments/\(message.id)")
+
+                do {
+                    let attachments = try emlxParser.extractAttachments(path: emlxPath)
+
+                    if !attachments.isEmpty {
+                        // Create attachments directory
+                        if !fileManager.fileExists(atPath: attachmentsDir) {
+                            try fileManager.createDirectory(atPath: attachmentsDir, withIntermediateDirectories: true)
+                        }
+
+                        for attachment in attachments {
+                            let attachmentPath = (attachmentsDir as NSString).appendingPathComponent(attachment.info.filename)
+                            try attachment.data.write(to: URL(fileURLWithPath: attachmentPath))
+                            attachmentCount += 1
+                        }
+                    }
+                } catch {
+                    // Log warning but continue exporting
+                    print("  Warning: Could not extract attachments from \(message.id): \(error.localizedDescription)")
+                }
+            }
         }
 
         print("Exported \(exportedCount) message(s) to \(outputDir)")
+        if attachmentCount > 0 {
+            print("Extracted \(attachmentCount) attachment(s)")
+        }
     }
 
     private func generateFilename(for message: MailMessage, format: String) -> String {

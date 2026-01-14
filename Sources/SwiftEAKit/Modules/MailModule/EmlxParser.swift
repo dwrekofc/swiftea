@@ -122,6 +122,17 @@ public struct AttachmentInfo: Sendable {
     }
 }
 
+/// Attachment with extracted data
+public struct AttachmentData: Sendable {
+    public let info: AttachmentInfo
+    public let data: Data
+
+    public init(info: AttachmentInfo, data: Data) {
+        self.info = info
+        self.data = data
+    }
+}
+
 /// Parses Apple Mail .emlx files
 public final class EmlxParser: @unchecked Sendable {
     private let fileManager: FileManager
@@ -712,4 +723,190 @@ public final class EmlxParser: @unchecked Sendable {
 
         return nil
     }
+
+    // MARK: - Attachment Extraction
+
+    /// Extract attachments with their data from an .emlx file
+    public func extractAttachments(path: String) throws -> [AttachmentData] {
+        guard fileManager.fileExists(atPath: path) else {
+            throw EmlxParseError.fileNotFound(path: path)
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: URL(fileURLWithPath: path))
+        } catch {
+            throw EmlxParseError.readFailed(underlying: error)
+        }
+
+        return try extractAttachments(data: data)
+    }
+
+    /// Extract attachments with their data from .emlx data
+    public func extractAttachments(data: Data) throws -> [AttachmentData] {
+        guard let content = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .isoLatin1) else {
+            throw EmlxParseError.invalidFormat
+        }
+
+        let lines = content.components(separatedBy: "\n")
+        guard !lines.isEmpty,
+              let byteCount = Int(lines[0].trimmingCharacters(in: .whitespaces)) else {
+            throw EmlxParseError.invalidFormat
+        }
+
+        let byteCountLineLength = lines[0].utf8.count + 1
+        let messageStart = byteCountLineLength
+        let messageEnd = min(messageStart + byteCount, data.count)
+
+        guard messageEnd > messageStart else {
+            throw EmlxParseError.invalidFormat
+        }
+
+        let messageData = data[messageStart..<messageEnd]
+        guard let messageContent = String(data: messageData, encoding: .utf8)
+            ?? String(data: messageData, encoding: .isoLatin1) else {
+            throw EmlxParseError.invalidFormat
+        }
+
+        let (headers, body) = parseRfc822(messageContent)
+        let contentType = headers["content-type"]
+
+        return extractAttachmentsFromBody(body, contentType: contentType)
+    }
+
+    private func extractAttachmentsFromBody(_ body: String, contentType: String?) -> [AttachmentData] {
+        var attachments: [AttachmentData] = []
+
+        guard let contentType = contentType,
+              contentType.lowercased().contains("multipart/"),
+              let boundary = extractBoundary(from: contentType) else {
+            return attachments
+        }
+
+        let parts = body.components(separatedBy: "--\(boundary)")
+
+        for part in parts {
+            let trimmedPart = part.trimmingCharacters(in: .newlines)
+            if trimmedPart.hasPrefix("--") || trimmedPart.isEmpty {
+                continue
+            }
+
+            let (partHeaders, partBody) = parseRfc822(trimmedPart)
+            let partContentType = partHeaders["content-type"]?.lowercased() ?? ""
+
+            if partContentType.contains("multipart/") {
+                // Recursively handle nested multipart
+                let nestedAttachments = extractAttachmentsFromBody(partBody, contentType: partContentType)
+                attachments.append(contentsOf: nestedAttachments)
+            } else if !partContentType.contains("text/plain") && !partContentType.contains("text/html") {
+                // This is an attachment - extract its data
+                if let attachmentData = extractAttachmentData(partHeaders, body: partBody) {
+                    attachments.append(attachmentData)
+                }
+            }
+        }
+
+        return attachments
+    }
+
+    private func extractAttachmentData(_ headers: [String: String], body: String) -> AttachmentData? {
+        // Get filename from Content-Disposition or Content-Type
+        var filename: String? = nil
+        var mimeType: String? = nil
+        var contentId: String? = nil
+        var isInline = false
+
+        if let disposition = headers["content-disposition"] {
+            isInline = disposition.lowercased().contains("inline")
+            filename = extractFilename(from: disposition)
+        }
+
+        if let ct = headers["content-type"] {
+            mimeType = ct.components(separatedBy: ";").first?.trimmingCharacters(in: .whitespaces)
+            if filename == nil {
+                filename = extractFilename(from: ct)
+            }
+        }
+
+        if let cid = headers["content-id"] {
+            contentId = cid.trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+        }
+
+        guard let name = filename else { return nil }
+
+        // Decode attachment data
+        let encoding = headers["content-transfer-encoding"]?.lowercased() ?? ""
+        let cleanBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let decodedData: Data?
+        if encoding == "base64" {
+            let base64String = cleanBody
+                .replacingOccurrences(of: "\n", with: "")
+                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: " ", with: "")
+            decodedData = Data(base64Encoded: base64String)
+        } else if encoding == "quoted-printable" {
+            decodedData = decodeQuotedPrintableData(cleanBody)
+        } else {
+            // Assume raw binary or 7bit/8bit encoding
+            decodedData = cleanBody.data(using: .utf8) ?? cleanBody.data(using: .isoLatin1)
+        }
+
+        guard let data = decodedData else { return nil }
+
+        let info = AttachmentInfo(
+            filename: name,
+            mimeType: mimeType,
+            size: data.count,
+            contentId: contentId,
+            isInline: isInline
+        )
+
+        return AttachmentData(info: info, data: data)
+    }
+
+    private func decodeQuotedPrintableData(_ text: String) -> Data? {
+        var bytes: [UInt8] = []
+        var lines = text.components(separatedBy: "\n")
+
+        var fullText = ""
+        for i in 0..<lines.count {
+            var line = lines[i].trimmingCharacters(in: .carriageReturnCharacters)
+            if line.hasSuffix("=") {
+                line = String(line.dropLast())
+                fullText += line
+            } else {
+                fullText += line + "\n"
+            }
+        }
+
+        var index = fullText.startIndex
+        while index < fullText.endIndex {
+            let char = fullText[index]
+            if char == "=" {
+                let nextIndex = fullText.index(after: index)
+                if nextIndex < fullText.endIndex {
+                    if let endIndex = fullText.index(nextIndex, offsetBy: 2, limitedBy: fullText.endIndex) {
+                        let hex = String(fullText[nextIndex..<endIndex])
+                        if let byte = UInt8(hex, radix: 16) {
+                            bytes.append(byte)
+                            index = endIndex
+                            continue
+                        }
+                    }
+                }
+            }
+            if let ascii = char.asciiValue {
+                bytes.append(ascii)
+            }
+            index = fullText.index(after: index)
+        }
+
+        return Data(bytes)
+    }
+}
+
+private extension CharacterSet {
+    static let carriageReturnCharacters = CharacterSet(charactersIn: "\r")
 }
