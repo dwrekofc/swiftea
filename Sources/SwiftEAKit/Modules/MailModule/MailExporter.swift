@@ -10,11 +10,15 @@ public struct MailExportResult: Sendable {
     public let exported: Int
     public let skipped: Int
     public let errors: [String]
+    public let threadsExported: Int
+    public let unthreadedExported: Int
 
-    public init(exported: Int, skipped: Int, errors: [String]) {
+    public init(exported: Int, skipped: Int, errors: [String], threadsExported: Int = 0, unthreadedExported: Int = 0) {
         self.exported = exported
         self.skipped = skipped
         self.errors = errors
+        self.threadsExported = threadsExported
+        self.unthreadedExported = unthreadedExported
     }
 }
 
@@ -29,14 +33,20 @@ public final class MailExporter {
     }
 
     /// Export messages that haven't been exported yet to the specified directory
+    /// Messages are organized by conversation/thread for better grouping.
     /// - Parameters:
     ///   - outputDir: Directory to export files to (e.g., Swiftea/Mail/)
     ///   - limit: Maximum messages to export (0 = unlimited)
     /// - Returns: Export result with counts and any errors
     public func exportNewMessages(to outputDir: String, limit: Int = 0) throws -> MailExportResult {
-        // Create output directory if needed
-        if !fileManager.fileExists(atPath: outputDir) {
-            try fileManager.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        // Create output directory structure
+        let threadsDir = (outputDir as NSString).appendingPathComponent("threads")
+        let unthreadedDir = (outputDir as NSString).appendingPathComponent("unthreaded")
+
+        for dir in [outputDir, threadsDir, unthreadedDir] {
+            if !fileManager.fileExists(atPath: dir) {
+                try fileManager.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            }
         }
 
         // Get messages that need to be exported
@@ -49,19 +59,86 @@ public final class MailExporter {
         var exported = 0
         var skipped = 0
         var errors: [String] = []
+        var threadsExported = 0
+        var unthreadedExported = 0
+
+        // Group messages by thread
+        var threadedMessages: [String: [MailMessage]] = [:]  // threadId -> messages
+        var unthreadedMessages: [MailMessage] = []
 
         for message in messages {
+            if let threadId = message.threadId {
+                threadedMessages[threadId, default: []].append(message)
+            } else {
+                unthreadedMessages.append(message)
+            }
+        }
+
+        // Export threaded messages - create/update thread folder with consolidated file
+        for (threadId, threadMessages) in threadedMessages {
             do {
-                let filePath = try exportMessage(message, to: outputDir)
+                let threadDir = (threadsDir as NSString).appendingPathComponent(sanitizeFilename(threadId))
+                if !fileManager.fileExists(atPath: threadDir) {
+                    try fileManager.createDirectory(atPath: threadDir, withIntermediateDirectories: true)
+                }
+
+                // Get full thread info and all messages (including previously exported)
+                guard let thread = try mailDatabase.getThread(id: threadId) else {
+                    // Thread not found, export as individual files
+                    for message in threadMessages {
+                        let filePath = try exportMessage(message, to: threadDir)
+                        try mailDatabase.updateExportPath(id: message.id, path: filePath)
+                        exported += 1
+                    }
+                    continue
+                }
+
+                // Get all messages in thread for consolidated export
+                let allThreadMessages = try mailDatabase.getMessagesInThreadViaJunction(threadId: threadId, limit: 10000)
+                let sortedMessages = allThreadMessages.sorted { (m1, m2) -> Bool in
+                    guard let d1 = m1.dateSent, let d2 = m2.dateSent else {
+                        return m1.dateSent != nil
+                    }
+                    return d1 < d2
+                }
+
+                // Export consolidated thread file
+                let threadFilePath = try exportThread(thread: thread, messages: sortedMessages, to: threadDir)
+
+                // Update export path for each new message
+                for message in threadMessages {
+                    try mailDatabase.updateExportPath(id: message.id, path: threadFilePath)
+                    exported += 1
+                }
+                threadsExported += 1
+            } catch {
+                for message in threadMessages {
+                    errors.append("Failed to export thread message \(message.id): \(error.localizedDescription)")
+                    skipped += 1
+                }
+            }
+        }
+
+        // Export unthreaded messages to unthreaded folder
+        for message in unthreadedMessages {
+            do {
+                let filePath = try exportMessage(message, to: unthreadedDir)
                 try mailDatabase.updateExportPath(id: message.id, path: filePath)
                 exported += 1
+                unthreadedExported += 1
             } catch {
                 errors.append("Failed to export \(message.id): \(error.localizedDescription)")
                 skipped += 1
             }
         }
 
-        return MailExportResult(exported: exported, skipped: skipped, errors: errors)
+        return MailExportResult(
+            exported: exported,
+            skipped: skipped,
+            errors: errors,
+            threadsExported: threadsExported,
+            unthreadedExported: unthreadedExported
+        )
     }
 
     /// Export a single message to a markdown file
@@ -78,6 +155,96 @@ public final class MailExporter {
         try content.write(toFile: filePath, atomically: true, encoding: .utf8)
 
         return filePath
+    }
+
+    /// Export a complete thread as a consolidated markdown file
+    /// - Parameters:
+    ///   - thread: The thread metadata
+    ///   - messages: All messages in the thread, sorted chronologically
+    ///   - outputDir: Directory to export to (thread folder)
+    /// - Returns: The full path of the exported file
+    @discardableResult
+    public func exportThread(thread: Thread, messages: [MailMessage], to outputDir: String) throws -> String {
+        let filename = "thread.md"
+        let filePath = (outputDir as NSString).appendingPathComponent(filename)
+
+        let content = formatThreadAsMarkdown(thread: thread, messages: messages)
+        try content.write(toFile: filePath, atomically: true, encoding: .utf8)
+
+        return filePath
+    }
+
+    // MARK: - Thread Formatting
+
+    private func formatThreadAsMarkdown(thread: Thread, messages: [MailMessage]) -> String {
+        var lines: [String] = []
+        let threadTotal = messages.count
+
+        // YAML frontmatter with thread metadata
+        lines.append("---")
+        lines.append("thread_id: \"\(escapeYaml(thread.id))\"")
+        lines.append("subject: \"\(escapeYaml(thread.subject ?? ""))\"")
+        lines.append("participant_count: \(thread.participantCount)")
+        lines.append("message_count: \(thread.messageCount)")
+        if let firstDate = thread.firstDate {
+            lines.append("first_date: \(iso8601String(from: firstDate))")
+        }
+        if let lastDate = thread.lastDate {
+            lines.append("last_date: \(iso8601String(from: lastDate))")
+        }
+        // aliases: use subject as an alias for linking by topic
+        lines.append("aliases:")
+        if let subject = thread.subject {
+            lines.append("  - \"\(escapeYaml(subject))\"")
+        }
+        lines.append("---")
+        lines.append("")
+
+        // Thread heading
+        lines.append("# Thread: \(thread.subject ?? "(No Subject)")")
+        lines.append("")
+        lines.append("**\(threadTotal) message(s) between \(thread.participantCount) participant(s)**")
+        lines.append("")
+
+        // Each message in the thread
+        for (index, message) in messages.enumerated() {
+            let position = index + 1
+            lines.append("---")
+            lines.append("")
+            lines.append("## Message \(position) of \(threadTotal)")
+            lines.append("")
+            lines.append("**From:** \(formatSender(message))")
+            if let date = message.dateSent {
+                lines.append("**Date:** \(iso8601String(from: date))")
+            }
+            lines.append("**Subject:** \(message.subject)")
+            lines.append("")
+
+            // Body content
+            if let textBody = message.bodyText, !textBody.isEmpty {
+                lines.append(textBody)
+            } else if let htmlBody = message.bodyHtml {
+                lines.append(stripHtml(htmlBody))
+            } else {
+                lines.append("*(No message body)*")
+            }
+            lines.append("")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    /// Sanitize a string to be used as a filename/directory name
+    private func sanitizeFilename(_ name: String) -> String {
+        // Replace problematic characters with underscores
+        var sanitized = name
+        let invalidChars = CharacterSet(charactersIn: "/\\:*?\"<>|")
+        sanitized = sanitized.components(separatedBy: invalidChars).joined(separator: "_")
+        // Truncate to reasonable length
+        if sanitized.count > 100 {
+            sanitized = String(sanitized.prefix(100))
+        }
+        return sanitized
     }
 
     // MARK: - Thread Metadata

@@ -423,6 +423,7 @@ struct MailSyncCommand: ParsableCommand {
     // MARK: - Auto-Export
 
     /// Export newly synced messages to Swiftea/Mail/ as markdown files
+    /// Messages are grouped by conversation/thread for better organization.
     private func performAutoExport(mailDatabase: MailDatabase, vault: VaultContext) throws {
         let exportDir = (vault.dataFolderPath as NSString).appendingPathComponent("Mail")
         let exporter = MailExporter(mailDatabase: mailDatabase)
@@ -433,6 +434,12 @@ struct MailSyncCommand: ParsableCommand {
             if exportResult.exported > 0 {
                 log("Auto-export:")
                 log("  Exported \(exportResult.exported) message(s) to Swiftea/Mail/")
+                if exportResult.threadsExported > 0 {
+                    log("  Threads updated: \(exportResult.threadsExported) (in threads/)")
+                }
+                if exportResult.unthreadedExported > 0 {
+                    log("  Unthreaded: \(exportResult.unthreadedExported) (in unthreaded/)")
+                }
             }
 
             if !exportResult.errors.isEmpty && verbose {
@@ -1011,6 +1018,7 @@ final class MailSyncDaemonController: NSObject {
     }
 
     /// Export newly synced messages to Swiftea/Mail/ as markdown files
+    /// Messages are grouped by conversation/thread for better organization.
     private func performAutoExport() {
         let exporter = MailExporter(mailDatabase: mailDatabase)
 
@@ -1018,7 +1026,15 @@ final class MailSyncDaemonController: NSObject {
             let exportResult = try exporter.exportNewMessages(to: exportDir)
 
             if exportResult.exported > 0 {
-                logger("Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/")
+                var details: [String] = []
+                if exportResult.threadsExported > 0 {
+                    details.append("\(exportResult.threadsExported) threads")
+                }
+                if exportResult.unthreadedExported > 0 {
+                    details.append("\(exportResult.unthreadedExported) unthreaded")
+                }
+                let detailStr = details.isEmpty ? "" : " (\(details.joined(separator: ", ")))"
+                logger("Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/\(detailStr)")
             }
 
             if !exportResult.errors.isEmpty {
@@ -1112,6 +1128,7 @@ private func performDaemonSync(mailDatabase: MailDatabase, exportDir: String) {
 }
 
 /// Perform auto-export in daemon mode
+/// Messages are grouped by conversation/thread for better organization.
 private func performDaemonAutoExport(mailDatabase: MailDatabase, exportDir: String) {
     let exporter = MailExporter(mailDatabase: mailDatabase)
 
@@ -1120,7 +1137,15 @@ private func performDaemonAutoExport(mailDatabase: MailDatabase, exportDir: Stri
 
         if exportResult.exported > 0 {
             let timestamp = ISO8601DateFormatter().string(from: Date())
-            fputs("[\(timestamp)] Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/\n", stdout)
+            var details: [String] = []
+            if exportResult.threadsExported > 0 {
+                details.append("\(exportResult.threadsExported) threads")
+            }
+            if exportResult.unthreadedExported > 0 {
+                details.append("\(exportResult.unthreadedExported) unthreaded")
+            }
+            let detailStr = details.isEmpty ? "" : " (\(details.joined(separator: ", ")))"
+            fputs("[\(timestamp)] Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/\(detailStr)\n", stdout)
             fflush(stdout)
         }
 
