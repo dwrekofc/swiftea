@@ -1,6 +1,6 @@
 # Beads Workflow Amendment: Task Quality & Completion Protocol
 
-**Status:** DRAFT
+**Status:** IMPLEMENTED (Phase 1 & 2 complete)
 **Created:** 2026-01-14
 **Problems Addressed:**
 1. Tasks lack sufficient detail for agents to begin work without additional context gathering
@@ -235,9 +235,9 @@ Add standard footer to all task descriptions (as proposed above). This is self-c
 
 **Part 2 - Partial Completion:**
 - [x] All tasks in epic swiftea-pzv updated with partial completion footer
-- [ ] CLAUDE.md updated with Partial Completion Protocol section
+- [x] CLAUDE.md updated with Partial Completion Protocol section
 - [ ] Test: Assign task to fresh agent, verify it follows protocol on incomplete work
 
 **Documentation:**
-- [ ] Document in beads plugin README or workflow guide
-- [ ] Add to `bd workflow` command output
+- [x] Document in beads plugin README or workflow guide (see `.d-spec/commands/beads-workflow.md`)
+- [x] Add to `bd workflow` command output

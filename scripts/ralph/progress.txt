@@ -31,3 +31,25 @@ Started: Thu Jan 15 09:23:26 MST 2026
   - Column indexes in rowToMessage() are positional and must match SELECT * order
   - Migration V2 already creates indexes for mailbox_status and pending_sync_action
 ---
+
+## 2026-01-15 09:26 - US-002
+- **What was implemented**: Database methods for mailbox status queries and updates
+- **Files changed**:
+  - Sources/SwiftEAKit/Modules/MailModule/MailDatabase.swift (added 6 new methods)
+  - Tests/SwiftEAKitTests/MailDatabaseTests.swift (added 20 new tests)
+- **Implementation details**:
+  - updateMailboxStatus(id:status:) - Updates mailbox_status column
+  - setPendingSyncAction(id:action:) - Sets pending_sync_action to archive or delete
+  - clearPendingSyncAction(id:) - Sets pending_sync_action to NULL
+  - getMessagesWithPendingActions() - Returns messages with non-null pending_sync_action
+  - getMessagesByStatus(_:limit:offset:) - Filters by mailbox_status with pagination
+  - getMessageCountByStatus() - Returns [MailboxStatus: Int] dictionary
+- **All methods**:
+  - Handle missing message IDs gracefully (no-op for updates, empty for queries)
+  - Exclude soft-deleted messages (is_deleted = 1)
+- **Tests**: 20 new tests covering all methods + edge cases + error handling
+- **Learnings for future iterations**:
+  - Use ORDER BY updated_at ASC for pending actions (oldest first = fairness)
+  - Use ORDER BY date_received DESC for message lists (newest first = user expectation)
+  - Initialize counts dictionary with 0 values to handle missing status groups
+---

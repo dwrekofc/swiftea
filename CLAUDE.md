@@ -8,12 +8,22 @@
 - If the repo needs ideation docs setup/standardization: start with `.d-spec/onboarding/project-setup.md`.
 
 # Planning Phase - d-spec
-THis project uses **d-spec** (`/.d-spec/`) for ideation and planning. See `.d-spec/CLAUDE.md`
+This project uses **d-spec** (`/.d-spec/`) for ideation and planning. See `.d-spec/CLAUDE.md`
 
 ## Quick Reference
-<!-- note to editor:START -->
-add d-spec quickstart information here, see beads quickstart info below for reference. keep it short and reference/link to the other CLAUDE.md files in the /.d-spec folder for further info
-<!-- note to editor:END -->
+
+```bash
+# Ideation
+.d-spec/planning/ideas/     # Create new ideas here
+.d-spec/planning/changes/   # Draft change proposals
+
+# Key docs
+.d-spec/*master-plan*.md    # North star vision
+.d-spec/project.md          # Architecture & conventions
+.d-spec/roadmap.md          # Planned work
+```
+
+**Workflow:** Idea → Interview → Change Proposal → Approval → Beads handoff
 
 # Beads (Execution Phase)
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
@@ -54,6 +64,11 @@ bd sync               # Sync with git
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 
-<!-- note to editor:START -->
-everything below this needs to be migrated to the CLAUDE.md file in the `/.d-spec` folder.
-<!-- note to editor:END -->
+## Partial Completion & Task Quality
+
+For detailed guidance on:
+- **Partial completion protocol** - What to do if you can't finish a task
+- **Creating atomic tasks** - Self-contained task descriptions
+- **Special cases** - Bug fixes, UI changes, refactoring templates
+
+Run `bd workflow` or see `.d-spec/commands/beads-workflow.md`

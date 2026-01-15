@@ -1293,6 +1293,132 @@ public final class MailDatabase: @unchecked Sendable {
             """)
     }
 
+    // MARK: - Mailbox Status Operations (Bidirectional Sync)
+
+    /// Update the mailbox status of a message
+    /// - Parameters:
+    ///   - id: The message ID
+    ///   - status: The new mailbox status (inbox, archived, deleted)
+    public func updateMailboxStatus(id: String, status: MailboxStatus) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = try conn.execute("""
+            UPDATE messages SET mailbox_status = '\(status.rawValue)', updated_at = \(now)
+            WHERE id = '\(escapeSql(id))'
+            """)
+    }
+
+    /// Set a pending sync action for a message
+    /// - Parameters:
+    ///   - id: The message ID
+    ///   - action: The sync action to queue (archive or delete)
+    public func setPendingSyncAction(id: String, action: SyncAction) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = try conn.execute("""
+            UPDATE messages SET pending_sync_action = '\(action.rawValue)', updated_at = \(now)
+            WHERE id = '\(escapeSql(id))'
+            """)
+    }
+
+    /// Clear the pending sync action for a message (after successful sync)
+    /// - Parameter id: The message ID
+    public func clearPendingSyncAction(id: String) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = try conn.execute("""
+            UPDATE messages SET pending_sync_action = NULL, updated_at = \(now)
+            WHERE id = '\(escapeSql(id))'
+            """)
+    }
+
+    /// Get all messages with pending sync actions
+    /// - Returns: Array of messages that have pending actions to sync to Apple Mail
+    public func getMessagesWithPendingActions() throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT * FROM messages
+            WHERE pending_sync_action IS NOT NULL AND is_deleted = 0
+            ORDER BY updated_at ASC
+            """)
+
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
+    /// Get messages filtered by mailbox status
+    /// - Parameters:
+    ///   - status: The mailbox status to filter by
+    ///   - limit: Maximum number of messages to return (default: 100)
+    ///   - offset: Number of messages to skip for pagination (default: 0)
+    /// - Returns: Array of messages with the specified status
+    public func getMessagesByStatus(_ status: MailboxStatus, limit: Int = 100, offset: Int = 0) throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT * FROM messages
+            WHERE mailbox_status = '\(status.rawValue)' AND is_deleted = 0
+            ORDER BY date_received DESC
+            LIMIT \(limit) OFFSET \(offset)
+            """)
+
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
+    /// Get message counts grouped by mailbox status
+    /// - Returns: Dictionary with status as key and count as value
+    public func getMessageCountByStatus() throws -> [MailboxStatus: Int] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT mailbox_status, COUNT(*) as count FROM messages
+            WHERE is_deleted = 0
+            GROUP BY mailbox_status
+            """)
+
+        var counts: [MailboxStatus: Int] = [
+            .inbox: 0,
+            .archived: 0,
+            .deleted: 0
+        ]
+
+        for row in result {
+            if let statusStr = getStringValue(row, 0),
+               let status = MailboxStatus(rawValue: statusStr),
+               let count = getIntValue(row, 1) {
+                counts[status] = count
+            }
+        }
+        return counts
+    }
+
     // MARK: - Helpers
 
     private func escapeSql(_ string: String) -> String {

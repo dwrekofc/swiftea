@@ -24,7 +24,7 @@ This folder contains the d-spec planning workflow and links to the onboarding do
 11. **Approval gate**: do not create Beads issues or implement until the user approves the proposal in chat.
 
 ### Execution Phase
-12. **Beads handoff (after approval)**: before creating Beads issues, read `.d-spec/project.md` plus the change’s `proposal.md`, `design.md` (if present), all `specs/**/spec.md`, and `tasks.md`. Then create a **detailed** Beads epic + tasks per `bd prime` and add `Beads: <epic-id>` to `.d-spec/planning/changes/<change-id>/proposal.md`. See `.d-spec/onboarding/discovery-to-spec.md` for Beads prereads + task template.
+12. **Beads handoff (after approval)**: before creating Beads issues, read `.d-spec/project.md` plus the change's `proposal.md`, `design.md` (if present), all `specs/**/spec.md`, and `tasks.md`. Then create a **detailed** Beads epic + tasks per `bd prime` and add `Beads: <epic-id>` to `.d-spec/planning/changes/<change-id>/proposal.md`. See `.d-spec/onboarding/discovery-to-spec.md` for Beads prereads + task template. **Tasks must be atomic and self-contained**—see root `CLAUDE.md` "Creating Atomic Tasks" section.
 13. **Update roadmap after approval**: once the Beads epic exists, update `.d-spec/roadmap.md` to reference the official spec(s) and Beads epic IDs.
 14. **Enforce TDD via Beads structure**: write tests as Acceptance Criteria, use an epic with Success Criteria, split Red → Green → Refactor into child tasks for larger work, and wire dependencies so tests come first (label `tdd` or `tests-first` where relevant).
 15. **Archive change doc**: move the change to `.d-spec/planning/archive/` with YAML traceability once the Beads epic exists.
@@ -73,6 +73,8 @@ status: draft
   - `.d-spec/planning/changes/<change-id>/specs/**/spec.md`
   - `.d-spec/planning/changes/<change-id>/tasks.md`
 - After Beads creation, execution tracking happens only in Beads; d-spec remains read-only.
+- **Task quality**: Each task must be atomic and self-contained (see root `CLAUDE.md` "Creating Atomic Tasks").
+- **Partial completion**: If you cannot finish a task, follow the Partial Completion Protocol in root `CLAUDE.md`.
 
 ## Entrypoints
 

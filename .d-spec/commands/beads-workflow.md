@@ -31,10 +31,72 @@ Close the issue when done:
 - Via command: `/beads:close <id> "Completed: <summary>"`
 - Via MCP tool: `close` with reason
 
+## 5a. If You Cannot Complete the Task
+
+If context runs out, tests fail, or you hit a blocker:
+
+1. **Update acceptance criteria** - Check off completed items in the task description
+2. **Add handoff comment**:
+   ```bash
+   bd comments add <id> "Session ended: X/Y criteria complete.
+   Files modified: [list]. Blocker: [if any]. Next steps: [actions]"
+   ```
+3. **Commit partial work**:
+   ```bash
+   git add . && git commit -m "WIP: <task-id> - <summary>" && git push
+   ```
+4. **Keep task `in_progress`** - Do NOT close incomplete tasks
+
+**Key Rules:**
+- NEVER close if tests are failing
+- NEVER close if acceptance criteria are unchecked
+- ALWAYS push partial work (uncommitted = lost)
+
 ## 6. Check What's Unblocked
 After closing, check if other work became ready:
 - Use `/beads:ready` to see newly unblocked tasks
 - Start the cycle again
+
+## Creating Atomic Tasks
+
+Every task should be self-contained—the next agent can execute **without gathering context**.
+
+**Required elements:**
+- **Title:** Short descriptive name
+- **Description:** "As a [user], I want [feature] so that [benefit]"
+- **Problem:** What's broken/missing and why it matters
+- **Files to modify:** Paths with function names, approx line numbers
+- **Acceptance Criteria:** Verifiable checklist (specific, not vague)
+
+**Good criteria:** `Button shows confirmation dialog`, `Test testFoo() verifies X`
+**Bad criteria:** `Works correctly`, `Is well tested`
+
+### Special Cases
+
+**Bug fixes:**
+- Include steps to reproduce
+- Include expected vs actual behavior
+- Include error messages or stack traces if available
+
+**UI changes:**
+- Always include: "Verify in browser using dev-browser skill"
+- Describe visual expectations (placement, styling, behavior)
+
+**Refactoring:**
+- Explain the "before" and "after" state
+- List all files that will change
+- Clarify what should NOT change (behavior preservation)
+
+**Include this footer in all tasks:**
+```markdown
+---
+## If You Cannot Complete This Task
+1. Check off completed acceptance criteria
+2. Add comment: what's done, remaining, blockers
+3. Commit: `git commit -m "WIP: <task-id> - <summary>"`
+4. Push: `git push`
+5. Leave status as `in_progress`
+```
 
 ## Tips
 - **Priority levels**: 0=critical, 1=high, 2=medium, 3=low, 4=backlog

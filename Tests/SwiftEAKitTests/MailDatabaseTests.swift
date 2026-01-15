@@ -1087,4 +1087,347 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertNil(message.pendingSyncAction, "Default pendingSyncAction should be nil")
         XCTAssertNil(message.lastKnownMailboxId, "Default lastKnownMailboxId should be nil")
     }
+
+    // MARK: - US-002: Mailbox Status Query and Update Methods
+
+    func testUpdateMailboxStatus() throws {
+        try database.initialize()
+
+        // Insert a message
+        let message = MailMessage(id: "status-test", subject: "Status Test", mailboxStatus: .inbox)
+        try database.upsertMessage(message)
+
+        // Update status to archived
+        try database.updateMailboxStatus(id: "status-test", status: .archived)
+
+        let retrieved = try database.getMessage(id: "status-test")
+        XCTAssertEqual(retrieved?.mailboxStatus, .archived)
+
+        // Update status to deleted
+        try database.updateMailboxStatus(id: "status-test", status: .deleted)
+
+        let retrieved2 = try database.getMessage(id: "status-test")
+        XCTAssertEqual(retrieved2?.mailboxStatus, .deleted)
+
+        // Update back to inbox
+        try database.updateMailboxStatus(id: "status-test", status: .inbox)
+
+        let retrieved3 = try database.getMessage(id: "status-test")
+        XCTAssertEqual(retrieved3?.mailboxStatus, .inbox)
+    }
+
+    func testUpdateMailboxStatusNonexistentMessage() throws {
+        try database.initialize()
+
+        // This should not throw, it just won't update anything
+        try database.updateMailboxStatus(id: "nonexistent", status: .archived)
+
+        // Verify nothing was created
+        let retrieved = try database.getMessage(id: "nonexistent")
+        XCTAssertNil(retrieved)
+    }
+
+    func testSetPendingSyncAction() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "action-test", subject: "Action Test")
+        try database.upsertMessage(message)
+
+        // Set archive action
+        try database.setPendingSyncAction(id: "action-test", action: .archive)
+
+        let retrieved = try database.getMessage(id: "action-test")
+        XCTAssertEqual(retrieved?.pendingSyncAction, .archive)
+
+        // Change to delete action
+        try database.setPendingSyncAction(id: "action-test", action: .delete)
+
+        let retrieved2 = try database.getMessage(id: "action-test")
+        XCTAssertEqual(retrieved2?.pendingSyncAction, .delete)
+    }
+
+    func testSetPendingSyncActionNonexistentMessage() throws {
+        try database.initialize()
+
+        // This should not throw, it just won't update anything
+        try database.setPendingSyncAction(id: "nonexistent", action: .archive)
+
+        // Verify nothing was created
+        let retrieved = try database.getMessage(id: "nonexistent")
+        XCTAssertNil(retrieved)
+    }
+
+    func testClearPendingSyncAction() throws {
+        try database.initialize()
+
+        // Insert a message with pending action
+        let message = MailMessage(
+            id: "clear-action-test",
+            subject: "Clear Action Test",
+            pendingSyncAction: .archive
+        )
+        try database.upsertMessage(message)
+
+        // Verify action is set
+        let retrieved1 = try database.getMessage(id: "clear-action-test")
+        XCTAssertEqual(retrieved1?.pendingSyncAction, .archive)
+
+        // Clear the action
+        try database.clearPendingSyncAction(id: "clear-action-test")
+
+        // Verify action is cleared
+        let retrieved2 = try database.getMessage(id: "clear-action-test")
+        XCTAssertNil(retrieved2?.pendingSyncAction)
+    }
+
+    func testClearPendingSyncActionNonexistentMessage() throws {
+        try database.initialize()
+
+        // This should not throw, it just won't update anything
+        try database.clearPendingSyncAction(id: "nonexistent")
+
+        // Verify nothing was created
+        let retrieved = try database.getMessage(id: "nonexistent")
+        XCTAssertNil(retrieved)
+    }
+
+    func testGetMessagesWithPendingActions() throws {
+        try database.initialize()
+
+        // Insert messages with and without pending actions
+        let messages = [
+            MailMessage(id: "pending-1", subject: "Pending Archive", pendingSyncAction: .archive),
+            MailMessage(id: "pending-2", subject: "Pending Delete", pendingSyncAction: .delete),
+            MailMessage(id: "no-action", subject: "No Action"),
+            MailMessage(id: "pending-3", subject: "Another Archive", pendingSyncAction: .archive)
+        ]
+
+        for msg in messages {
+            try database.upsertMessage(msg)
+        }
+
+        // Get messages with pending actions
+        let pending = try database.getMessagesWithPendingActions()
+
+        XCTAssertEqual(pending.count, 3)
+        XCTAssertTrue(pending.contains { $0.id == "pending-1" })
+        XCTAssertTrue(pending.contains { $0.id == "pending-2" })
+        XCTAssertTrue(pending.contains { $0.id == "pending-3" })
+        XCTAssertFalse(pending.contains { $0.id == "no-action" })
+    }
+
+    func testGetMessagesWithPendingActionsEmpty() throws {
+        try database.initialize()
+
+        // Insert messages without pending actions
+        let message = MailMessage(id: "no-action", subject: "No Action")
+        try database.upsertMessage(message)
+
+        let pending = try database.getMessagesWithPendingActions()
+
+        XCTAssertTrue(pending.isEmpty)
+    }
+
+    func testGetMessagesWithPendingActionsExcludesDeleted() throws {
+        try database.initialize()
+
+        // Insert a message with pending action but marked as deleted
+        let message = MailMessage(
+            id: "deleted-pending",
+            subject: "Deleted with Action",
+            isDeleted: true,
+            pendingSyncAction: .archive
+        )
+        try database.upsertMessage(message)
+
+        let pending = try database.getMessagesWithPendingActions()
+
+        XCTAssertTrue(pending.isEmpty, "Deleted messages should not be returned")
+    }
+
+    func testGetMessagesByStatus() throws {
+        try database.initialize()
+
+        // Insert messages with different statuses
+        let messages = [
+            MailMessage(id: "inbox-1", subject: "Inbox 1", mailboxStatus: .inbox),
+            MailMessage(id: "inbox-2", subject: "Inbox 2", mailboxStatus: .inbox),
+            MailMessage(id: "archived-1", subject: "Archived 1", mailboxStatus: .archived),
+            MailMessage(id: "deleted-1", subject: "Deleted 1", mailboxStatus: .deleted)
+        ]
+
+        for msg in messages {
+            try database.upsertMessage(msg)
+        }
+
+        // Get inbox messages
+        let inboxMessages = try database.getMessagesByStatus(.inbox)
+        XCTAssertEqual(inboxMessages.count, 2)
+        XCTAssertTrue(inboxMessages.allSatisfy { $0.mailboxStatus == .inbox })
+
+        // Get archived messages
+        let archivedMessages = try database.getMessagesByStatus(.archived)
+        XCTAssertEqual(archivedMessages.count, 1)
+        XCTAssertEqual(archivedMessages.first?.id, "archived-1")
+
+        // Get deleted messages
+        let deletedMessages = try database.getMessagesByStatus(.deleted)
+        XCTAssertEqual(deletedMessages.count, 1)
+        XCTAssertEqual(deletedMessages.first?.id, "deleted-1")
+    }
+
+    func testGetMessagesByStatusWithLimitAndOffset() throws {
+        try database.initialize()
+
+        // Insert many inbox messages
+        for i in 1...10 {
+            let message = MailMessage(
+                id: "inbox-\(i)",
+                subject: "Inbox \(i)",
+                dateReceived: Date(timeIntervalSince1970: Double(1000000 + i)),
+                mailboxStatus: .inbox
+            )
+            try database.upsertMessage(message)
+        }
+
+        // Get with limit
+        let limited = try database.getMessagesByStatus(.inbox, limit: 5)
+        XCTAssertEqual(limited.count, 5)
+
+        // Get with offset
+        let offset = try database.getMessagesByStatus(.inbox, limit: 5, offset: 5)
+        XCTAssertEqual(offset.count, 5)
+
+        // Verify no overlap
+        let limitedIds = Set(limited.map { $0.id })
+        let offsetIds = Set(offset.map { $0.id })
+        XCTAssertTrue(limitedIds.isDisjoint(with: offsetIds))
+    }
+
+    func testGetMessagesByStatusEmpty() throws {
+        try database.initialize()
+
+        // Insert inbox messages only
+        let message = MailMessage(id: "inbox-only", subject: "Inbox", mailboxStatus: .inbox)
+        try database.upsertMessage(message)
+
+        // Query for archived (should be empty)
+        let archived = try database.getMessagesByStatus(.archived)
+        XCTAssertTrue(archived.isEmpty)
+    }
+
+    func testGetMessagesByStatusExcludesDeleted() throws {
+        try database.initialize()
+
+        // Insert a message that's in inbox but soft-deleted
+        let message = MailMessage(
+            id: "soft-deleted",
+            subject: "Soft Deleted",
+            isDeleted: true,
+            mailboxStatus: .inbox
+        )
+        try database.upsertMessage(message)
+
+        let inboxMessages = try database.getMessagesByStatus(.inbox)
+
+        XCTAssertTrue(inboxMessages.isEmpty, "Soft-deleted messages should not be returned")
+    }
+
+    func testGetMessageCountByStatus() throws {
+        try database.initialize()
+
+        // Insert messages with different statuses
+        let messages = [
+            MailMessage(id: "inbox-1", subject: "Inbox 1", mailboxStatus: .inbox),
+            MailMessage(id: "inbox-2", subject: "Inbox 2", mailboxStatus: .inbox),
+            MailMessage(id: "inbox-3", subject: "Inbox 3", mailboxStatus: .inbox),
+            MailMessage(id: "archived-1", subject: "Archived 1", mailboxStatus: .archived),
+            MailMessage(id: "archived-2", subject: "Archived 2", mailboxStatus: .archived),
+            MailMessage(id: "deleted-1", subject: "Deleted 1", mailboxStatus: .deleted)
+        ]
+
+        for msg in messages {
+            try database.upsertMessage(msg)
+        }
+
+        let counts = try database.getMessageCountByStatus()
+
+        XCTAssertEqual(counts[.inbox], 3)
+        XCTAssertEqual(counts[.archived], 2)
+        XCTAssertEqual(counts[.deleted], 1)
+    }
+
+    func testGetMessageCountByStatusEmpty() throws {
+        try database.initialize()
+
+        let counts = try database.getMessageCountByStatus()
+
+        // All counts should be 0
+        XCTAssertEqual(counts[.inbox], 0)
+        XCTAssertEqual(counts[.archived], 0)
+        XCTAssertEqual(counts[.deleted], 0)
+    }
+
+    func testGetMessageCountByStatusExcludesSoftDeleted() throws {
+        try database.initialize()
+
+        // Insert a soft-deleted message
+        let message = MailMessage(
+            id: "soft-deleted",
+            subject: "Soft Deleted",
+            isDeleted: true,
+            mailboxStatus: .inbox
+        )
+        try database.upsertMessage(message)
+
+        let counts = try database.getMessageCountByStatus()
+
+        XCTAssertEqual(counts[.inbox], 0, "Soft-deleted messages should not be counted")
+    }
+
+    func testStatusMethodsBeforeInitializeThrow() throws {
+        // Don't call initialize()
+
+        XCTAssertThrowsError(try database.updateMailboxStatus(id: "test", status: .archived)) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.setPendingSyncAction(id: "test", action: .archive)) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.clearPendingSyncAction(id: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getMessagesWithPendingActions()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getMessagesByStatus(.inbox)) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getMessageCountByStatus()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+    }
 }

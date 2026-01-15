@@ -38,7 +38,7 @@
         "Tests pass"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "File: Sources/SwiftEAKit/Modules/MailModule/MailDatabase.swift (~line 300-400)"
     },
     {
