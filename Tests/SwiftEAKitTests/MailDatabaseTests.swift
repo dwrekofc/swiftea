@@ -902,4 +902,189 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertEqual(result.errors.count, 2)
         XCTAssertEqual(result.duration, 1.5)
     }
+
+    // MARK: - Migration V2 Tests (Mailbox Status Tracking)
+
+    func testMigrationV2CreatesMailboxStatusColumn() throws {
+        try database.initialize()
+
+        // Insert a message with default mailbox status
+        let message = MailMessage(id: "v2-test-1", subject: "V2 Test")
+        try database.upsertMessage(message)
+
+        // Retrieve and verify default mailbox_status is 'inbox'
+        let retrieved = try database.getMessage(id: "v2-test-1")
+        XCTAssertNotNil(retrieved)
+        XCTAssertEqual(retrieved?.mailboxStatus, .inbox)
+    }
+
+    func testMigrationV2CreatesPendingSyncActionColumn() throws {
+        try database.initialize()
+
+        // Insert a message without pending sync action
+        let message1 = MailMessage(id: "v2-sync-1", subject: "No Action")
+        try database.upsertMessage(message1)
+
+        let retrieved1 = try database.getMessage(id: "v2-sync-1")
+        XCTAssertNil(retrieved1?.pendingSyncAction)
+
+        // Insert a message with pending archive action
+        let message2 = MailMessage(
+            id: "v2-sync-2",
+            subject: "With Archive Action",
+            pendingSyncAction: .archive
+        )
+        try database.upsertMessage(message2)
+
+        let retrieved2 = try database.getMessage(id: "v2-sync-2")
+        XCTAssertEqual(retrieved2?.pendingSyncAction, .archive)
+
+        // Insert a message with pending delete action
+        let message3 = MailMessage(
+            id: "v2-sync-3",
+            subject: "With Delete Action",
+            pendingSyncAction: .delete
+        )
+        try database.upsertMessage(message3)
+
+        let retrieved3 = try database.getMessage(id: "v2-sync-3")
+        XCTAssertEqual(retrieved3?.pendingSyncAction, .delete)
+    }
+
+    func testMigrationV2CreatesLastKnownMailboxIdColumn() throws {
+        try database.initialize()
+
+        // Insert a message without last known mailbox id
+        let message1 = MailMessage(id: "v2-mailbox-1", subject: "No Mailbox")
+        try database.upsertMessage(message1)
+
+        let retrieved1 = try database.getMessage(id: "v2-mailbox-1")
+        XCTAssertNil(retrieved1?.lastKnownMailboxId)
+
+        // Insert a message with last known mailbox id
+        let message2 = MailMessage(
+            id: "v2-mailbox-2",
+            subject: "With Mailbox",
+            lastKnownMailboxId: 42
+        )
+        try database.upsertMessage(message2)
+
+        let retrieved2 = try database.getMessage(id: "v2-mailbox-2")
+        XCTAssertEqual(retrieved2?.lastKnownMailboxId, 42)
+    }
+
+    func testMailboxStatusEnumValues() {
+        XCTAssertEqual(MailboxStatus.inbox.rawValue, "inbox")
+        XCTAssertEqual(MailboxStatus.archived.rawValue, "archived")
+        XCTAssertEqual(MailboxStatus.deleted.rawValue, "deleted")
+
+        // Test parsing from raw value
+        XCTAssertEqual(MailboxStatus(rawValue: "inbox"), .inbox)
+        XCTAssertEqual(MailboxStatus(rawValue: "archived"), .archived)
+        XCTAssertEqual(MailboxStatus(rawValue: "deleted"), .deleted)
+        XCTAssertNil(MailboxStatus(rawValue: "unknown"))
+    }
+
+    func testSyncActionEnumValues() {
+        XCTAssertEqual(SyncAction.archive.rawValue, "archive")
+        XCTAssertEqual(SyncAction.delete.rawValue, "delete")
+
+        // Test parsing from raw value
+        XCTAssertEqual(SyncAction(rawValue: "archive"), .archive)
+        XCTAssertEqual(SyncAction(rawValue: "delete"), .delete)
+        XCTAssertNil(SyncAction(rawValue: "unknown"))
+    }
+
+    func testMessageWithAllV2Fields() throws {
+        try database.initialize()
+
+        let message = MailMessage(
+            id: "v2-full-test",
+            appleRowId: 12345,
+            mailboxId: 1,
+            mailboxName: "INBOX",
+            subject: "Full V2 Test",
+            mailboxStatus: .archived,
+            pendingSyncAction: .delete,
+            lastKnownMailboxId: 99
+        )
+
+        try database.upsertMessage(message)
+
+        let retrieved = try database.getMessage(id: "v2-full-test")
+        XCTAssertNotNil(retrieved)
+        XCTAssertEqual(retrieved?.mailboxStatus, .archived)
+        XCTAssertEqual(retrieved?.pendingSyncAction, .delete)
+        XCTAssertEqual(retrieved?.lastKnownMailboxId, 99)
+    }
+
+    func testExistingMessagesGetDefaultMailboxStatus() throws {
+        // This tests that existing messages (after migration) have mailbox_status = 'inbox'
+        try database.initialize()
+
+        // Insert a message using minimal fields (simulating pre-V2 message)
+        let message = MailMessage(id: "pre-v2-msg", subject: "Pre-V2 Message")
+        try database.upsertMessage(message)
+
+        let retrieved = try database.getMessage(id: "pre-v2-msg")
+        XCTAssertEqual(retrieved?.mailboxStatus, .inbox, "Existing messages should default to inbox status")
+    }
+
+    func testMailboxStatusUpdateOnUpsert() throws {
+        try database.initialize()
+
+        // Insert initial message
+        let message1 = MailMessage(
+            id: "status-update-test",
+            subject: "Initial",
+            mailboxStatus: .inbox
+        )
+        try database.upsertMessage(message1)
+
+        // Update to archived
+        let message2 = MailMessage(
+            id: "status-update-test",
+            subject: "Initial",
+            mailboxStatus: .archived
+        )
+        try database.upsertMessage(message2)
+
+        let retrieved = try database.getMessage(id: "status-update-test")
+        XCTAssertEqual(retrieved?.mailboxStatus, .archived)
+    }
+
+    func testBatchUpsertWithV2Fields() throws {
+        try database.initialize()
+
+        let messages = [
+            MailMessage(id: "batch-v2-1", subject: "Batch 1", mailboxStatus: .inbox),
+            MailMessage(id: "batch-v2-2", subject: "Batch 2", mailboxStatus: .archived, pendingSyncAction: .archive),
+            MailMessage(id: "batch-v2-3", subject: "Batch 3", mailboxStatus: .deleted, pendingSyncAction: .delete, lastKnownMailboxId: 5)
+        ]
+
+        let result = try database.batchUpsertMessages(messages)
+        XCTAssertEqual(result.inserted, 3)
+        XCTAssertEqual(result.failed, 0)
+
+        let retrieved1 = try database.getMessage(id: "batch-v2-1")
+        XCTAssertEqual(retrieved1?.mailboxStatus, .inbox)
+        XCTAssertNil(retrieved1?.pendingSyncAction)
+
+        let retrieved2 = try database.getMessage(id: "batch-v2-2")
+        XCTAssertEqual(retrieved2?.mailboxStatus, .archived)
+        XCTAssertEqual(retrieved2?.pendingSyncAction, .archive)
+
+        let retrieved3 = try database.getMessage(id: "batch-v2-3")
+        XCTAssertEqual(retrieved3?.mailboxStatus, .deleted)
+        XCTAssertEqual(retrieved3?.pendingSyncAction, .delete)
+        XCTAssertEqual(retrieved3?.lastKnownMailboxId, 5)
+    }
+
+    func testMailMessageV2DefaultsInInit() {
+        let message = MailMessage(id: "defaults-test", subject: "Defaults")
+
+        XCTAssertEqual(message.mailboxStatus, .inbox, "Default mailboxStatus should be inbox")
+        XCTAssertNil(message.pendingSyncAction, "Default pendingSyncAction should be nil")
+        XCTAssertNil(message.lastKnownMailboxId, "Default lastKnownMailboxId should be nil")
+    }
 }

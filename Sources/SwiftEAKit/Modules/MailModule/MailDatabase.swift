@@ -89,6 +89,9 @@ public final class MailDatabase: @unchecked Sendable {
         if currentVersion < 1 {
             try applyMigrationV1(conn)
         }
+        if currentVersion < 2 {
+            try applyMigrationV2(conn)
+        }
     }
 
     /// Migration v1: Initial schema with all mail tables
@@ -228,6 +231,32 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Migration v2: Add mailbox status tracking columns for bidirectional sync
+    private func applyMigrationV2(_ conn: Connection) throws {
+        do {
+            // Add mailbox_status column with default 'inbox' for existing messages
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN mailbox_status TEXT DEFAULT 'inbox'")
+
+            // Add pending_sync_action column (nullable - only set when action is pending)
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN pending_sync_action TEXT")
+
+            // Add last_known_mailbox_id column (nullable - tracks original mailbox for move detection)
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN last_known_mailbox_id INTEGER")
+
+            // Create index for querying messages by mailbox status
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_mailbox_status ON messages(mailbox_status)")
+
+            // Create index for finding messages with pending sync actions
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_pending_sync_action ON messages(pending_sync_action)")
+
+            // Record migration version
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (2)")
+
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
     // MARK: - Message Operations
 
     /// Insert or update a message in the mirror database
@@ -243,7 +272,8 @@ public final class MailDatabase: @unchecked Sendable {
                 id, apple_rowid, message_id, mailbox_id, mailbox_name, account_id,
                 subject, sender_name, sender_email, date_sent, date_received,
                 is_read, is_flagged, is_deleted, has_attachments, emlx_path,
-                body_text, body_html, synced_at, updated_at
+                body_text, body_html, synced_at, updated_at,
+                mailbox_status, pending_sync_action, last_known_mailbox_id
             ) VALUES (
                 '\(message.id)', \(message.appleRowId ?? 0), \(message.messageId.map { "'\($0)'" } ?? "NULL"),
                 \(message.mailboxId ?? 0), \(message.mailboxName.map { "'\($0)'" } ?? "NULL"),
@@ -256,7 +286,10 @@ public final class MailDatabase: @unchecked Sendable {
                 \(message.hasAttachments ? 1 : 0), \(message.emlxPath.map { "'\(escapeSql($0))'" } ?? "NULL"),
                 \(message.bodyText.map { "'\(escapeSql($0))'" } ?? "NULL"),
                 \(message.bodyHtml.map { "'\(escapeSql($0))'" } ?? "NULL"),
-                \(now), \(now)
+                \(now), \(now),
+                '\(message.mailboxStatus.rawValue)',
+                \(message.pendingSyncAction.map { "'\($0.rawValue)'" } ?? "NULL"),
+                \(message.lastKnownMailboxId.map { String($0) } ?? "NULL")
             )
             ON CONFLICT(id) DO UPDATE SET
                 apple_rowid = excluded.apple_rowid,
@@ -276,7 +309,10 @@ public final class MailDatabase: @unchecked Sendable {
                 emlx_path = excluded.emlx_path,
                 body_text = excluded.body_text,
                 body_html = excluded.body_html,
-                updated_at = \(now)
+                updated_at = \(now),
+                mailbox_status = excluded.mailbox_status,
+                pending_sync_action = excluded.pending_sync_action,
+                last_known_mailbox_id = excluded.last_known_mailbox_id
             """)
     }
 
@@ -1074,7 +1110,8 @@ public final class MailDatabase: @unchecked Sendable {
                         id, apple_rowid, message_id, mailbox_id, mailbox_name, account_id,
                         subject, sender_name, sender_email, date_sent, date_received,
                         is_read, is_flagged, is_deleted, has_attachments, emlx_path,
-                        body_text, body_html, synced_at, updated_at
+                        body_text, body_html, synced_at, updated_at,
+                        mailbox_status, pending_sync_action, last_known_mailbox_id
                     ) VALUES (
                         '\(escapeSql(message.id))', \(message.appleRowId ?? 0), \(message.messageId.map { "'\(escapeSql($0))'" } ?? "NULL"),
                         \(message.mailboxId ?? 0), \(message.mailboxName.map { "'\(escapeSql($0))'" } ?? "NULL"),
@@ -1087,7 +1124,10 @@ public final class MailDatabase: @unchecked Sendable {
                         \(message.hasAttachments ? 1 : 0), \(message.emlxPath.map { "'\(escapeSql($0))'" } ?? "NULL"),
                         \(message.bodyText.map { "'\(escapeSql($0))'" } ?? "NULL"),
                         \(message.bodyHtml.map { "'\(escapeSql($0))'" } ?? "NULL"),
-                        \(timestamp), \(timestamp)
+                        \(timestamp), \(timestamp),
+                        '\(message.mailboxStatus.rawValue)',
+                        \(message.pendingSyncAction.map { "'\($0.rawValue)'" } ?? "NULL"),
+                        \(message.lastKnownMailboxId.map { String($0) } ?? "NULL")
                     )
                     ON CONFLICT(id) DO UPDATE SET
                         apple_rowid = excluded.apple_rowid,
@@ -1107,7 +1147,10 @@ public final class MailDatabase: @unchecked Sendable {
                         emlx_path = excluded.emlx_path,
                         body_text = excluded.body_text,
                         body_html = excluded.body_html,
-                        updated_at = \(timestamp)
+                        updated_at = \(timestamp),
+                        mailbox_status = excluded.mailbox_status,
+                        pending_sync_action = excluded.pending_sync_action,
+                        last_known_mailbox_id = excluded.last_known_mailbox_id
                     """)
 
                 if exists {
@@ -1288,7 +1331,15 @@ extension MailDatabase {
     }
 
     private func rowToMessage(_ row: Row) throws -> MailMessage {
-        MailMessage(
+        // Parse mailbox_status (column 21) - default to .inbox if null or unknown
+        let mailboxStatusStr = getStringValue(row, 21)
+        let mailboxStatus = mailboxStatusStr.flatMap { MailboxStatus(rawValue: $0) } ?? .inbox
+
+        // Parse pending_sync_action (column 22) - nullable
+        let pendingSyncActionStr = getStringValue(row, 22)
+        let pendingSyncAction = pendingSyncActionStr.flatMap { SyncAction(rawValue: $0) }
+
+        return MailMessage(
             id: getStringValue(row, 0) ?? "",
             appleRowId: getIntValue(row, 1),
             messageId: getStringValue(row, 2),
@@ -1307,7 +1358,10 @@ extension MailDatabase {
             emlxPath: getStringValue(row, 15),
             bodyText: getStringValue(row, 16),
             bodyHtml: getStringValue(row, 17),
-            exportPath: getStringValue(row, 18)
+            exportPath: getStringValue(row, 18),
+            mailboxStatus: mailboxStatus,
+            pendingSyncAction: pendingSyncAction,
+            lastKnownMailboxId: getIntValue(row, 23)
         )
     }
 
@@ -1325,6 +1379,19 @@ extension MailDatabase {
 }
 
 // MARK: - Data Models
+
+/// Tracks the mailbox status of a message for bidirectional sync
+public enum MailboxStatus: String, Sendable {
+    case inbox = "inbox"
+    case archived = "archived"
+    case deleted = "deleted"
+}
+
+/// Pending sync action to be pushed to Apple Mail
+public enum SyncAction: String, Sendable {
+    case archive = "archive"
+    case delete = "delete"
+}
 
 /// Represents a mirrored email message
 public struct MailMessage: Sendable {
@@ -1347,6 +1414,10 @@ public struct MailMessage: Sendable {
     public let bodyText: String?
     public let bodyHtml: String?
     public let exportPath: String?
+    // Mailbox status tracking for bidirectional sync (added in migration V2)
+    public let mailboxStatus: MailboxStatus
+    public let pendingSyncAction: SyncAction?
+    public let lastKnownMailboxId: Int?
 
     public init(
         id: String,
@@ -1367,7 +1438,10 @@ public struct MailMessage: Sendable {
         emlxPath: String? = nil,
         bodyText: String? = nil,
         bodyHtml: String? = nil,
-        exportPath: String? = nil
+        exportPath: String? = nil,
+        mailboxStatus: MailboxStatus = .inbox,
+        pendingSyncAction: SyncAction? = nil,
+        lastKnownMailboxId: Int? = nil
     ) {
         self.id = id
         self.appleRowId = appleRowId
@@ -1388,6 +1462,9 @@ public struct MailMessage: Sendable {
         self.bodyText = bodyText
         self.bodyHtml = bodyHtml
         self.exportPath = exportPath
+        self.mailboxStatus = mailboxStatus
+        self.pendingSyncAction = pendingSyncAction
+        self.lastKnownMailboxId = lastKnownMailboxId
     }
 }
 
