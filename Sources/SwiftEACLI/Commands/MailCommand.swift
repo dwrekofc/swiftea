@@ -3,6 +3,7 @@ import ArgumentParser
 import Foundation
 import SwiftEAKit
 
+
 // MARK: - Date Extension for ISO 8601 formatting
 
 extension Date {
@@ -1516,9 +1517,10 @@ struct MailThreadCommand: ParsableCommand {
             Displays thread metadata including subject, participants, and date range.
 
             EXAMPLES
-              swea mail thread abc123              # Display thread by ID
-              swea mail thread abc123 --json       # Output as JSON
-              swea mail thread abc123 --html       # Show HTML bodies instead of plain text
+              swea mail thread abc123                    # Display thread (default: text)
+              swea mail thread abc123 --format json      # Output as JSON for scripting
+              swea mail thread abc123 --format markdown  # Output as Markdown
+              swea mail thread abc123 --html             # Show HTML bodies instead of plain text
             """
     )
 
@@ -1528,8 +1530,8 @@ struct MailThreadCommand: ParsableCommand {
     @Flag(name: .long, help: "Show HTML body instead of plain text")
     var html: Bool = false
 
-    @Flag(name: .long, help: "Output as JSON")
-    var json: Bool = false
+    @Option(name: .long, help: "Output format: text (default), json, or markdown")
+    var format: ThreadOutputFormat = .text
 
     func run() throws {
         let vault = try VaultContext.require()
@@ -1561,7 +1563,8 @@ struct MailThreadCommand: ParsableCommand {
         let firstDate = thread.firstDate
         let lastDate = thread.lastDate
 
-        if json {
+        switch format {
+        case .json:
             outputAsJson(
                 threadId: threadId,
                 subject: threadSubject,
@@ -1571,7 +1574,17 @@ struct MailThreadCommand: ParsableCommand {
                 lastDate: lastDate,
                 messages: messages
             )
-        } else {
+        case .markdown, .md:
+            outputAsMarkdown(
+                threadId: threadId,
+                subject: threadSubject,
+                participantCount: participantCount,
+                messageCount: messageCount,
+                firstDate: firstDate,
+                lastDate: lastDate,
+                messages: messages
+            )
+        case .text:
             outputAsText(
                 threadId: threadId,
                 subject: threadSubject,
@@ -1633,6 +1646,105 @@ struct MailThreadCommand: ParsableCommand {
            let jsonString = String(data: data, encoding: .utf8) {
             print(jsonString)
         }
+    }
+
+    private func outputAsMarkdown(
+        threadId: String,
+        subject: String?,
+        participantCount: Int,
+        messageCount: Int,
+        firstDate: Date?,
+        lastDate: Date?,
+        messages: [MailMessage]
+    ) {
+        let threadTotal = messages.count
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime]
+
+        // YAML frontmatter
+        print("---")
+        print("thread_id: \(threadId)")
+        print("subject: \"\(escapeYaml(subject ?? "(No Subject)"))\"")
+        print("participant_count: \(participantCount)")
+        print("message_count: \(messageCount)")
+        if let firstDate = firstDate {
+            print("first_date: \(dateFormatter.string(from: firstDate))")
+        }
+        if let lastDate = lastDate {
+            print("last_date: \(dateFormatter.string(from: lastDate))")
+        }
+        print("---")
+        print("")
+
+        // Thread header
+        print("# \(subject ?? "(No Subject)")")
+        print("")
+        print("**Thread ID:** `\(threadId)`  ")
+        print("**Participants:** \(participantCount)  ")
+        print("**Messages:** \(messageCount)")
+        print("")
+
+        if let firstDate = firstDate, let lastDate = lastDate {
+            let firstFormatted = DateFormatter.localizedString(from: firstDate, dateStyle: .long, timeStyle: .short)
+            let lastFormatted = DateFormatter.localizedString(from: lastDate, dateStyle: .long, timeStyle: .short)
+            print("**Date Range:** \(firstFormatted) → \(lastFormatted)")
+            print("")
+        }
+
+        print("---")
+        print("")
+
+        // Display each message
+        for (index, message) in messages.enumerated() {
+            let position = index + 1
+
+            print("## [\(position)/\(threadTotal)] \(message.subject)")
+            print("")
+            print("**From:** \(formatSender(message))  ")
+            if let date = message.dateSent {
+                let dateFormatted = DateFormatter.localizedString(from: date, dateStyle: .long, timeStyle: .long)
+                print("**Date:** \(dateFormatted)  ")
+            }
+            if let mailbox = message.mailboxName {
+                print("**Mailbox:** \(mailbox)  ")
+            }
+            if message.hasAttachments {
+                print("**Attachments:** Yes")
+            }
+            print("")
+
+            // Body content in a blockquote for better formatting
+            let body: String
+            if html {
+                body = message.bodyHtml ?? "(No HTML body available)"
+            } else if let textBody = message.bodyText, !textBody.isEmpty {
+                body = textBody
+            } else if let htmlBody = message.bodyHtml {
+                body = stripHtml(htmlBody)
+            } else {
+                body = "(No message body available)"
+            }
+
+            // Output body - preserve line breaks for readability
+            print(body)
+            print("")
+
+            // Separator between messages
+            if index < messages.count - 1 {
+                print("---")
+                print("")
+            }
+        }
+
+        // Footer
+        print("")
+        print("---")
+        print("")
+        print("*End of thread (\(threadTotal) message(s))*")
+    }
+
+    private func escapeYaml(_ string: String) -> String {
+        return string.replacingOccurrences(of: "\"", with: "\\\"")
     }
 
     private func outputAsText(
@@ -1744,9 +1856,10 @@ struct MailThreadsCommand: ParsableCommand {
             Threads are ordered by most recent activity by default.
 
             EXAMPLES
-              swea mail threads                    # List threads (default limit 50)
-              swea mail threads --limit 100        # List more threads
-              swea mail threads --json             # Output as JSON
+              swea mail threads                         # List threads (default: text)
+              swea mail threads --limit 100             # List more threads
+              swea mail threads --format json           # Output as JSON for scripting
+              swea mail threads --format markdown       # Output as Markdown
             """
     )
 
@@ -1756,8 +1869,8 @@ struct MailThreadsCommand: ParsableCommand {
     @Option(name: .shortAndLong, help: "Number of threads to skip (for pagination)")
     var offset: Int = 0
 
-    @Flag(name: .long, help: "Output as JSON")
-    var json: Bool = false
+    @Option(name: .long, help: "Output format: text (default), json, or markdown")
+    var format: ThreadOutputFormat = .text
 
     func run() throws {
         let vault = try VaultContext.require()
@@ -1772,7 +1885,7 @@ struct MailThreadsCommand: ParsableCommand {
         let threads = try mailDatabase.getThreads(limit: limit, offset: offset)
 
         if threads.isEmpty {
-            if json {
+            if format.isJson {
                 print("{\"threads\": [], \"count\": 0, \"message\": \"No threads found\"}")
             } else {
                 print("No email threads found.")
@@ -1788,88 +1901,159 @@ struct MailThreadsCommand: ParsableCommand {
 
         let totalCount = try mailDatabase.getThreadCount()
 
-        if json {
-            // Output as JSON
-            var threadsArray: [[String: Any]] = []
-            for thread in threads {
-                var threadDict: [String: Any] = [
-                    "id": thread.id,
-                    "subject": thread.subject ?? "",
-                    "participant_count": thread.participantCount,
-                    "message_count": thread.messageCount
-                ]
-                if let firstDate = thread.firstDate {
-                    threadDict["first_date"] = firstDate.iso8601String
-                }
-                if let lastDate = thread.lastDate {
-                    threadDict["last_date"] = lastDate.iso8601String
-                }
-                threadsArray.append(threadDict)
-            }
-
-            let output: [String: Any] = [
-                "threads": threadsArray,
-                "count": threads.count,
-                "total": totalCount,
-                "offset": offset,
-                "limit": limit
-            ]
-
-            if let data = try? JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys]),
-               let jsonString = String(data: data, encoding: .utf8) {
-                print(jsonString)
-            }
-        } else {
-            // Output as text
-            print("Email Threads")
-            print(String(repeating: "=", count: 70))
-            print("")
-
-            // Date formatter for consistent display
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateStyle = .medium
-            dateFormatter.timeStyle = .short
-
-            for thread in threads {
-                // Thread ID and subject
-                let subject = thread.subject ?? "(No Subject)"
-                print("[\(thread.id)] \(subject)")
-
-                // Participants and message count
-                print("  Participants: \(thread.participantCount)  |  Messages: \(thread.messageCount)")
-
-                // Date range
-                if let firstDate = thread.firstDate, let lastDate = thread.lastDate {
-                    let firstFormatted = dateFormatter.string(from: firstDate)
-                    let lastFormatted = dateFormatter.string(from: lastDate)
-                    if firstDate == lastDate {
-                        print("  Date: \(firstFormatted)")
-                    } else {
-                        print("  Date Range: \(firstFormatted) → \(lastFormatted)")
-                    }
-                } else if let lastDate = thread.lastDate {
-                    print("  Last Activity: \(dateFormatter.string(from: lastDate))")
-                }
-
-                print("")
-            }
-
-            // Footer with pagination info
-            print(String(repeating: "-", count: 70))
-            if totalCount > threads.count + offset {
-                print("Showing \(offset + 1)-\(offset + threads.count) of \(totalCount) threads")
-                print("")
-                print("To see more threads:")
-                print("  swea mail threads --limit \(limit) --offset \(offset + threads.count)")
-            } else {
-                print("Showing \(threads.count) of \(totalCount) threads")
-            }
-            print("")
-            print("To view a specific thread:")
-            print("  swea mail thread <thread-id>")
+        switch format {
+        case .json:
+            outputAsJson(threads: threads, totalCount: totalCount)
+        case .markdown, .md:
+            outputAsMarkdown(threads: threads, totalCount: totalCount)
+        case .text:
+            outputAsText(threads: threads, totalCount: totalCount)
         }
     }
+
+    private func outputAsJson<T: ThreadLike>(threads: [T], totalCount: Int) {
+        var threadsArray: [[String: Any]] = []
+        for thread in threads {
+            var threadDict: [String: Any] = [
+                "id": thread.id,
+                "subject": thread.subject ?? "",
+                "participant_count": thread.participantCount,
+                "message_count": thread.messageCount
+            ]
+            if let firstDate = thread.firstDate {
+                threadDict["first_date"] = firstDate.iso8601String
+            }
+            if let lastDate = thread.lastDate {
+                threadDict["last_date"] = lastDate.iso8601String
+            }
+            threadsArray.append(threadDict)
+        }
+
+        let output: [String: Any] = [
+            "threads": threadsArray,
+            "count": threads.count,
+            "total": totalCount,
+            "offset": offset,
+            "limit": limit
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys]),
+           let jsonString = String(data: data, encoding: .utf8) {
+            print(jsonString)
+        }
+    }
+
+    private func outputAsMarkdown<T: ThreadLike>(threads: [T], totalCount: Int) {
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime]
+
+        // YAML frontmatter
+        print("---")
+        print("type: thread_list")
+        print("count: \(threads.count)")
+        print("total: \(totalCount)")
+        print("offset: \(offset)")
+        print("limit: \(limit)")
+        print("---")
+        print("")
+
+        // Header
+        print("# Email Threads")
+        print("")
+        print("Showing \(threads.count) of \(totalCount) threads")
+        print("")
+
+        // Date formatter for display
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateStyle = .medium
+        displayFormatter.timeStyle = .short
+
+        // Table header
+        print("| Thread ID | Subject | Participants | Messages | Last Activity |")
+        print("|-----------|---------|--------------|----------|---------------|")
+
+        for thread in threads {
+            let subject = thread.subject ?? "(No Subject)"
+            let truncatedSubject = subject.count > 40 ? String(subject.prefix(37)) + "..." : subject
+            let escapedSubject = truncatedSubject.replacingOccurrences(of: "|", with: "\\|")
+            let lastActivity = thread.lastDate.map { displayFormatter.string(from: $0) } ?? "-"
+
+            print("| `\(thread.id)` | \(escapedSubject) | \(thread.participantCount) | \(thread.messageCount) | \(lastActivity) |")
+        }
+
+        print("")
+
+        // Footer
+        if totalCount > threads.count + offset {
+            print("---")
+            print("")
+            print("*Showing \(offset + 1)-\(offset + threads.count) of \(totalCount) threads*")
+            print("")
+            print("To see more threads:")
+            print("```")
+            print("swea mail threads --limit \(limit) --offset \(offset + threads.count)")
+            print("```")
+        }
+
+        print("")
+        print("To view a specific thread:")
+        print("```")
+        print("swea mail thread <thread-id>")
+        print("```")
+    }
+
+    private func outputAsText<T: ThreadLike>(threads: [T], totalCount: Int) {
+        print("Email Threads")
+        print(String(repeating: "=", count: 70))
+        print("")
+
+        // Date formatter for consistent display
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateStyle = .medium
+        dateFormatter.timeStyle = .short
+
+        for thread in threads {
+            // Thread ID and subject
+            let subject = thread.subject ?? "(No Subject)"
+            print("[\(thread.id)] \(subject)")
+
+            // Participants and message count
+            print("  Participants: \(thread.participantCount)  |  Messages: \(thread.messageCount)")
+
+            // Date range
+            if let firstDate = thread.firstDate, let lastDate = thread.lastDate {
+                let firstFormatted = dateFormatter.string(from: firstDate)
+                let lastFormatted = dateFormatter.string(from: lastDate)
+                if firstDate == lastDate {
+                    print("  Date: \(firstFormatted)")
+                } else {
+                    print("  Date Range: \(firstFormatted) → \(lastFormatted)")
+                }
+            } else if let lastDate = thread.lastDate {
+                print("  Last Activity: \(dateFormatter.string(from: lastDate))")
+            }
+
+            print("")
+        }
+
+        // Footer with pagination info
+        print(String(repeating: "-", count: 70))
+        if totalCount > threads.count + offset {
+            print("Showing \(offset + 1)-\(offset + threads.count) of \(totalCount) threads")
+            print("")
+            print("To see more threads:")
+            print("  swea mail threads --limit \(limit) --offset \(offset + threads.count)")
+        } else {
+            print("Showing \(threads.count) of \(totalCount) threads")
+        }
+        print("")
+        print("To view a specific thread:")
+        print("  swea mail thread <thread-id>")
+    }
 }
+
+// Note: ThreadLike protocol is defined in SwiftEAKit.MailDatabase
+// and Thread already conforms to it
 
 /// Output format for mail export command.
 /// Conforms to ExpressibleByArgument for ArgumentParser integration,
@@ -1897,6 +2081,35 @@ public enum OutputFormat: String, CaseIterable, ExpressibleByArgument {
     /// File extension for this format
     var fileExtension: String {
         isJson ? "json" : "md"
+    }
+}
+
+/// Output format for thread display commands.
+/// Supports text (human-readable), JSON (for scripting), and Markdown (for documentation).
+public enum ThreadOutputFormat: String, CaseIterable, ExpressibleByArgument {
+    case text
+    case json
+    case markdown
+    case md
+
+    /// All valid format values for help text
+    public static var allValueStrings: [String] {
+        allCases.map { $0.rawValue }
+    }
+
+    /// Check if this format produces JSON output
+    var isJson: Bool {
+        self == .json
+    }
+
+    /// Check if this format produces Markdown output
+    var isMarkdown: Bool {
+        self == .markdown || self == .md
+    }
+
+    /// Check if this format produces plain text output
+    var isText: Bool {
+        self == .text
     }
 }
 
@@ -2316,7 +2529,7 @@ struct MailExportThreadsCommand: ParsableCommand {
         defer { mailDatabase.close() }
 
         // Get threads to export - handle single thread vs all threads differently
-        // to avoid type annotation issues with SwiftEAKit.Thread shadowing
+        // to avoid type annotation issues with Thread shadowing
         if let specificThreadId = threadId {
             // Export single thread
             guard let thread = try mailDatabase.getThread(id: specificThreadId) else {

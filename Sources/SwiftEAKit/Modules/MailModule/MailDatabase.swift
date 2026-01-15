@@ -2185,3 +2185,15 @@ public struct Thread: Sendable {
         self.updatedAt = updatedAt
     }
 }
+
+/// Protocol for thread-like types to avoid ambiguity with Foundation.Thread in CLI
+public protocol ThreadLike {
+    var id: String { get }
+    var subject: String? { get }
+    var participantCount: Int { get }
+    var messageCount: Int { get }
+    var firstDate: Date? { get }
+    var lastDate: Date? { get }
+}
+
+extension Thread: ThreadLike {}
