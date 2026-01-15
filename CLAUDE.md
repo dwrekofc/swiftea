@@ -4,7 +4,7 @@
 
 - If the user asks for a new idea, new feature, proposal/spec/change, plan, or new capability: read `.d-spec/CLAUDE.md` and follow the linked docs as-needed.
 - If the user asks questions or needs context gathering: use `AskUserTool` for interviews and clarifications.
-- If the user asks to implement an approved change/feature: follow the workflow below, then use **Beads as the sole execution source of truth** per `bd prime` (d-spec is input-only after approval).
+- If the user asks to implement an approved change/feature: follow the **ralph-tui workflow** below with Beads as the execution source of truth.
 - If the repo needs ideation docs setup/standardization: start with `.d-spec/onboarding/project-setup.md`.
 
 # Planning Phase - d-spec
@@ -23,19 +23,98 @@ This project uses **d-spec** (`/.d-spec/`) for ideation and planning. See `.d-sp
 .d-spec/roadmap.md          # Planned work
 ```
 
-**Workflow:** Idea → Interview → Change Proposal → Approval → Beads handoff
+**Workflow:** Idea → Interview → Change Proposal → Approval → **Ralph-TUI Beads**
 
-# Beads (Execution Phase)
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+# Execution Phase - Ralph-TUI with Beads
+
+This project uses **ralph-tui** with **Beads** for autonomous task execution. All tasks MUST follow the ralph-tui user story format.
+
+## Quality Gates (SwiftEA)
+
+Every task MUST include these in acceptance criteria:
+```
+- [ ] `swift build` passes
+- [ ] `swift test` passes
+```
+
+## User Story Format (REQUIRED)
+
+**Title:** `US-XXX: Short descriptive title`
+
+**Description:**
+```markdown
+As a [role], I want/need [what] so [why].
+
+## Context
+[Implementation details, file hints, constraints]
+
+## Acceptance Criteria
+- [ ] Specific outcome 1
+- [ ] Specific outcome 2
+- [ ] `swift build` passes
+- [ ] `swift test` passes
+
+---
+## If You Cannot Complete This Task
+1. Check off completed acceptance criteria
+2. Add comment: what's done, remaining, blockers
+3. Commit: `git commit -m "WIP: <task-id> - <summary>"`
+4. Push: `git push`
+5. Leave status as `in_progress`
+```
+
+**Labels:** `ralph,task` (or `ralph,feature` for epics)
+
+## Creating Ralph-TUI Beads
+
+```bash
+# 1. Create epic
+bd create --type=epic \
+  --title="Feature Name" \
+  --description="Feature description with success criteria" \
+  --labels="ralph,feature"
+
+# 2. Create child tasks (with quality gates!)
+bd create --parent=<epic-id> \
+  --title="US-001: Task title" \
+  --description="As a [role]..." \
+  --priority=2 \
+  --labels="ralph,task"
+
+# 3. Add dependencies (schema → backend → UI)
+bd dep add <task-id> <depends-on-id>
+
+# 4. Run ralph-tui
+ralph-tui run --tracker beads --epic <epic-id>
+```
+
+## Task Sizing Rule
+
+**Each task must be completable in ONE ralph-tui iteration** (~one agent context window).
+
+**Right-sized:**
+- Add a database column + migration
+- Add a CLI command with flags
+- Update a service with new logic
+
+**Too big (split these):**
+- "Build entire threading support" → Schema, detection, CLI, export
+- "Add authentication" → Schema, middleware, commands, tests
+
+## Dependency Order
+
+1. Schema/database changes (no dependencies)
+2. Services/backend logic (depends on schema)
+3. CLI commands (depends on services)
+4. Integration tests (depends on commands)
 
 ## Quick Reference
 
 ```bash
-bd ready              # Find available work
+bd ready              # Find available work (ralph picks automatically)
 bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
-bd close <id>         # Complete work
-bd sync               # Sync with git
+bd list --label ralph # List ralph-tagged tasks
+ralph-tui run --tracker beads --epic <id>  # Autonomous execution
 ```
 
 ## Landing the Plane (Session Completion)

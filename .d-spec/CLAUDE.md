@@ -23,13 +23,33 @@ This folder contains the d-spec planning workflow and links to the onboarding do
 10. **Link + archive idea**: add bidirectional YAML links between idea and change, then move the idea to `.d-spec/planning/ideas/archive/` (see `.d-spec/onboarding/archive-instructions.md`).
 11. **Approval gate**: do not create Beads issues or implement until the user approves the proposal in chat.
 
-### Execution Phase
-12. **Beads handoff (after approval)**: before creating Beads issues, read `.d-spec/project.md` plus the change's `proposal.md`, `design.md` (if present), all `specs/**/spec.md`, and `tasks.md`. Then create a **detailed** Beads epic + tasks per `bd prime` and add `Beads: <epic-id>` to `.d-spec/planning/changes/<change-id>/proposal.md`. See `.d-spec/onboarding/discovery-to-spec.md` for Beads prereads + task template. **Tasks must be atomic and self-contained**—see root `CLAUDE.md` "Creating Atomic Tasks" section.
-13. **Update roadmap after approval**: once the Beads epic exists, update `.d-spec/roadmap.md` to reference the official spec(s) and Beads epic IDs.
-14. **Enforce TDD via Beads structure**: write tests as Acceptance Criteria, use an epic with Success Criteria, split Red → Green → Refactor into child tasks for larger work, and wire dependencies so tests come first (label `tdd` or `tests-first` where relevant).
-15. **Archive change doc**: move the change to `.d-spec/planning/archive/` with YAML traceability once the Beads epic exists.
-16. **Implement via Beads**: execute Beads tasks sequentially and update Beads statuses/fields as you work. Do **not** update `.d-spec/planning/changes/<change-id>/tasks.md` during implementation (d-spec is frozen after approval).
-17. **Wrap up**: follow the session completion checklist in root `CLAUDE.md`.
+### Execution Phase (Ralph-TUI with Beads)
+
+This project uses **ralph-tui** with **Beads** for autonomous task execution. All tasks MUST follow the ralph-tui user story format.
+
+12. **Ralph-TUI Beads handoff (after approval)**: before creating Beads issues, read `.d-spec/project.md` plus the change's `proposal.md`, `design.md` (if present), all `specs/**/spec.md`, and `tasks.md`. Then create ralph-tui formatted Beads:
+    - **Epic**: `bd create --type=epic --title="..." --labels="ralph,feature"`
+    - **Tasks**: `bd create --parent=<epic> --title="US-XXX: ..." --labels="ralph,task"`
+    - **Dependencies**: `bd dep add <task> <depends-on>` (schema → backend → CLI)
+    - Add `Beads: <epic-id>` to `.d-spec/planning/changes/<change-id>/proposal.md`
+    - See `.d-spec/commands/ralph-tui.md` for full format spec.
+
+13. **User Story Format (REQUIRED)**:
+    - Title: `US-XXX: Short descriptive title`
+    - Description: `As a [role], I want/need [what] so [why]`
+    - Acceptance criteria with quality gates: `swift build` and `swift test` passes
+    - Labels: `ralph,task` (tasks) or `ralph,feature` (epics)
+    - Task footer with partial completion protocol
+
+14. **Task Sizing**: Each task must be completable in ONE ralph-tui iteration. Split large features into schema → services → CLI → tests.
+
+15. **Update roadmap after approval**: once the Beads epic exists, update `.d-spec/roadmap.md` to reference the official spec(s) and Beads epic IDs.
+
+16. **Archive change doc**: move the change to `.d-spec/planning/archive/` with YAML traceability once the Beads epic exists.
+
+17. **Execute via ralph-tui**: Run `ralph-tui run --tracker beads --epic <epic-id>` for autonomous execution. Ralph picks tasks in dependency order, claims them, implements, and closes when done. Do **not** update `.d-spec/planning/changes/<change-id>/tasks.md` during implementation (d-spec is frozen after approval).
+
+18. **Wrap up**: follow the session completion checklist in root `CLAUDE.md`.
 
 ## Goal Alignment (Required)
 
@@ -62,7 +82,7 @@ status: draft
 ---
 ```
 
-## d-spec → Beads Handoff (Explicit Requirements)
+## d-spec → Ralph-TUI Beads Handoff
 
 - Do not create Beads issues until the proposal is approved in chat.
 - Before creating Beads issues, **must read**:
@@ -73,11 +93,70 @@ status: draft
   - `.d-spec/planning/changes/<change-id>/specs/**/spec.md`
   - `.d-spec/planning/changes/<change-id>/tasks.md`
 - After Beads creation, execution tracking happens only in Beads; d-spec remains read-only.
-- **Task quality**: Each task must be atomic and self-contained (see root `CLAUDE.md` "Creating Atomic Tasks").
-- **Partial completion**: If you cannot finish a task, follow the Partial Completion Protocol in root `CLAUDE.md`.
+
+### Ralph-TUI Task Requirements
+
+All tasks MUST follow the ralph-tui user story format:
+
+1. **Title**: `US-XXX: Short descriptive title`
+2. **Description**: `As a [role], I want/need [what] so [why]`
+3. **Acceptance Criteria**: Specific outcomes + quality gates
+4. **Labels**: `ralph,task` (tasks) or `ralph,feature` (epics)
+5. **Quality Gates** (MUST include in every task):
+   ```
+   - [ ] `swift build` passes
+   - [ ] `swift test` passes
+   ```
+6. **Task Footer** (MUST include in every task):
+   ```markdown
+   ---
+   ## If You Cannot Complete This Task
+   1. Check off completed acceptance criteria
+   2. Add comment: what's done, remaining, blockers
+   3. Commit: `git commit -m "WIP: <task-id> - <summary>"`
+   4. Push: `git push`
+   5. Leave status as `in_progress`
+   ```
+
+### Task Sizing
+
+Each task MUST be completable in ONE ralph-tui iteration (~one agent context window).
+
+**Right-sized tasks:**
+- Add a database column + migration
+- Add a CLI command with flags
+- Update a service with new logic
+- Write tests for a single component
+
+**Split these (too big):**
+- "Build entire feature" → Schema, services, CLI, tests
+- "Refactor module" → One refactoring step per task
+
+### Dependency Order
+
+Use `bd dep add <task> <depends-on>`:
+1. Schema/database changes (no dependencies)
+2. Services/backend logic (depends on schema)
+3. CLI commands (depends on services)
+4. Integration tests (depends on commands)
+
+### Running Ralph-TUI
+
+```bash
+ralph-tui run --tracker beads --epic <epic-id>
+```
+
+Ralph-TUI will autonomously:
+1. Select the highest-priority unblocked task
+2. Claim it (`in_progress`)
+3. Implement and verify acceptance criteria
+4. Close it when complete
+5. Repeat until epic is done
 
 ## Entrypoints
 
+- **Ralph-TUI workflow (execution)**: `.d-spec/commands/ralph-tui.md`
+- Beads manual workflow: `.d-spec/commands/beads-workflow.md`
 - Project setup (docs ideation structure): `.d-spec/onboarding/project-setup.md`
 - Discovery → Spec → Beads → Implement: `.d-spec/onboarding/discovery-to-spec.md`
 - Brownfield intake (existing docs/specs): `.d-spec/onboarding/brownfield-intake.md`

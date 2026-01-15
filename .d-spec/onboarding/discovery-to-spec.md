@@ -206,7 +206,11 @@ Common failures:
 - Using MODIFIED without including the full, updated requirement block.
 - Missing delta section headers or typo in header text.
 
-## Reference: Beads Handoff Prereads + Task Template
+## Reference: Ralph-TUI Beads Handoff
+
+This project uses **ralph-tui** with **Beads** for autonomous task execution. All tasks MUST follow the ralph-tui user story format.
+
+### Prereads (Required)
 
 Before creating Beads issues, **must read**:
 - `.d-spec/project.md`
@@ -215,23 +219,89 @@ Before creating Beads issues, **must read**:
 - `.d-spec/planning/changes/<change-id>/specs/**/spec.md`
 - `.d-spec/planning/changes/<change-id>/tasks.md`
 
-Beads task template (single canonical copy):
+### Quality Gates (SwiftEA)
 
-```markdown
-Title:
-Type: epic|task|bug|chore
-Priority:
-Status:
-
-Description:
-- What is being built and why.
-
-Acceptance Criteria:
-- Observable outcomes + how to verify (prefer tests; write failing tests first unless explicitly exempted).
-
-Dependencies:
-- Beads IDs or "none".
-
-Notes:
-- Risks, rollbacks, or constraints (if any).
+Every task MUST include these in acceptance criteria:
 ```
+- [ ] `swift build` passes
+- [ ] `swift test` passes
+```
+
+### Creating Ralph-TUI Beads
+
+```bash
+# 1. Create epic with ralph label
+bd create --type=epic \
+  --title="Feature Name" \
+  --description="Feature description with success criteria" \
+  --labels="ralph,feature"
+
+# 2. Create child tasks with ralph format
+bd create --parent=<epic-id> \
+  --title="US-001: Task title" \
+  --description="..." \
+  --priority=2 \
+  --labels="ralph,task"
+
+# 3. Add dependencies (schema → backend → CLI)
+bd dep add <task-id> <depends-on-id>
+```
+
+### User Story Format (REQUIRED)
+
+**Title:** `US-XXX: Short descriptive title`
+
+**Description Template:**
+```markdown
+As a [role], I want/need [what] so [why].
+
+## Context
+[Implementation details, file hints, constraints]
+
+## Acceptance Criteria
+- [ ] Specific outcome 1
+- [ ] Specific outcome 2
+- [ ] `swift build` passes
+- [ ] `swift test` passes
+
+---
+## If You Cannot Complete This Task
+1. Check off completed acceptance criteria
+2. Add comment: what's done, remaining, blockers
+3. Commit: `git commit -m "WIP: <task-id> - <summary>"`
+4. Push: `git push`
+5. Leave status as `in_progress`
+```
+
+### Task Sizing Rule
+
+**Each task must be completable in ONE ralph-tui iteration** (~one agent context window).
+
+**Right-sized:**
+- Add a database column + migration
+- Add a CLI command with flags
+- Update a service with new logic
+
+**Too big (split these):**
+- "Build entire feature" → Schema, detection, CLI, export
+- "Refactor module" → One step per task
+
+### Dependency Order
+
+1. Schema/database changes (no dependencies)
+2. Services/backend logic (depends on schema)
+3. CLI commands (depends on services)
+4. Integration tests (depends on commands)
+
+### Running Ralph-TUI
+
+```bash
+ralph-tui run --tracker beads --epic <epic-id>
+```
+
+Ralph-TUI will autonomously:
+1. Select the highest-priority unblocked task
+2. Claim it (`in_progress`)
+3. Implement and verify acceptance criteria
+4. Close it when complete
+5. Repeat until epic is done

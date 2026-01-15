@@ -4,9 +4,36 @@ description: Show the AI-supervised issue workflow guide
 
 Display the beads workflow for AI agents and developers.
 
-# Beads Workflow
+# Beads Workflow (Ralph-TUI First)
 
-Beads is an issue tracker designed for AI-supervised coding workflows. Here's how to use it effectively:
+This project uses **ralph-tui** with **Beads** for autonomous task execution. All tasks MUST follow the ralph-tui user story format.
+
+## Ralph-TUI Quick Start
+
+```bash
+# Run ralph-tui on an epic
+ralph-tui run --tracker beads --epic <epic-id>
+
+# List ralph-tagged tasks
+bd list --label ralph
+
+# Find available ralph work
+bd ready --label ralph
+```
+
+## Quality Gates (SwiftEA)
+
+Every task MUST include these in acceptance criteria:
+```
+- [ ] `swift build` passes
+- [ ] `swift test` passes
+```
+
+---
+
+# Manual Beads Workflow
+
+For manual execution (without ralph-tui), beads provides an issue tracker designed for AI-supervised coding workflows. Here's how to use it effectively:
 
 ## 1. Find Ready Work
 Use `/beads:ready` or the `ready` MCP tool to see tasks with no blockers.
@@ -57,19 +84,47 @@ After closing, check if other work became ready:
 - Use `/beads:ready` to see newly unblocked tasks
 - Start the cycle again
 
-## Creating Atomic Tasks
+## Creating Atomic Tasks (Ralph-TUI Format)
 
-Every task should be self-contained—the next agent can execute **without gathering context**.
+Every task should be self-contained—the next agent can execute **without gathering context**. Tasks MUST follow the ralph-tui user story format for autonomous execution.
 
-**Required elements:**
-- **Title:** Short descriptive name
-- **Description:** "As a [user], I want [feature] so that [benefit]"
-- **Problem:** What's broken/missing and why it matters
-- **Files to modify:** Paths with function names, approx line numbers
-- **Acceptance Criteria:** Verifiable checklist (specific, not vague)
+### Required Format
 
-**Good criteria:** `Button shows confirmation dialog`, `Test testFoo() verifies X`
-**Bad criteria:** `Works correctly`, `Is well tested`
+**Title:** `US-XXX: Short descriptive title`
+
+**Description Template:**
+```markdown
+As a [role], I want/need [what] so [why].
+
+## Context
+[Implementation details, file hints, constraints]
+
+## Acceptance Criteria
+- [ ] Specific outcome 1
+- [ ] Specific outcome 2
+- [ ] `swift build` passes
+- [ ] `swift test` passes
+```
+
+**Labels:** `ralph,task` (or `ralph,feature` for epics)
+
+### Task Sizing (Critical)
+
+**Each task must be completable in ONE ralph-tui iteration** (~one agent context window).
+
+**Right-sized:**
+- Add a database column + migration
+- Add a CLI command with flags
+- Update a service with new logic
+
+**Too big (split these):**
+- "Build entire feature" → Schema, services, CLI, tests
+- "Refactor module" → One step per task
+
+### Acceptance Criteria
+
+**Good criteria:** `Column added to table`, `CLI flag --verbose works`, `Test testFoo() passes`
+**Bad criteria:** `Works correctly`, `Is well tested`, `Handles edge cases`
 
 ### Special Cases
 
