@@ -55,9 +55,9 @@ public enum BackwardSyncError: Error, LocalizedError {
 /// 4. On failure: rollback local status to original state
 public final class MailSyncBackward: @unchecked Sendable {
     private let mailDatabase: MailDatabase
-    private let appleScriptService: AppleScriptService
+    private let appleScriptService: AppleScriptServiceProtocol
 
-    public init(mailDatabase: MailDatabase, appleScriptService: AppleScriptService = .shared) {
+    public init(mailDatabase: MailDatabase, appleScriptService: AppleScriptServiceProtocol = AppleScriptService.shared) {
         self.mailDatabase = mailDatabase
         self.appleScriptService = appleScriptService
     }

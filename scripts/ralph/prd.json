@@ -155,7 +155,7 @@
         "Tests pass"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Files: Tests/SwiftEAKitTests/MailSyncTests.swift, Tests/SwiftEAKitTests/MailSyncBackwardTests.swift (new), Tests/SwiftEAKitTests/MailDatabaseTests.swift"
     }
   ]

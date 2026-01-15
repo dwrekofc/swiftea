@@ -103,6 +103,26 @@ public struct AppleScriptResult {
     }
 }
 
+// MARK: - AppleScript Service Protocol
+
+/// Protocol for executing AppleScript commands
+///
+/// This protocol allows for dependency injection and testing of code
+/// that depends on AppleScript execution.
+public protocol AppleScriptServiceProtocol: Sendable {
+    /// Execute an AppleScript and return the result
+    func execute(_ script: String) throws -> AppleScriptResult
+
+    /// Execute an AppleScript targeting Mail.app
+    func executeMailScript(_ mailScript: String) throws -> AppleScriptResult
+
+    /// Check if Mail.app automation permission is granted
+    func checkMailPermission() -> Bool
+
+    /// Ensure Mail.app is running
+    func ensureMailRunning(timeout: Int) throws
+}
+
 // MARK: - AppleScript Service
 
 /// Service for executing AppleScript commands targeting Mail.app
@@ -111,7 +131,7 @@ public struct AppleScriptResult {
 /// - Structured error handling with actionable messages
 /// - Automation permission detection and guidance
 /// - Mail.app specific error mapping
-public final class AppleScriptService: Sendable {
+public final class AppleScriptService: AppleScriptServiceProtocol, Sendable {
 
     /// Shared instance for convenience (stateless, so sharing is safe)
     public static let shared = AppleScriptService()

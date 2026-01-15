@@ -10,6 +10,8 @@ Started: Thu Jan 15 09:23:26 MST 2026
 - rowToMessage() needs column index updates when adding new columns (indexes are positional)
 - Tests for database functionality are in Tests/SwiftEAKitTests/MailDatabaseTests.swift
 - libsql has threading issues in tests - some tests may fail due to infrastructure, not code
+- AppleScriptServiceProtocol enables mock testing - use MockAppleScriptService in tests
+- Final classes need protocols for dependency injection/mockability
 
 ---
 
@@ -189,4 +191,43 @@ Started: Thu Jan 15 09:23:26 MST 2026
   - Use MailSyncBackward for all archive/delete operations to ensure consistent state tracking
   - SearchFilter is mutable (var) when applying CLI options after parseQuery()
   - Validation errors should provide helpful message with valid options list
+---
+
+## 2026-01-15 09:53 - US-008
+- **What was implemented**: Automated test suite for bidirectional sync functionality
+- **Files changed**:
+  - Tests/SwiftEAKitTests/MailSyncBackwardTests.swift (NEW FILE - 707 lines, 35 tests)
+  - Sources/SwiftEAKit/Modules/MailModule/AppleScriptService.swift (added AppleScriptServiceProtocol)
+  - Sources/SwiftEAKit/Modules/MailModule/MailSyncBackward.swift (updated to use protocol)
+- **Implementation details**:
+  - Created AppleScriptServiceProtocol for dependency injection and testability
+  - AppleScriptService now conforms to AppleScriptServiceProtocol
+  - MailSyncBackward now accepts AppleScriptServiceProtocol for mockable testing
+  - MockAppleScriptService class for test mocking:
+    - Records executeMailScript calls for verification
+    - Configurable success/failure via shouldFail flag
+    - Supports capturing state during execution via onExecute callback
+  - 35 comprehensive tests covering:
+    - BackwardSyncResult initialization and defaults
+    - BackwardSyncError messages for all error cases
+    - archiveMessage: not found, no message ID, optimistic update before AppleScript, success/failure/rollback
+    - deleteMessage: same test coverage as archiveMessage
+    - processPendingActions: empty, archive/delete/mixed actions, skip no-message-id, failed actions retained
+    - MailSyncBackwardScripts: message ID inclusion, special character escaping, error handling
+    - Integration tests: full archive/delete workflows, pending action reprocessing
+  - **Key test**: testArchiveMessageOptimisticUpdateSetsStatusBeforeAppleScript
+    - Uses CapturingMockAppleScript to capture DB state during AppleScript execution
+    - Verifies status is already 'archived' and pendingSyncAction is 'archive' before AppleScript runs
+  - **Key test**: testArchiveMessageFailureRollsBack
+    - Verifies that on AppleScript failure, status is rolled back to original value
+    - Verifies pending action is cleared (not left in inconsistent state)
+- **Existing test coverage** (already in place from prior stories):
+  - MailDatabaseTests.swift: V2 migration tests (mailbox_status, pending_sync_action, last_known_mailbox_id)
+  - MailSyncTests.swift: classifyMailbox tests, updateMailboxStatus tests, getMessagesByStatus tests
+- **Test results**: 212 Mail-related tests pass (35 new MailSyncBackwardTests + existing)
+- **Learnings for future iterations**:
+  - Use protocols for dependency injection when testing AppleScript-dependent code
+  - MockAppleScriptService pattern allows capturing state during mock execution
+  - @unchecked Sendable is needed for mock classes with mutable state
+  - Final classes can't be subclassed - use protocols for mockability
 ---
