@@ -1430,4 +1430,447 @@ final class MailDatabaseTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Migration V5: Thread-Messages Junction Table Tests
+
+    func testAddMessageToThread() throws {
+        try database.initialize()
+
+        // Create a thread and a message
+        let thread = Thread(id: "thread-1", subject: "Test Thread")
+        try database.upsertThread(thread)
+
+        let message = MailMessage(id: "msg-1", subject: "Test Message")
+        try database.upsertMessage(message)
+
+        // Add message to thread
+        try database.addMessageToThread(messageId: "msg-1", threadId: "thread-1")
+
+        // Verify the relationship exists
+        let messageIds = try database.getMessageIdsInThread(threadId: "thread-1")
+        XCTAssertEqual(messageIds.count, 1)
+        XCTAssertEqual(messageIds.first, "msg-1")
+    }
+
+    func testAddMessageToThreadDuplicateIgnored() throws {
+        try database.initialize()
+
+        // Create thread and message
+        let thread = Thread(id: "thread-dup", subject: "Duplicate Test")
+        try database.upsertThread(thread)
+
+        let message = MailMessage(id: "msg-dup", subject: "Duplicate Message")
+        try database.upsertMessage(message)
+
+        // Add same message twice - should not throw
+        try database.addMessageToThread(messageId: "msg-dup", threadId: "thread-dup")
+        try database.addMessageToThread(messageId: "msg-dup", threadId: "thread-dup")
+
+        // Should still only have one entry
+        let messageIds = try database.getMessageIdsInThread(threadId: "thread-dup")
+        XCTAssertEqual(messageIds.count, 1)
+    }
+
+    func testRemoveMessageFromThread() throws {
+        try database.initialize()
+
+        // Setup thread and message
+        let thread = Thread(id: "thread-remove", subject: "Remove Test")
+        try database.upsertThread(thread)
+
+        let message = MailMessage(id: "msg-remove", subject: "To Be Removed")
+        try database.upsertMessage(message)
+
+        try database.addMessageToThread(messageId: "msg-remove", threadId: "thread-remove")
+
+        // Verify it exists
+        var messageIds = try database.getMessageIdsInThread(threadId: "thread-remove")
+        XCTAssertEqual(messageIds.count, 1)
+
+        // Remove it
+        try database.removeMessageFromThread(messageId: "msg-remove", threadId: "thread-remove")
+
+        // Verify it's gone
+        messageIds = try database.getMessageIdsInThread(threadId: "thread-remove")
+        XCTAssertEqual(messageIds.count, 0)
+    }
+
+    func testRemoveNonexistentMessageFromThread() throws {
+        try database.initialize()
+
+        // Should not throw even if relationship doesn't exist
+        try database.removeMessageFromThread(messageId: "nonexistent", threadId: "nonexistent")
+    }
+
+    func testGetMessageIdsInThread() throws {
+        try database.initialize()
+
+        // Create thread and multiple messages
+        let thread = Thread(id: "thread-multi", subject: "Multi Message Thread")
+        try database.upsertThread(thread)
+
+        for i in 1...5 {
+            let message = MailMessage(id: "multi-msg-\(i)", subject: "Message \(i)")
+            try database.upsertMessage(message)
+            try database.addMessageToThread(messageId: "multi-msg-\(i)", threadId: "thread-multi")
+        }
+
+        let messageIds = try database.getMessageIdsInThread(threadId: "thread-multi")
+        XCTAssertEqual(messageIds.count, 5)
+        for i in 1...5 {
+            XCTAssertTrue(messageIds.contains("multi-msg-\(i)"))
+        }
+    }
+
+    func testGetMessageIdsInThreadEmpty() throws {
+        try database.initialize()
+
+        let messageIds = try database.getMessageIdsInThread(threadId: "nonexistent-thread")
+        XCTAssertTrue(messageIds.isEmpty)
+    }
+
+    func testGetThreadIdsForMessage() throws {
+        try database.initialize()
+
+        // Create multiple threads and one message
+        for i in 1...3 {
+            let thread = Thread(id: "multi-thread-\(i)", subject: "Thread \(i)")
+            try database.upsertThread(thread)
+        }
+
+        let message = MailMessage(id: "shared-msg", subject: "Shared Message")
+        try database.upsertMessage(message)
+
+        // Add message to all threads
+        for i in 1...3 {
+            try database.addMessageToThread(messageId: "shared-msg", threadId: "multi-thread-\(i)")
+        }
+
+        let threadIds = try database.getThreadIdsForMessage(messageId: "shared-msg")
+        XCTAssertEqual(threadIds.count, 3)
+        for i in 1...3 {
+            XCTAssertTrue(threadIds.contains("multi-thread-\(i)"))
+        }
+    }
+
+    func testGetThreadIdsForMessageEmpty() throws {
+        try database.initialize()
+
+        let threadIds = try database.getThreadIdsForMessage(messageId: "nonexistent-message")
+        XCTAssertTrue(threadIds.isEmpty)
+    }
+
+    func testGetMessagesInThreadViaJunction() throws {
+        try database.initialize()
+
+        // Create thread
+        let thread = Thread(id: "full-thread", subject: "Full Thread Test")
+        try database.upsertThread(thread)
+
+        // Create messages with different dates
+        let baseDate = Date(timeIntervalSince1970: 1000000)
+        for i in 1...3 {
+            let message = MailMessage(
+                id: "full-msg-\(i)",
+                subject: "Full Message \(i)",
+                dateReceived: Date(timeIntervalSince1970: baseDate.timeIntervalSince1970 + Double(i * 100))
+            )
+            try database.upsertMessage(message)
+            try database.addMessageToThread(messageId: "full-msg-\(i)", threadId: "full-thread")
+        }
+
+        let messages = try database.getMessagesInThreadViaJunction(threadId: "full-thread")
+        XCTAssertEqual(messages.count, 3)
+
+        // Verify ordering by date_received ASC
+        XCTAssertEqual(messages[0].id, "full-msg-1")
+        XCTAssertEqual(messages[1].id, "full-msg-2")
+        XCTAssertEqual(messages[2].id, "full-msg-3")
+    }
+
+    func testGetMessagesInThreadViaJunctionExcludesDeleted() throws {
+        try database.initialize()
+
+        // Create thread
+        let thread = Thread(id: "deleted-test-thread", subject: "Deleted Test")
+        try database.upsertThread(thread)
+
+        // Create one normal message and one deleted message
+        let normalMsg = MailMessage(id: "normal-msg", subject: "Normal")
+        let deletedMsg = MailMessage(id: "deleted-msg", subject: "Deleted", isDeleted: true)
+
+        try database.upsertMessage(normalMsg)
+        try database.upsertMessage(deletedMsg)
+
+        try database.addMessageToThread(messageId: "normal-msg", threadId: "deleted-test-thread")
+        try database.addMessageToThread(messageId: "deleted-msg", threadId: "deleted-test-thread")
+
+        let messages = try database.getMessagesInThreadViaJunction(threadId: "deleted-test-thread")
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.id, "normal-msg")
+    }
+
+    func testGetMessagesInThreadViaJunctionWithLimitAndOffset() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "paginated-thread", subject: "Paginated Thread")
+        try database.upsertThread(thread)
+
+        // Create 10 messages
+        for i in 1...10 {
+            let message = MailMessage(
+                id: "paginated-msg-\(i)",
+                subject: "Message \(i)",
+                dateReceived: Date(timeIntervalSince1970: Double(1000000 + i))
+            )
+            try database.upsertMessage(message)
+            try database.addMessageToThread(messageId: "paginated-msg-\(i)", threadId: "paginated-thread")
+        }
+
+        // Get first 5
+        let first5 = try database.getMessagesInThreadViaJunction(threadId: "paginated-thread", limit: 5)
+        XCTAssertEqual(first5.count, 5)
+
+        // Get next 5
+        let next5 = try database.getMessagesInThreadViaJunction(threadId: "paginated-thread", limit: 5, offset: 5)
+        XCTAssertEqual(next5.count, 5)
+
+        // Verify no overlap
+        let first5Ids = Set(first5.map { $0.id })
+        let next5Ids = Set(next5.map { $0.id })
+        XCTAssertTrue(first5Ids.isDisjoint(with: next5Ids))
+    }
+
+    func testGetThreadsForMessage() throws {
+        try database.initialize()
+
+        // Create threads with different dates
+        let baseDate = Date(timeIntervalSince1970: 1000000)
+        for i in 1...3 {
+            let thread = Thread(
+                id: "msg-threads-\(i)",
+                subject: "Thread \(i)",
+                lastDate: Date(timeIntervalSince1970: baseDate.timeIntervalSince1970 + Double(i * 100))
+            )
+            try database.upsertThread(thread)
+        }
+
+        let message = MailMessage(id: "thread-query-msg", subject: "Query Message")
+        try database.upsertMessage(message)
+
+        // Add message to all threads
+        for i in 1...3 {
+            try database.addMessageToThread(messageId: "thread-query-msg", threadId: "msg-threads-\(i)")
+        }
+
+        let threads = try database.getThreadsForMessage(messageId: "thread-query-msg")
+        XCTAssertEqual(threads.count, 3)
+
+        // Verify ordering by last_date DESC
+        XCTAssertEqual(threads[0].id, "msg-threads-3")
+        XCTAssertEqual(threads[1].id, "msg-threads-2")
+        XCTAssertEqual(threads[2].id, "msg-threads-1")
+    }
+
+    func testGetThreadsForMessageEmpty() throws {
+        try database.initialize()
+
+        let threads = try database.getThreadsForMessage(messageId: "nonexistent")
+        XCTAssertTrue(threads.isEmpty)
+    }
+
+    func testGetMessageCountInThread() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "count-thread", subject: "Count Thread")
+        try database.upsertThread(thread)
+
+        // Initially empty
+        var count = try database.getMessageCountInThread(threadId: "count-thread")
+        XCTAssertEqual(count, 0)
+
+        // Add messages
+        for i in 1...5 {
+            let message = MailMessage(id: "count-msg-\(i)", subject: "Count Message \(i)")
+            try database.upsertMessage(message)
+            try database.addMessageToThread(messageId: "count-msg-\(i)", threadId: "count-thread")
+        }
+
+        count = try database.getMessageCountInThread(threadId: "count-thread")
+        XCTAssertEqual(count, 5)
+    }
+
+    func testGetMessageCountInThreadNonexistent() throws {
+        try database.initialize()
+
+        let count = try database.getMessageCountInThread(threadId: "nonexistent")
+        XCTAssertEqual(count, 0)
+    }
+
+    func testIsMessageInThread() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "check-thread", subject: "Check Thread")
+        try database.upsertThread(thread)
+
+        let message = MailMessage(id: "check-msg", subject: "Check Message")
+        try database.upsertMessage(message)
+
+        // Initially not in thread
+        var inThread = try database.isMessageInThread(messageId: "check-msg", threadId: "check-thread")
+        XCTAssertFalse(inThread)
+
+        // Add to thread
+        try database.addMessageToThread(messageId: "check-msg", threadId: "check-thread")
+
+        // Now in thread
+        inThread = try database.isMessageInThread(messageId: "check-msg", threadId: "check-thread")
+        XCTAssertTrue(inThread)
+
+        // Remove from thread
+        try database.removeMessageFromThread(messageId: "check-msg", threadId: "check-thread")
+
+        // Not in thread anymore
+        inThread = try database.isMessageInThread(messageId: "check-msg", threadId: "check-thread")
+        XCTAssertFalse(inThread)
+    }
+
+    func testIsMessageInThreadNonexistent() throws {
+        try database.initialize()
+
+        let inThread = try database.isMessageInThread(messageId: "nonexistent", threadId: "nonexistent")
+        XCTAssertFalse(inThread)
+    }
+
+    func testThreadMessageForeignKeyConstraintOnThreadDelete() throws {
+        try database.initialize()
+
+        // Create thread and message
+        let thread = Thread(id: "fk-thread", subject: "FK Thread")
+        try database.upsertThread(thread)
+
+        let message = MailMessage(id: "fk-msg", subject: "FK Message")
+        try database.upsertMessage(message)
+
+        try database.addMessageToThread(messageId: "fk-msg", threadId: "fk-thread")
+
+        // Verify relationship exists
+        var messageIds = try database.getMessageIdsInThread(threadId: "fk-thread")
+        XCTAssertEqual(messageIds.count, 1)
+
+        // Note: SQLite's foreign key CASCADE delete would clean up thread_messages
+        // when the thread is deleted. However, we don't have a deleteThread method yet.
+        // This test verifies the junction table is working correctly.
+    }
+
+    func testManyToManyRelationship() throws {
+        try database.initialize()
+
+        // Create multiple threads
+        let threads = ["thread-a", "thread-b", "thread-c"]
+        for threadId in threads {
+            try database.upsertThread(Thread(id: threadId, subject: "Thread \(threadId)"))
+        }
+
+        // Create multiple messages
+        let messages = ["msg-1", "msg-2", "msg-3"]
+        for msgId in messages {
+            try database.upsertMessage(MailMessage(id: msgId, subject: "Message \(msgId)"))
+        }
+
+        // Create many-to-many relationships:
+        // msg-1 -> thread-a, thread-b
+        // msg-2 -> thread-b, thread-c
+        // msg-3 -> thread-a, thread-c
+        try database.addMessageToThread(messageId: "msg-1", threadId: "thread-a")
+        try database.addMessageToThread(messageId: "msg-1", threadId: "thread-b")
+        try database.addMessageToThread(messageId: "msg-2", threadId: "thread-b")
+        try database.addMessageToThread(messageId: "msg-2", threadId: "thread-c")
+        try database.addMessageToThread(messageId: "msg-3", threadId: "thread-a")
+        try database.addMessageToThread(messageId: "msg-3", threadId: "thread-c")
+
+        // Verify thread-a has msg-1 and msg-3
+        let threadAMessages = try database.getMessageIdsInThread(threadId: "thread-a")
+        XCTAssertEqual(threadAMessages.count, 2)
+        XCTAssertTrue(threadAMessages.contains("msg-1"))
+        XCTAssertTrue(threadAMessages.contains("msg-3"))
+
+        // Verify thread-b has msg-1 and msg-2
+        let threadBMessages = try database.getMessageIdsInThread(threadId: "thread-b")
+        XCTAssertEqual(threadBMessages.count, 2)
+        XCTAssertTrue(threadBMessages.contains("msg-1"))
+        XCTAssertTrue(threadBMessages.contains("msg-2"))
+
+        // Verify thread-c has msg-2 and msg-3
+        let threadCMessages = try database.getMessageIdsInThread(threadId: "thread-c")
+        XCTAssertEqual(threadCMessages.count, 2)
+        XCTAssertTrue(threadCMessages.contains("msg-2"))
+        XCTAssertTrue(threadCMessages.contains("msg-3"))
+
+        // Verify msg-1 is in thread-a and thread-b
+        let msg1Threads = try database.getThreadIdsForMessage(messageId: "msg-1")
+        XCTAssertEqual(msg1Threads.count, 2)
+        XCTAssertTrue(msg1Threads.contains("thread-a"))
+        XCTAssertTrue(msg1Threads.contains("thread-b"))
+    }
+
+    func testThreadMessageJunctionMethodsBeforeInitializeThrow() throws {
+        // Don't call initialize()
+
+        XCTAssertThrowsError(try database.addMessageToThread(messageId: "test", threadId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.removeMessageFromThread(messageId: "test", threadId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getMessageIdsInThread(threadId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getThreadIdsForMessage(messageId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getMessagesInThreadViaJunction(threadId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getThreadsForMessage(messageId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.getMessageCountInThread(threadId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.isMessageInThread(messageId: "test", threadId: "test")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+    }
 }

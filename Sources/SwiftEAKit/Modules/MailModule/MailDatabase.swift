@@ -98,6 +98,9 @@ public final class MailDatabase: @unchecked Sendable {
         if currentVersion < 4 {
             try applyMigrationV4(conn)
         }
+        if currentVersion < 5 {
+            try applyMigrationV5(conn)
+        }
     }
 
     /// Migration v1: Initial schema with all mail tables
@@ -312,6 +315,38 @@ public final class MailDatabase: @unchecked Sendable {
 
             // Record migration version
             _ = try conn.execute("INSERT INTO schema_version (version) VALUES (4)")
+
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
+    /// Migration v5: Create thread_messages junction table for many-to-many relationships
+    private func applyMigrationV5(_ conn: Connection) throws {
+        do {
+            // Create thread_messages junction table
+            // This allows many-to-many relationships between threads and messages
+            // A message can belong to multiple threads (e.g., cross-posted, forwarded chains)
+            // A thread can contain multiple messages
+            _ = try conn.execute("""
+                CREATE TABLE IF NOT EXISTS thread_messages (
+                    thread_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    added_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                    PRIMARY KEY (thread_id, message_id),
+                    FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+                    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+                )
+                """)
+
+            // Create index for efficient lookup by thread_id (get all messages in a thread)
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_thread_id ON thread_messages(thread_id)")
+
+            // Create index for efficient lookup by message_id (get all threads a message belongs to)
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_thread_messages_message_id ON thread_messages(message_id)")
+
+            // Record migration version
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (5)")
 
         } catch {
             throw MailDatabaseError.migrationFailed(underlying: error)
@@ -1664,6 +1699,177 @@ public final class MailDatabase: @unchecked Sendable {
             return getIntValue(row, 0) ?? 0
         }
         return 0
+    }
+
+    // MARK: - Thread-Message Junction Operations
+
+    /// Add a message to a thread (creates the junction table entry)
+    /// - Parameters:
+    ///   - messageId: The message ID to add
+    ///   - threadId: The thread ID to add the message to
+    public func addMessageToThread(messageId: String, threadId: String) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        _ = try conn.execute("""
+            INSERT OR IGNORE INTO thread_messages (thread_id, message_id)
+            VALUES ('\(escapeSql(threadId))', '\(escapeSql(messageId))')
+            """)
+    }
+
+    /// Remove a message from a thread (deletes the junction table entry)
+    /// - Parameters:
+    ///   - messageId: The message ID to remove
+    ///   - threadId: The thread ID to remove the message from
+    public func removeMessageFromThread(messageId: String, threadId: String) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        _ = try conn.execute("""
+            DELETE FROM thread_messages
+            WHERE thread_id = '\(escapeSql(threadId))' AND message_id = '\(escapeSql(messageId))'
+            """)
+    }
+
+    /// Get all message IDs in a thread via the junction table
+    /// - Parameter threadId: The thread ID to query
+    /// - Returns: Array of message IDs in the thread
+    public func getMessageIdsInThread(threadId: String) throws -> [String] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT message_id FROM thread_messages
+            WHERE thread_id = '\(escapeSql(threadId))'
+            ORDER BY added_at ASC
+            """)
+
+        var messageIds: [String] = []
+        for row in result {
+            if let messageId = getStringValue(row, 0) {
+                messageIds.append(messageId)
+            }
+        }
+        return messageIds
+    }
+
+    /// Get all thread IDs that a message belongs to via the junction table
+    /// - Parameter messageId: The message ID to query
+    /// - Returns: Array of thread IDs the message belongs to
+    public func getThreadIdsForMessage(messageId: String) throws -> [String] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT thread_id FROM thread_messages
+            WHERE message_id = '\(escapeSql(messageId))'
+            ORDER BY added_at ASC
+            """)
+
+        var threadIds: [String] = []
+        for row in result {
+            if let threadId = getStringValue(row, 0) {
+                threadIds.append(threadId)
+            }
+        }
+        return threadIds
+    }
+
+    /// Get full messages in a thread via the junction table
+    /// - Parameters:
+    ///   - threadId: The thread ID to query
+    ///   - limit: Maximum number of messages to return
+    ///   - offset: Number of messages to skip for pagination
+    /// - Returns: Array of MailMessage objects in the thread
+    public func getMessagesInThreadViaJunction(threadId: String, limit: Int = 100, offset: Int = 0) throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT m.* FROM messages m
+            JOIN thread_messages tm ON m.id = tm.message_id
+            WHERE tm.thread_id = '\(escapeSql(threadId))' AND m.is_deleted = 0
+            ORDER BY m.date_received ASC
+            LIMIT \(limit) OFFSET \(offset)
+            """)
+
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
+    /// Get full threads that a message belongs to via the junction table
+    /// - Parameter messageId: The message ID to query
+    /// - Returns: Array of Thread objects the message belongs to
+    public func getThreadsForMessage(messageId: String) throws -> [Thread] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT t.* FROM threads t
+            JOIN thread_messages tm ON t.id = tm.thread_id
+            WHERE tm.message_id = '\(escapeSql(messageId))'
+            ORDER BY t.last_date DESC
+            """)
+
+        var threads: [Thread] = []
+        for row in result {
+            if let thread = try? rowToThread(row) {
+                threads.append(thread)
+            }
+        }
+        return threads
+    }
+
+    /// Get the count of messages in a thread via the junction table
+    /// - Parameter threadId: The thread ID to query
+    /// - Returns: Number of messages in the thread
+    public func getMessageCountInThread(threadId: String) throws -> Int {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT COUNT(*) FROM thread_messages
+            WHERE thread_id = '\(escapeSql(threadId))'
+            """)
+
+        for row in result {
+            return getIntValue(row, 0) ?? 0
+        }
+        return 0
+    }
+
+    /// Check if a message is in a thread
+    /// - Parameters:
+    ///   - messageId: The message ID to check
+    ///   - threadId: The thread ID to check
+    /// - Returns: True if the message is in the thread
+    public func isMessageInThread(messageId: String, threadId: String) throws -> Bool {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT 1 FROM thread_messages
+            WHERE thread_id = '\(escapeSql(threadId))' AND message_id = '\(escapeSql(messageId))'
+            LIMIT 1
+            """)
+
+        for _ in result {
+            return true
+        }
+        return false
     }
 
     // MARK: - Helpers
