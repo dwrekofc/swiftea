@@ -134,8 +134,9 @@ public struct AttachmentData: Sendable {
 }
 
 /// Parses Apple Mail .emlx files
-public final class EmlxParser: @unchecked Sendable {
-    private let fileManager: FileManager
+/// Note: FileManager.default is thread-safe for the operations used here
+public final class EmlxParser: Sendable {
+    private nonisolated(unsafe) let fileManager: FileManager
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager

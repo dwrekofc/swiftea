@@ -52,6 +52,13 @@ let package = Package(
         .testTarget(
             name: "SwiftEAKitTests",
             dependencies: ["SwiftEAKit"]
+        ),
+        .testTarget(
+            name: "SwiftEACLITests",
+            dependencies: [
+                "SwiftEACLI",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ]
         )
     ]
 )

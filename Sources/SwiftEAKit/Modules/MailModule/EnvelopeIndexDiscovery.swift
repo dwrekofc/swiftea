@@ -53,8 +53,9 @@ public struct EnvelopeIndexInfo: Sendable {
 }
 
 /// Discovers and validates Apple Mail database paths
-public final class EnvelopeIndexDiscovery: @unchecked Sendable {
-    private let fileManager: FileManager
+/// Note: FileManager.default is thread-safe for the operations used here
+public final class EnvelopeIndexDiscovery: Sendable {
+    private nonisolated(unsafe) let fileManager: FileManager
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
