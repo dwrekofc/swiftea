@@ -67,7 +67,7 @@ Phase 1 implements a **read-only mail mirror** with the following capabilities:
 | Attachment extraction | Implemented |
 | Configuration via `swea config` | Implemented |
 | Mail actions (archive/delete/move/flag) | Placeholder only |
-| Email threading | Not yet implemented |
+| Email threading | Implemented |
 
 ### What Phase 1 Does
 
@@ -82,7 +82,6 @@ Phase 1 implements a **read-only mail mirror** with the following capabilities:
 
 - Does not modify Apple Mail data (read-only)
 - Does not yet implement mail actions (archive, delete, move, flag, reply, compose)
-- Does not yet detect email threads/conversations
 - Does not sync with IMAP servers directly (uses Apple Mail as source)
 
 ## Prerequisites
@@ -427,10 +426,142 @@ Exchange messages stored in cloud accounts may not have local `.emlx` files. The
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## Email Threading
+
+SwiftEA implements RFC-compliant email threading to group related messages into conversations. This section documents how the threading algorithm works.
+
+### Threading Headers
+
+Email threading relies on three standard RFC 5322 headers:
+
+| Header | Purpose | Example |
+|--------|---------|---------|
+| `Message-ID` | Unique identifier for each email | `<abc123@example.com>` |
+| `In-Reply-To` | Message-ID of the direct parent message | `<parent@example.com>` |
+| `References` | Ordered list of all ancestor Message-IDs | `<root@example.com> <parent@example.com>` |
+
+#### Message-ID
+
+Every email should have a unique Message-ID assigned by the sending mail server. The format is `<local-part@domain>`. SwiftEA normalizes Message-IDs by:
+
+- Extracting the first valid `<...>` pattern from the header
+- Trimming whitespace and newlines
+- Adding angle brackets if missing but the value contains `@`
+- Returning `nil` for completely invalid values
+
+#### In-Reply-To
+
+The In-Reply-To header identifies the immediate parent message. When you reply to an email, your mail client should set this to the Message-ID of the message you're replying to. SwiftEA extracts the first valid Message-ID from this header.
+
+#### References
+
+The References header contains the complete thread ancestry, ordered from oldest (thread root) to newest (immediate parent). For example, in a thread with messages A → B → C → D, message D's References header would be:
+
+```
+References: <A@example.com> <B@example.com> <C@example.com>
+```
+
+SwiftEA parses all valid Message-IDs from this space-separated list.
+
+### Thread ID Generation Algorithm
+
+SwiftEA generates deterministic thread IDs using the following priority:
+
+1. **Use References[0]** - If the message has a References header, use the **first** Message-ID (the thread root). This ensures all messages in a thread share the same thread ID.
+
+2. **Use In-Reply-To** - If no References but has In-Reply-To, use that. This handles simple two-message reply chains where only In-Reply-To is set.
+
+3. **Use own Message-ID** - If neither References nor In-Reply-To (standalone message), use the message's own Message-ID. It becomes the thread root.
+
+4. **Subject fallback** - If no Message-ID is available (malformed email), fall back to subject-based grouping with normalized subjects.
+
+The thread ID itself is a 32-character hex string (first 128 bits of SHA-256 hash of the thread root).
+
+#### Why References[0]?
+
+The References header is ordered from oldest to newest. By always using the first reference (the original message that started the thread), all messages in a conversation—regardless of how deeply nested or branched—share the same thread ID.
+
+```
+Original message (A):     Message-ID: <A@example.com>
+                          Thread ID: hash(<A@example.com>)
+
+Reply (B):                References: <A@example.com>
+                          In-Reply-To: <A@example.com>
+                          Thread ID: hash(<A@example.com>) ← same!
+
+Reply to reply (C):       References: <A@example.com> <B@example.com>
+                          In-Reply-To: <B@example.com>
+                          Thread ID: hash(<A@example.com>) ← same!
+```
+
+### Subject Normalization
+
+For subject-based fallback threading, SwiftEA strips common reply/forward prefixes:
+
+| Prefix | Language/Origin |
+|--------|-----------------|
+| `Re:` | English |
+| `Fwd:`, `Fw:` | English forward |
+| `AW:` | German (Antwort) |
+| `SV:` | Swedish/Danish (Svar) |
+| `VS:` | Finnish |
+| `Antw:` | Dutch |
+| `Odp:` | Polish |
+| `R:` | Italian |
+
+Nested prefixes like `Re: Re: Fwd: Re:` are fully stripped. Whitespace is normalized and the result is lowercased.
+
+### Edge Cases
+
+#### Missing Headers
+
+| Scenario | Behavior |
+|----------|----------|
+| No Message-ID, no References, no In-Reply-To | Subject-based grouping |
+| No Message-ID, no subject | Unique UUID per message (no threading) |
+| Empty References | Falls through to In-Reply-To |
+| Malformed Message-ID | Attempts extraction, falls back if invalid |
+
+#### Forwarded Messages
+
+Forwarded messages (detected by `Fwd:`, `Fw:`, `Forwarded:` prefixes) are handled like any other message. If they contain threading headers from the original thread, they'll be grouped with it. Otherwise, they start a new thread.
+
+#### Mailing Lists
+
+Mailing list messages typically preserve the original thread's References, so they're grouped correctly. List-specific headers like `List-Id` are not currently used for grouping.
+
+### Database Schema
+
+Threads are stored in two tables:
+
+**`threads` table:**
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | TEXT PRIMARY KEY | 32-char hex thread ID |
+| `subject` | TEXT | Normalized subject |
+| `participant_count` | INTEGER | Unique senders |
+| `message_count` | INTEGER | Messages in thread |
+| `first_date` | DATETIME | Earliest message date |
+| `last_date` | DATETIME | Latest message date |
+
+**`thread_messages` junction table:**
+| Column | Type | Description |
+|--------|------|-------------|
+| `thread_id` | TEXT | Foreign key to threads |
+| `message_id` | TEXT | Foreign key to messages |
+
+This allows efficient queries for messages in a thread and threads containing a message.
+
+### Implementation Files
+
+- `ThreadingHeaderParser.swift` - Parses and normalizes threading headers
+- `ThreadIDGenerator.swift` - Generates deterministic thread IDs
+- `ThreadDetectionService.swift` - Orchestrates thread detection and database updates
+
 ## Future: Phase 2+
 
 Planned features for future phases:
-- Email threading and conversation detection
 - Mail actions via AppleScript (archive, delete, move, flag, reply, compose)
 - Rich thread export formats
+- Thread-based search filters
 - Automation permission handling
