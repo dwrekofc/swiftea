@@ -44,6 +44,59 @@ public final class ThreadDetectionService: Sendable {
         }
     }
 
+    // MARK: - Thread Metadata
+
+    /// Represents a participant in an email thread.
+    public struct Participant: Sendable, Equatable, Hashable {
+        /// The email address of the participant
+        public let email: String
+        /// The display name of the participant (if available)
+        public let name: String?
+
+        public init(email: String, name: String? = nil) {
+            self.email = email.lowercased()
+            self.name = name
+        }
+    }
+
+    /// Metadata extracted from a thread.
+    ///
+    /// Contains summary information about a thread including:
+    /// - Subject (from the first message)
+    /// - List of all participants
+    /// - Date range (first and last message dates)
+    /// - Message count
+    public struct ThreadMetadata: Sendable, Equatable {
+        /// The thread ID
+        public let threadId: String
+        /// The thread subject (extracted from first message)
+        public let subject: String?
+        /// List of all unique participants in the thread
+        public let participants: [Participant]
+        /// Date of the first message in the thread
+        public let firstMessageDate: Date?
+        /// Date of the last message in the thread
+        public let lastMessageDate: Date?
+        /// Total number of messages in the thread
+        public let messageCount: Int
+
+        public init(
+            threadId: String,
+            subject: String?,
+            participants: [Participant],
+            firstMessageDate: Date?,
+            lastMessageDate: Date?,
+            messageCount: Int
+        ) {
+            self.threadId = threadId
+            self.subject = subject
+            self.participants = participants
+            self.firstMessageDate = firstMessageDate
+            self.lastMessageDate = lastMessageDate
+            self.messageCount = messageCount
+        }
+    }
+
     // MARK: - Thread Detection
 
     /// Detect the thread for a message based on its headers.
@@ -230,6 +283,108 @@ public final class ThreadDetectionService: Sendable {
         )
 
         try database.upsertThread(updatedThread)
+    }
+
+    // MARK: - Thread Metadata Extraction
+
+    /// Extract metadata for a thread.
+    ///
+    /// Returns comprehensive metadata about a thread including:
+    /// - Subject from the first message in the thread
+    /// - Full list of participants (not just count)
+    /// - Date range (first and last message dates)
+    /// - Message count
+    ///
+    /// - Parameters:
+    ///   - threadId: The thread ID to extract metadata for
+    ///   - database: The mail database instance
+    /// - Returns: ThreadMetadata if thread exists and has messages, nil otherwise
+    /// - Throws: Database errors
+    public func extractThreadMetadata(
+        threadId: String,
+        database: MailDatabase
+    ) throws -> ThreadMetadata? {
+        // Get all messages in the thread, sorted by date
+        let messages = try database.getMessagesInThreadViaJunction(threadId: threadId, limit: 10000)
+
+        guard !messages.isEmpty else {
+            return nil
+        }
+
+        // Sort messages by date to find the first message (for subject extraction)
+        let sortedMessages = messages.sorted { msg1, msg2 in
+            let date1 = msg1.dateReceived ?? msg1.dateSent ?? Date.distantFuture
+            let date2 = msg2.dateReceived ?? msg2.dateSent ?? Date.distantFuture
+            return date1 < date2
+        }
+
+        // Extract subject from first message in thread
+        let subject = sortedMessages.first?.subject
+
+        // Aggregate participants from all messages
+        let participants = extractParticipants(from: messages)
+
+        // Calculate date range
+        let firstDate = sortedMessages.first.flatMap { $0.dateReceived ?? $0.dateSent }
+        let lastDate = sortedMessages.last.flatMap { $0.dateReceived ?? $0.dateSent }
+
+        return ThreadMetadata(
+            threadId: threadId,
+            subject: subject,
+            participants: participants,
+            firstMessageDate: firstDate,
+            lastMessageDate: lastDate,
+            messageCount: messages.count
+        )
+    }
+
+    /// Extract metadata for multiple threads.
+    ///
+    /// - Parameters:
+    ///   - threadIds: Array of thread IDs to extract metadata for
+    ///   - database: The mail database instance
+    /// - Returns: Dictionary mapping thread IDs to their metadata
+    /// - Throws: Database errors
+    public func extractThreadMetadata(
+        threadIds: [String],
+        database: MailDatabase
+    ) throws -> [String: ThreadMetadata] {
+        var result: [String: ThreadMetadata] = [:]
+        result.reserveCapacity(threadIds.count)
+
+        for threadId in threadIds {
+            if let metadata = try extractThreadMetadata(threadId: threadId, database: database) {
+                result[threadId] = metadata
+            }
+        }
+
+        return result
+    }
+
+    /// Extract unique participants from a list of messages.
+    ///
+    /// - Parameter messages: The messages to extract participants from
+    /// - Returns: Array of unique participants, sorted by email
+    private func extractParticipants(from messages: [MailMessage]) -> [Participant] {
+        var participantsByEmail: [String: Participant] = [:]
+
+        for message in messages {
+            if let email = message.senderEmail {
+                let lowercasedEmail = email.lowercased()
+                // If we already have this participant but without a name,
+                // update with name if available
+                if let existing = participantsByEmail[lowercasedEmail] {
+                    if existing.name == nil, let name = message.senderName {
+                        participantsByEmail[lowercasedEmail] = Participant(email: lowercasedEmail, name: name)
+                    }
+                } else {
+                    participantsByEmail[lowercasedEmail] = Participant(email: lowercasedEmail, name: message.senderName)
+                }
+            }
+        }
+
+        // Return sorted by email for consistent ordering
+        return participantsByEmail.values.sorted { $0.email < $1.email }
     }
 
     // MARK: - Private Helpers

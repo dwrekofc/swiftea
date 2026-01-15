@@ -496,4 +496,272 @@ final class ThreadDetectionServiceTests: XCTestCase {
         XCTAssertTrue(result.isNewThread)
         XCTAssertEqual(result.threadId.count, 32)
     }
+
+    // MARK: - Thread Metadata Extraction
+
+    func testExtractThreadMetadataSubjectFromFirstMessage() throws {
+        try database.initialize()
+
+        // Create messages with different dates - first message has original subject
+        let firstDate = Date(timeIntervalSince1970: 1000)
+        let secondDate = Date(timeIntervalSince1970: 2000)
+
+        let msg1 = MailMessage(
+            id: "msg-1",
+            messageId: "<first@example.com>",
+            subject: "Original Subject",
+            senderEmail: "alice@example.com",
+            dateReceived: firstDate
+        )
+        let msg2 = MailMessage(
+            id: "msg-2",
+            messageId: "<second@example.com>",
+            subject: "Re: Original Subject",
+            senderEmail: "bob@example.com",
+            dateReceived: secondDate,
+            inReplyTo: "<first@example.com>",
+            references: ["<first@example.com>"]
+        )
+
+        try database.upsertMessage(msg1)
+        try database.upsertMessage(msg2)
+
+        // Process both messages to create thread
+        let result1 = try service.processMessageForThreading(msg1, database: database)
+        _ = try service.processMessageForThreading(msg2, database: database)
+
+        // Extract metadata
+        let metadata = try service.extractThreadMetadata(threadId: result1.threadId, database: database)
+
+        XCTAssertNotNil(metadata)
+        XCTAssertEqual(metadata?.subject, "Original Subject")
+    }
+
+    func testExtractThreadMetadataParticipantList() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "test-participants", subject: "Participants Test")
+        try database.upsertThread(thread)
+
+        // Create messages from multiple senders
+        let messages = [
+            MailMessage(id: "msg-1", subject: "Test",
+                       senderName: "Alice Smith", senderEmail: "alice@example.com",
+                       dateReceived: Date(timeIntervalSince1970: 1000)),
+            MailMessage(id: "msg-2", subject: "Re: Test",
+                       senderName: "Bob Jones", senderEmail: "bob@example.com",
+                       dateReceived: Date(timeIntervalSince1970: 2000)),
+            MailMessage(id: "msg-3", subject: "Re: Test",
+                       senderEmail: "alice@example.com",
+                       dateReceived: Date(timeIntervalSince1970: 3000)),
+            MailMessage(id: "msg-4", subject: "Re: Test",
+                       senderName: "Charlie Brown", senderEmail: "CHARLIE@example.com",
+                       dateReceived: Date(timeIntervalSince1970: 4000))
+        ]
+
+        for msg in messages {
+            try database.upsertMessage(msg)
+            try database.addMessageToThread(messageId: msg.id, threadId: "test-participants")
+        }
+
+        // Extract metadata
+        let metadata = try service.extractThreadMetadata(threadId: "test-participants", database: database)
+
+        XCTAssertNotNil(metadata)
+        XCTAssertEqual(metadata?.participants.count, 3) // alice, bob, charlie (alice is deduplicated)
+
+        // Verify participant details (sorted by email)
+        let participants = metadata!.participants
+        XCTAssertEqual(participants[0].email, "alice@example.com")
+        XCTAssertEqual(participants[0].name, "Alice Smith")
+        XCTAssertEqual(participants[1].email, "bob@example.com")
+        XCTAssertEqual(participants[1].name, "Bob Jones")
+        XCTAssertEqual(participants[2].email, "charlie@example.com") // lowercased
+        XCTAssertEqual(participants[2].name, "Charlie Brown")
+    }
+
+    func testExtractThreadMetadataDateRange() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "test-dates", subject: "Date Test")
+        try database.upsertThread(thread)
+
+        let earlyDate = Date(timeIntervalSince1970: 1000)
+        let middleDate = Date(timeIntervalSince1970: 2000)
+        let lateDate = Date(timeIntervalSince1970: 3000)
+
+        // Create messages in non-chronological order
+        let messages = [
+            MailMessage(id: "msg-middle", subject: "Middle", dateReceived: middleDate),
+            MailMessage(id: "msg-late", subject: "Late", dateReceived: lateDate),
+            MailMessage(id: "msg-early", subject: "Early", dateReceived: earlyDate)
+        ]
+
+        for msg in messages {
+            try database.upsertMessage(msg)
+            try database.addMessageToThread(messageId: msg.id, threadId: "test-dates")
+        }
+
+        let metadata = try service.extractThreadMetadata(threadId: "test-dates", database: database)
+
+        XCTAssertNotNil(metadata)
+        XCTAssertEqual(metadata?.firstMessageDate?.timeIntervalSince1970, 1000)
+        XCTAssertEqual(metadata?.lastMessageDate?.timeIntervalSince1970, 3000)
+        XCTAssertEqual(metadata?.messageCount, 3)
+    }
+
+    func testExtractThreadMetadataEmptyThread() throws {
+        try database.initialize()
+
+        // No thread exists
+        let metadata = try service.extractThreadMetadata(threadId: "nonexistent", database: database)
+
+        XCTAssertNil(metadata)
+    }
+
+    func testExtractThreadMetadataSingleMessage() throws {
+        try database.initialize()
+
+        let message = MailMessage(
+            id: "single-msg",
+            messageId: "<single@example.com>",
+            subject: "Single Message Thread",
+            senderName: "Solo Sender",
+            senderEmail: "solo@example.com",
+            dateReceived: Date(timeIntervalSince1970: 5000)
+        )
+        try database.upsertMessage(message)
+
+        let result = try service.processMessageForThreading(message, database: database)
+
+        let metadata = try service.extractThreadMetadata(threadId: result.threadId, database: database)
+
+        XCTAssertNotNil(metadata)
+        XCTAssertEqual(metadata?.subject, "Single Message Thread")
+        XCTAssertEqual(metadata?.participants.count, 1)
+        XCTAssertEqual(metadata?.participants.first?.email, "solo@example.com")
+        XCTAssertEqual(metadata?.participants.first?.name, "Solo Sender")
+        XCTAssertEqual(metadata?.firstMessageDate, metadata?.lastMessageDate)
+        XCTAssertEqual(metadata?.messageCount, 1)
+    }
+
+    func testExtractThreadMetadataMultipleThreads() throws {
+        try database.initialize()
+
+        // Create two separate threads
+        let msg1 = MailMessage(
+            id: "thread1-msg",
+            messageId: "<thread1@example.com>",
+            subject: "Thread One",
+            senderEmail: "alice@example.com",
+            dateReceived: Date(timeIntervalSince1970: 1000)
+        )
+        let msg2 = MailMessage(
+            id: "thread2-msg",
+            messageId: "<thread2@example.com>",
+            subject: "Thread Two",
+            senderEmail: "bob@example.com",
+            dateReceived: Date(timeIntervalSince1970: 2000)
+        )
+
+        try database.upsertMessage(msg1)
+        try database.upsertMessage(msg2)
+
+        let result1 = try service.processMessageForThreading(msg1, database: database)
+        let result2 = try service.processMessageForThreading(msg2, database: database)
+
+        // Extract metadata for both threads
+        let metadataDict = try service.extractThreadMetadata(
+            threadIds: [result1.threadId, result2.threadId],
+            database: database
+        )
+
+        XCTAssertEqual(metadataDict.count, 2)
+        XCTAssertEqual(metadataDict[result1.threadId]?.subject, "Thread One")
+        XCTAssertEqual(metadataDict[result2.threadId]?.subject, "Thread Two")
+    }
+
+    func testExtractThreadMetadataParticipantNameUpdate() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "test-name-update", subject: "Name Update Test")
+        try database.upsertThread(thread)
+
+        // First message from alice without name
+        let msg1 = MailMessage(
+            id: "msg-no-name",
+            subject: "Test",
+            senderEmail: "alice@example.com",
+            dateReceived: Date(timeIntervalSince1970: 1000)
+        )
+        // Second message from alice with name
+        let msg2 = MailMessage(
+            id: "msg-with-name",
+            subject: "Re: Test",
+            senderName: "Alice Wonderland",
+            senderEmail: "alice@example.com",
+            dateReceived: Date(timeIntervalSince1970: 2000)
+        )
+
+        for msg in [msg1, msg2] {
+            try database.upsertMessage(msg)
+            try database.addMessageToThread(messageId: msg.id, threadId: "test-name-update")
+        }
+
+        let metadata = try service.extractThreadMetadata(threadId: "test-name-update", database: database)
+
+        XCTAssertNotNil(metadata)
+        XCTAssertEqual(metadata?.participants.count, 1)
+        // Should have the name from the second message
+        XCTAssertEqual(metadata?.participants.first?.name, "Alice Wonderland")
+    }
+
+    // MARK: - Participant Struct Tests
+
+    func testParticipantEquality() {
+        let p1 = ThreadDetectionService.Participant(email: "test@example.com", name: "Test")
+        let p2 = ThreadDetectionService.Participant(email: "TEST@example.com", name: "Test")
+
+        // Emails should be lowercased, so they should be equal
+        XCTAssertEqual(p1, p2)
+    }
+
+    func testParticipantHashable() {
+        let p1 = ThreadDetectionService.Participant(email: "test@example.com", name: "Test")
+        let p2 = ThreadDetectionService.Participant(email: "TEST@example.com", name: "Test")
+
+        var set = Set<ThreadDetectionService.Participant>()
+        set.insert(p1)
+        set.insert(p2)
+
+        // Both should hash to the same value since email is lowercased
+        XCTAssertEqual(set.count, 1)
+    }
+
+    // MARK: - ThreadMetadata Struct Tests
+
+    func testThreadMetadataEquality() {
+        let participants = [ThreadDetectionService.Participant(email: "test@example.com")]
+        let date = Date(timeIntervalSince1970: 1000)
+
+        let m1 = ThreadDetectionService.ThreadMetadata(
+            threadId: "abc",
+            subject: "Test",
+            participants: participants,
+            firstMessageDate: date,
+            lastMessageDate: date,
+            messageCount: 1
+        )
+
+        let m2 = ThreadDetectionService.ThreadMetadata(
+            threadId: "abc",
+            subject: "Test",
+            participants: participants,
+            firstMessageDate: date,
+            lastMessageDate: date,
+            messageCount: 1
+        )
+
+        XCTAssertEqual(m1, m2)
+    }
 }
