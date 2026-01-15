@@ -720,10 +720,7 @@ public final class MailDatabase: @unchecked Sendable {
         }
 
         let query = """
-            SELECT id, apple_rowid, message_id, mailbox_id, subject, sender_name, sender_email,
-                   recipients, date_sent, date_received, is_read, is_flagged, is_deleted,
-                   body_text, body_html, emlx_path, export_path, created_at, updated_at
-            FROM messages
+            SELECT * FROM messages
             WHERE is_deleted = 0
             ORDER BY date_received DESC
             LIMIT \(limit) OFFSET \(offset)
@@ -749,10 +746,7 @@ public final class MailDatabase: @unchecked Sendable {
         }
 
         var query = """
-            SELECT id, apple_rowid, message_id, mailbox_id, subject, sender_name, sender_email,
-                   recipients, date_sent, date_received, is_read, is_flagged, is_deleted,
-                   body_text, body_html, emlx_path, export_path, created_at, updated_at
-            FROM messages
+            SELECT * FROM messages
             WHERE is_deleted = 0 AND export_path IS NULL
             ORDER BY date_received DESC
             """

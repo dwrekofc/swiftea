@@ -123,6 +123,9 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
     private let discovery: EnvelopeIndexDiscovery
     private let options: MailSyncOptions
 
+    /// The version directory (e.g., "V10") for constructing mailbox paths
+    public var versionDirectory: String = "V10"
+
     /// Progress callback - called with (current, total, message)
     public var onProgress: ((Int, Int, String) -> Void)?
 
@@ -431,9 +434,40 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
     }
 
     private func convertMailboxUrlToPath(_ url: String, mailBasePath: String) -> String {
+        // Handle file:// URLs directly
         if url.hasPrefix("file://") {
             return url.replacingOccurrences(of: "file://", with: "")
         }
-        return (mailBasePath as NSString).appendingPathComponent(url)
+
+        // Strip URL scheme (ews://, imap://, etc.)
+        var path = url
+        if let schemeEnd = url.range(of: "://") {
+            path = String(url[schemeEnd.upperBound...])
+        }
+
+        // URL decode (e.g., %20 -> space)
+        if let decoded = path.removingPercentEncoding {
+            path = decoded
+        }
+
+        // Split into components: first is account UUID, rest is mailbox path
+        let components = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard !components.isEmpty else {
+            return (mailBasePath as NSString).appendingPathComponent(url)
+        }
+
+        // Build the filesystem path:
+        // {mailBasePath}/{versionDirectory}/{accountUUID}/{mailbox}.mbox/{submailbox}.mbox/...
+        var fsPath = (mailBasePath as NSString).appendingPathComponent(versionDirectory)
+
+        // First component is the account UUID (no .mbox suffix)
+        fsPath = (fsPath as NSString).appendingPathComponent(components[0])
+
+        // Remaining components are mailbox hierarchy (each gets .mbox suffix)
+        for i in 1..<components.count {
+            fsPath = (fsPath as NSString).appendingPathComponent(components[i] + ".mbox")
+        }
+
+        return fsPath
     }
 }

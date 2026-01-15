@@ -178,13 +178,95 @@ public final class EnvelopeIndexDiscovery: Sendable {
     /// Get the .emlx file path for a message
     /// - Parameters:
     ///   - messageId: The message row ID from Apple Mail
-    ///   - mailboxPath: The mailbox path within the Mail directory
+    ///   - mailboxPath: The mailbox path within the Mail directory (e.g., /path/to/Inbox.mbox)
     ///   - mailBasePath: The base Mail directory path
-    /// - Returns: The full path to the .emlx file
-    public func emlxPath(forMessageId messageId: Int, mailboxPath: String, mailBasePath: String) -> String {
-        // Apple Mail stores .emlx files in the Messages subdirectory
-        // Format: mailbox/Messages/<rowid>.emlx
-        let messagesDir = (mailboxPath as NSString).appendingPathComponent("Messages")
-        return (messagesDir as NSString).appendingPathComponent("\(messageId).emlx")
+    /// - Returns: The full path to the .emlx file, or nil if not found
+    public func emlxPath(forMessageId messageId: Int, mailboxPath: String, mailBasePath: String) -> String? {
+        // Apple Mail V10+ uses a complex path structure:
+        // {mailbox}.mbox/{UUID}/Data/[partitions/]Messages/{rowid}.emlx
+        //
+        // Partition schemes:
+        // - id < 1000: Data/Messages/{id}.emlx (no partition)
+        // - 1000 <= id < 10000: Data/{p1}/Messages/{id}.emlx (single partition)
+        // - id >= 10000: Data/{p1}/{p2}/Messages/{id}.emlx (double partition)
+        // where p1 = (id / 1000) % 10, p2 = id / 10000
+
+        // First, find the UUID subdirectory in the mailbox
+        guard let uuid = findUuidSubdirectory(in: mailboxPath) else {
+            // Fallback to legacy path structure
+            let messagesDir = (mailboxPath as NSString).appendingPathComponent("Messages")
+            return checkEmlxVariants(in: messagesDir, messageId: messageId)
+        }
+
+        let dataDir = (mailboxPath as NSString)
+            .appendingPathComponent(uuid)
+            .appending("/Data")
+
+        // Calculate partition directories
+        let p1 = (messageId / 1000) % 10
+        let p2 = messageId / 10000
+
+        // Build possible paths in order of specificity
+        var pathsToTry: [String] = []
+
+        // Double partition path (for id >= 10000)
+        if p2 > 0 {
+            pathsToTry.append("\(dataDir)/\(p1)/\(p2)/Messages")
+        }
+
+        // Single partition path (for id >= 1000)
+        if p1 > 0 {
+            pathsToTry.append("\(dataDir)/\(p1)/Messages")
+        }
+
+        // Non-partitioned path (for id < 1000, or as fallback)
+        pathsToTry.append("\(dataDir)/Messages")
+
+        // Try each path with both .emlx and .partial.emlx variants
+        for messagesDir in pathsToTry {
+            if let found = checkEmlxVariants(in: messagesDir, messageId: messageId) {
+                return found
+            }
+        }
+
+        return nil
+    }
+
+    /// Check for .emlx and .partial.emlx variants in a directory
+    private func checkEmlxVariants(in messagesDir: String, messageId: Int) -> String? {
+        let emlxPath = "\(messagesDir)/\(messageId).emlx"
+        if fileManager.fileExists(atPath: emlxPath) {
+            return emlxPath
+        }
+
+        let partialPath = "\(messagesDir)/\(messageId).partial.emlx"
+        if fileManager.fileExists(atPath: partialPath) {
+            return partialPath
+        }
+
+        return nil
+    }
+
+    /// Find the UUID subdirectory in a mailbox folder
+    /// Apple Mail V10+ stores messages in a UUID-named subdirectory
+    private func findUuidSubdirectory(in mailboxPath: String) -> String? {
+        guard let contents = try? fileManager.contentsOfDirectory(atPath: mailboxPath) else {
+            return nil
+        }
+
+        // UUID pattern: 8 chars - 4 chars - 4 chars - 4 chars - 12 chars
+        let uuidPattern = /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/
+
+        for item in contents {
+            if item.uppercased().contains(uuidPattern) {
+                let itemPath = (mailboxPath as NSString).appendingPathComponent(item)
+                var isDir: ObjCBool = false
+                if fileManager.fileExists(atPath: itemPath, isDirectory: &isDir), isDir.boolValue {
+                    return item
+                }
+            }
+        }
+
+        return nil
     }
 }
