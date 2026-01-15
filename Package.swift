@@ -10,7 +10,7 @@ let package = Package(
     ],
     products: [
         .executable(
-            name: "swiftea",
+            name: "swea",
             targets: ["SwiftEA"]
         ),
         .library(

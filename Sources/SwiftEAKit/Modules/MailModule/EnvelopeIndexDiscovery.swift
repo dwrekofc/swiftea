@@ -21,12 +21,12 @@ public enum EnvelopeDiscoveryError: Error, LocalizedError {
             return """
                 Permission denied accessing: \(path)
 
-                SwiftEA requires Full Disk Access to read Apple Mail data.
+                swea requires Full Disk Access to read Apple Mail data.
 
                 To grant access:
                 1. Open System Settings > Privacy & Security > Full Disk Access
                 2. Click the + button
-                3. Add Terminal (or the app running SwiftEA)
+                3. Add Terminal (or the app running swea)
                 4. Restart the terminal/app
                 """
         }

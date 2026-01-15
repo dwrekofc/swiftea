@@ -14,14 +14,14 @@ public struct NoVaultContextError: Error, LocalizedError {
         """
         No vault context found.
 
-        This command requires a SwiftEA vault, but no vault was found in:
+        This command requires a swea vault, but no vault was found in:
           \(currentDirectory)
 
         To fix this:
           1. Navigate to a vault root directory (containing .swiftea/), or
-          2. Create a new vault with: swiftea vault init --path <vault>
+          2. Create a new vault with: swea init --path <vault>
 
-        Note: SwiftEA requires the current directory to be the vault root.
+        Note: swea requires the current directory to be the vault root.
         Running from a subdirectory within a vault is not supported.
         """
     }

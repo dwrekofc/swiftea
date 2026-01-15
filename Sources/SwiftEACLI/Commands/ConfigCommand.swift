@@ -4,7 +4,7 @@ import SwiftEAKit
 public struct Config: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "config",
-        abstract: "Manage swiftea configuration",
+        abstract: "Manage swea configuration",
         discussion: """
             Get or set configuration values for the current vault.
 
@@ -17,10 +17,10 @@ public struct Config: ParsableCommand {
               mail.watch.enabled         - Enable watch daemon (true/false)
 
             EXAMPLES:
-              swiftea config                           # Show all settings
-              swiftea config mail.export.format        # Get a specific setting
-              swiftea config mail.export.format json   # Set a setting
-              swiftea config --list                    # List available keys
+              swea config                           # Show all settings
+              swea config mail.export.format        # Get a specific setting
+              swea config mail.export.format json   # Set a setting
+              swea config --list                    # List available keys
             """
     )
 
@@ -68,7 +68,7 @@ public struct Config: ParsableCommand {
                 print(value)
             } else {
                 print("Unknown config key: \(key)")
-                print("Use 'swiftea config --list' to see available keys.")
+                print("Use 'swea config --list' to see available keys.")
                 throw ExitCode.failure
             }
 

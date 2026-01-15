@@ -24,7 +24,7 @@ public enum MessageResolutionError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .notFoundInDatabase(let id):
-            return "Message '\(id)' not found in database. Run 'swiftea mail sync' to refresh."
+            return "Message '\(id)' not found in database. Run 'swea mail sync' to refresh."
         case .noMessageIdAvailable(let id):
             return "Message '\(id)' has no RFC822 Message-ID for Mail.app lookup."
         case .notFoundInMailApp(let id, let messageId):
@@ -42,11 +42,11 @@ public enum MessageResolutionError: Error, LocalizedError {
     public var recoverySuggestion: String? {
         switch self {
         case .notFoundInDatabase:
-            return "Run 'swiftea mail sync' to update the local database, then try again."
+            return "Run 'swea mail sync' to update the local database, then try again."
         case .noMessageIdAvailable:
-            return "This message may be from an older sync. Try running 'swiftea mail sync' to update metadata."
+            return "This message may be from an older sync. Try running 'swea mail sync' to update metadata."
         case .notFoundInMailApp:
-            return "The message may have been deleted or moved. Run 'swiftea mail sync' to refresh the database."
+            return "The message may have been deleted or moved. Run 'swea mail sync' to refresh the database."
         case .ambiguousMatch:
             return "Try using a more specific identifier or resolve manually in Mail.app."
         case .unsupportedAccountType:

@@ -4,3 +4,10 @@
 # Beads internal sync files
 .beads/.sync.lock
 .beads/sync_base.jsonl
+
+# Test data
+test-vault/
+
+# macOS
+.DS_Store
+*/.DS_Store

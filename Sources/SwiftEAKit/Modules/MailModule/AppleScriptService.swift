@@ -67,18 +67,18 @@ public enum AppleScriptError: Error, LocalizedError {
             return """
                 To grant permission:
                 1. Open System Settings > Privacy & Security > Automation
-                2. Find SwiftEA (or Terminal if running from terminal)
+                2. Find swea (or Terminal if running from terminal)
                 3. Enable the toggle for Mail.app
                 4. If not listed, try running the command again to trigger the permission prompt
                 """
         case .mailAppNotResponding:
             return "Try opening Mail.app manually or check if it's blocked by a dialog."
         case .messageNotFound:
-            return "The message may have been deleted or moved. Run 'swiftea mail sync' to refresh."
+            return "The message may have been deleted or moved. Run 'swea mail sync' to refresh."
         case .messageResolutionAmbiguous:
             return "Try using --message-id with the RFC822 Message-ID for exact matching."
         case .mailboxNotFound:
-            return "Check mailbox name with 'swiftea mail mailboxes' (if available) or use the full path."
+            return "Check mailbox name with 'swea mail mailboxes' (if available) or use the full path."
         case .mailLaunchTimeout:
             return "Try launching Mail.app manually or check if macOS is prompting for permissions."
         default:
@@ -252,7 +252,7 @@ public final class AppleScriptService: Sendable {
         // Error -600: "Application isn't running." (sometimes indicates permission issue)
         if errorNumber == -1743 || errorMessage.lowercased().contains("not authorized") {
             return .automationPermissionDenied(guidance: """
-                SwiftEA needs permission to control Mail.app.
+                swea needs permission to control Mail.app.
 
                 Grant access in System Settings > Privacy & Security > Automation.
                 """)

@@ -46,7 +46,7 @@ struct CalCalendars: AsyncParsableCommand {
         let calendars = try database.getAllCalendars()
 
         if calendars.isEmpty {
-            print("No calendars found. Run 'swiftea cal sync' first.")
+            print("No calendars found. Run 'swea cal sync' first.")
             return
         }
 
@@ -282,9 +282,9 @@ struct CalSearch: AsyncParsableCommand {
             Searches across event summary, description, and location.
 
             EXAMPLES:
-              swiftea cal search "team meeting"
-              swiftea cal search "conference" --calendar Work
-              swiftea cal search "presentation" --limit 10 --json
+              swea cal search "team meeting"
+              swea cal search "conference" --calendar Work
+              swea cal search "presentation" --limit 10 --json
             """
     )
 
@@ -544,19 +544,19 @@ struct CalSync: AsyncParsableCommand {
 
             EXAMPLES
               # Run a one-time sync
-              swiftea cal sync
+              swea cal sync
 
               # Run incremental sync (only changes since last sync)
-              swiftea cal sync --incremental
+              swea cal sync --incremental
 
               # Install and start watch daemon
-              swiftea cal sync --watch
+              swea cal sync --watch
 
               # Check sync and daemon status
-              swiftea cal sync --status
+              swea cal sync --status
 
               # Stop the watch daemon
-              swiftea cal sync --stop
+              swea cal sync --stop
             """
     )
 
@@ -998,8 +998,8 @@ struct CalSync: AsyncParsableCommand {
         print("  Syncing every \(Self.syncIntervalSeconds / 60) minutes + on wake + on calendar changes")
         print("  Logs: \(logDir)/cal-sync.log")
         print("")
-        print("Use 'swiftea cal sync --status' to check status")
-        print("Use 'swiftea cal sync --stop' to stop the daemon")
+        print("Use 'swea cal sync --status' to check status")
+        print("Use 'swea cal sync --stop' to stop the daemon")
     }
 
     private func stopWatchDaemon() throws {
