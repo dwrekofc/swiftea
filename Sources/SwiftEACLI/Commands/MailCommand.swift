@@ -105,6 +105,7 @@ public struct Mail: ParsableCommand {
             MailSearchCommand.self,
             MailShowCommand.self,
             MailThreadCommand.self,
+            MailThreadsCommand.self,
             MailExportCommand.self,
             MailExportThreadsCommand.self,
             // Action commands
@@ -1728,6 +1729,145 @@ struct MailThreadCommand: ParsableCommand {
         result = result.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         result = result.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Threads Command (List all threads)
+
+struct MailThreadsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "threads",
+        abstract: "List all email threads",
+        discussion: """
+            Lists all email threads (conversations) with their metadata including
+            thread ID, subject, participants, message count, and date range.
+            Threads are ordered by most recent activity by default.
+
+            EXAMPLES
+              swea mail threads                    # List threads (default limit 50)
+              swea mail threads --limit 100        # List more threads
+              swea mail threads --json             # Output as JSON
+            """
+    )
+
+    @Option(name: .shortAndLong, help: "Maximum number of threads to display (default: 50)")
+    var limit: Int = 50
+
+    @Option(name: .shortAndLong, help: "Number of threads to skip (for pagination)")
+    var offset: Int = 0
+
+    @Flag(name: .long, help: "Output as JSON")
+    var json: Bool = false
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        // Get threads ordered by most recent activity
+        let threads = try mailDatabase.getThreads(limit: limit, offset: offset)
+
+        if threads.isEmpty {
+            if json {
+                print("{\"threads\": [], \"count\": 0, \"message\": \"No threads found\"}")
+            } else {
+                print("No email threads found.")
+                print("")
+                print("To build threads from your synced messages, run:")
+                print("  swea mail sync")
+                print("")
+                print("Threads are automatically created during sync based on")
+                print("email headers (In-Reply-To, References) and subject matching.")
+            }
+            return
+        }
+
+        let totalCount = try mailDatabase.getThreadCount()
+
+        if json {
+            // Output as JSON
+            var threadsArray: [[String: Any]] = []
+            for thread in threads {
+                var threadDict: [String: Any] = [
+                    "id": thread.id,
+                    "subject": thread.subject ?? "",
+                    "participant_count": thread.participantCount,
+                    "message_count": thread.messageCount
+                ]
+                if let firstDate = thread.firstDate {
+                    threadDict["first_date"] = firstDate.iso8601String
+                }
+                if let lastDate = thread.lastDate {
+                    threadDict["last_date"] = lastDate.iso8601String
+                }
+                threadsArray.append(threadDict)
+            }
+
+            let output: [String: Any] = [
+                "threads": threadsArray,
+                "count": threads.count,
+                "total": totalCount,
+                "offset": offset,
+                "limit": limit
+            ]
+
+            if let data = try? JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys]),
+               let jsonString = String(data: data, encoding: .utf8) {
+                print(jsonString)
+            }
+        } else {
+            // Output as text
+            print("Email Threads")
+            print(String(repeating: "=", count: 70))
+            print("")
+
+            // Date formatter for consistent display
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateStyle = .medium
+            dateFormatter.timeStyle = .short
+
+            for thread in threads {
+                // Thread ID and subject
+                let subject = thread.subject ?? "(No Subject)"
+                print("[\(thread.id)] \(subject)")
+
+                // Participants and message count
+                print("  Participants: \(thread.participantCount)  |  Messages: \(thread.messageCount)")
+
+                // Date range
+                if let firstDate = thread.firstDate, let lastDate = thread.lastDate {
+                    let firstFormatted = dateFormatter.string(from: firstDate)
+                    let lastFormatted = dateFormatter.string(from: lastDate)
+                    if firstDate == lastDate {
+                        print("  Date: \(firstFormatted)")
+                    } else {
+                        print("  Date Range: \(firstFormatted) → \(lastFormatted)")
+                    }
+                } else if let lastDate = thread.lastDate {
+                    print("  Last Activity: \(dateFormatter.string(from: lastDate))")
+                }
+
+                print("")
+            }
+
+            // Footer with pagination info
+            print(String(repeating: "-", count: 70))
+            if totalCount > threads.count + offset {
+                print("Showing \(offset + 1)-\(offset + threads.count) of \(totalCount) threads")
+                print("")
+                print("To see more threads:")
+                print("  swea mail threads --limit \(limit) --offset \(offset + threads.count)")
+            } else {
+                print("Showing \(threads.count) of \(totalCount) threads")
+            }
+            print("")
+            print("To view a specific thread:")
+            print("  swea mail thread <thread-id>")
+        }
     }
 }
 
