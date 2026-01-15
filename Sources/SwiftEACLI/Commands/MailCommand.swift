@@ -104,6 +104,7 @@ public struct Mail: ParsableCommand {
             MailSyncCommand.self,
             MailSearchCommand.self,
             MailShowCommand.self,
+            MailThreadCommand.self,
             MailExportCommand.self,
             MailExportThreadsCommand.self,
             // Action commands
@@ -1498,6 +1499,233 @@ struct MailShowCommand: ParsableCommand {
         // Remove all remaining tags
         result = result.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         // Collapse multiple newlines
+        result = result.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Thread Command
+
+struct MailThreadCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "thread",
+        abstract: "Display all messages in an email thread",
+        discussion: """
+            Shows all messages in a conversation thread, ordered chronologically.
+            Displays thread metadata including subject, participants, and date range.
+
+            EXAMPLES
+              swea mail thread abc123              # Display thread by ID
+              swea mail thread abc123 --json       # Output as JSON
+              swea mail thread abc123 --html       # Show HTML bodies instead of plain text
+            """
+    )
+
+    @Argument(help: "Thread ID to display")
+    var id: String
+
+    @Flag(name: .long, help: "Show HTML body instead of plain text")
+    var html: Bool = false
+
+    @Flag(name: .long, help: "Output as JSON")
+    var json: Bool = false
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Open mail database
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        // Get thread by ID
+        guard let thread = try mailDatabase.getThread(id: id) else {
+            printError("Thread not found: \(id)")
+            printError("")
+            printError("To find available threads, try:")
+            printError("  swea mail export-threads --limit 10   # Export recent threads")
+            printError("  swea mail search <query>              # Search for messages")
+            throw ExitCode.failure
+        }
+
+        // Get all messages in the thread, sorted chronologically
+        let messages = try mailDatabase.getMessagesInThreadViaJunction(threadId: thread.id, limit: 10000)
+
+        // Extract thread properties to avoid type ambiguity with Foundation.Thread
+        let threadId = thread.id
+        let threadSubject = thread.subject
+        let participantCount = thread.participantCount
+        let messageCount = thread.messageCount
+        let firstDate = thread.firstDate
+        let lastDate = thread.lastDate
+
+        if json {
+            outputAsJson(
+                threadId: threadId,
+                subject: threadSubject,
+                participantCount: participantCount,
+                messageCount: messageCount,
+                firstDate: firstDate,
+                lastDate: lastDate,
+                messages: messages
+            )
+        } else {
+            outputAsText(
+                threadId: threadId,
+                subject: threadSubject,
+                participantCount: participantCount,
+                messageCount: messageCount,
+                firstDate: firstDate,
+                lastDate: lastDate,
+                messages: messages
+            )
+        }
+    }
+
+    private func outputAsJson(
+        threadId: String,
+        subject: String?,
+        participantCount: Int,
+        messageCount: Int,
+        firstDate: Date?,
+        lastDate: Date?,
+        messages: [MailMessage]
+    ) {
+        let threadTotal = messages.count
+
+        // Build messages array with thread position
+        var messagesArray: [[String: Any]] = []
+        for (index, message) in messages.enumerated() {
+            let position = index + 1
+            messagesArray.append([
+                "id": message.id,
+                "messageId": message.messageId ?? "",
+                "subject": message.subject,
+                "from": [
+                    "name": message.senderName ?? "",
+                    "email": message.senderEmail ?? ""
+                ],
+                "date": message.dateSent?.iso8601String ?? "",
+                "mailbox": message.mailboxName ?? "",
+                "isRead": message.isRead,
+                "isFlagged": message.isFlagged,
+                "hasAttachments": message.hasAttachments,
+                "body": html ? (message.bodyHtml ?? "") : (message.bodyText ?? message.bodyHtml.map { stripHtml($0) } ?? ""),
+                "thread_position": position,
+                "thread_total": threadTotal
+            ])
+        }
+
+        // Build thread structure
+        let output: [String: Any] = [
+            "thread_id": threadId,
+            "subject": subject ?? "",
+            "participant_count": participantCount,
+            "message_count": messageCount,
+            "first_date": firstDate?.iso8601String ?? "",
+            "last_date": lastDate?.iso8601String ?? "",
+            "messages": messagesArray
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys]),
+           let jsonString = String(data: data, encoding: .utf8) {
+            print(jsonString)
+        }
+    }
+
+    private func outputAsText(
+        threadId: String,
+        subject: String?,
+        participantCount: Int,
+        messageCount: Int,
+        firstDate: Date?,
+        lastDate: Date?,
+        messages: [MailMessage]
+    ) {
+        let threadTotal = messages.count
+
+        // Thread header with metadata
+        print("Thread: \(subject ?? "(No Subject)")")
+        print(String(repeating: "=", count: 70))
+        print("")
+        print("Thread ID: \(threadId)")
+        print("Participants: \(participantCount)")
+        print("Messages: \(messageCount)")
+        if let firstDate = firstDate, let lastDate = lastDate {
+            let firstFormatted = DateFormatter.localizedString(from: firstDate, dateStyle: .long, timeStyle: .short)
+            let lastFormatted = DateFormatter.localizedString(from: lastDate, dateStyle: .long, timeStyle: .short)
+            print("Date Range: \(firstFormatted) → \(lastFormatted)")
+        }
+        print("")
+        print(String(repeating: "=", count: 70))
+
+        // Display each message chronologically
+        for (index, message) in messages.enumerated() {
+            let position = index + 1
+            print("")
+            print("[\(position)/\(threadTotal)] \(message.subject)")
+            print(String(repeating: "-", count: 60))
+            print("From: \(formatSender(message))")
+            if let date = message.dateSent {
+                let dateFormatted = DateFormatter.localizedString(from: date, dateStyle: .long, timeStyle: .long)
+                print("Date: \(dateFormatted)")
+            }
+            if let mailbox = message.mailboxName {
+                print("Mailbox: \(mailbox)")
+            }
+            if message.hasAttachments {
+                print("Attachments: Yes")
+            }
+            print("")
+
+            // Body content
+            if html {
+                if let htmlBody = message.bodyHtml {
+                    print(htmlBody)
+                } else {
+                    print("(No HTML body available)")
+                }
+            } else {
+                if let textBody = message.bodyText, !textBody.isEmpty {
+                    print(textBody)
+                } else if let htmlBody = message.bodyHtml {
+                    print(stripHtml(htmlBody))
+                } else {
+                    print("(No message body available)")
+                }
+            }
+        }
+
+        // Footer
+        print("")
+        print(String(repeating: "=", count: 70))
+        print("End of thread (\(threadTotal) message(s))")
+    }
+
+    private func formatSender(_ message: MailMessage) -> String {
+        if let name = message.senderName, let email = message.senderEmail {
+            return "\(name) <\(email)>"
+        } else if let email = message.senderEmail {
+            return email
+        } else if let name = message.senderName {
+            return name
+        }
+        return "Unknown"
+    }
+
+    private func stripHtml(_ html: String) -> String {
+        var result = html
+        result = result.replacingOccurrences(of: "<script[^>]*>.*?</script>", with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: "<style[^>]*>.*?</style>", with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: "&nbsp;", with: " ")
+        result = result.replacingOccurrences(of: "&amp;", with: "&")
+        result = result.replacingOccurrences(of: "&lt;", with: "<")
+        result = result.replacingOccurrences(of: "&gt;", with: ">")
+        result = result.replacingOccurrences(of: "&quot;", with: "\"")
+        result = result.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression)
+        result = result.replacingOccurrences(of: "</p>", with: "\n\n")
+        result = result.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
         result = result.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
