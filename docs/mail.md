@@ -43,6 +43,9 @@ swea mail sync --stop
 | `swea mail search "query"` | Search synced messages |
 | `swea mail show <id>` | View a single message |
 | `swea mail export` | Export messages to markdown/JSON files |
+| `swea mail threads` | List all email threads/conversations |
+| `swea mail thread <id>` | View a specific conversation thread |
+| `swea mail export-threads` | Export entire threads as single files |
 
 ## Understanding the Workflow
 
@@ -376,6 +379,135 @@ When using `--include-attachments`, attachments are saved to:
 <output>/attachments/<message-id>/<filename>
 ```
 
+### swea mail threads
+
+List all email threads (conversations) in the database.
+
+```bash
+# List recent threads (default limit: 50)
+swea mail threads
+
+# List more threads
+swea mail threads --limit 100
+
+# Paginate through threads
+swea mail threads --limit 50 --offset 50
+
+# Output as JSON
+swea mail threads --json
+```
+
+**Output includes:**
+- Thread ID (for use with `swea mail thread <id>`)
+- Subject line
+- Number of participants
+- Number of messages
+- Date range (first to last message)
+
+### swea mail thread
+
+Display all messages in a specific email thread, ordered chronologically.
+
+```bash
+# View a thread by ID
+swea mail thread abc123def456
+
+# Output as JSON
+swea mail thread abc123def456 --json
+
+# Show HTML body instead of plain text
+swea mail thread abc123def456 --html
+```
+
+**Text output format:**
+```
+Thread: Weekly Status Update
+======================================================================
+
+Thread ID: abc123def456789012345678901234567
+Participants: 3
+Messages: 5
+Date Range: January 15, 2024 at 10:30 AM → January 17, 2024 at 2:20 PM
+
+======================================================================
+
+[1/5] Weekly Status Update
+------------------------------------------------------------
+From: Alice <alice@example.com>
+Date: January 15, 2024 at 10:30:00 AM PST
+Mailbox: INBOX
+
+Message body here...
+
+[2/5] Re: Weekly Status Update
+------------------------------------------------------------
+From: Bob <bob@example.com>
+Date: January 15, 2024 at 11:00:00 AM PST
+...
+```
+
+### swea mail export-threads
+
+Export complete email threads as single files (markdown or JSON).
+
+```bash
+# Export all threads (up to limit)
+swea mail export-threads
+
+# Export a specific thread
+swea mail export-threads --thread-id abc123def456
+
+# Export as JSON
+swea mail export-threads --format json
+
+# Export to custom directory
+swea mail export-threads --output ~/Documents/Threads
+
+# Limit number of threads to export
+swea mail export-threads --limit 50
+```
+
+**Markdown export format:**
+
+Each thread is exported as a single `.md` file with YAML frontmatter:
+
+```markdown
+---
+thread_id: "abc123def456789012345678901234567"
+subject: "Weekly Status Update"
+participant_count: 3
+message_count: 5
+first_date: 2024-01-15T10:30:00Z
+last_date: 2024-01-17T14:20:00Z
+---
+
+# Thread: Weekly Status Update
+
+**5 message(s) between 3 participant(s)**
+
+---
+
+## Message 1 of 5
+
+**From:** Alice <alice@example.com>
+**Date:** 2024-01-15T10:30:00Z
+**Subject:** Weekly Status Update
+
+Message body here...
+
+---
+
+## Message 2 of 5
+
+**From:** Bob <bob@example.com>
+**Date:** 2024-01-15T11:00:00Z
+**Subject:** Re: Weekly Status Update
+
+Reply body here...
+```
+
+**Default output directory:** `<vault>/Swiftea/Threads/`
+
 ## Configuration
 
 Use `swea config` to manage mail settings.
@@ -466,6 +598,44 @@ Exchange messages stored in cloud accounts may not have local `.emlx` files. The
 - Are synced with metadata from the Envelope Index
 - Cannot be viewed with `--raw` flag
 - May have limited body content if not cached locally
+
+### Threading Issues
+
+#### Messages not grouped into threads
+
+If related messages aren't being grouped together:
+
+1. **Missing threading headers** - Some mail clients don't properly set `References` or `In-Reply-To` headers. SwiftEA falls back to subject-based grouping, but this only works if subjects match after stripping `Re:`/`Fwd:` prefixes.
+
+2. **Modified subject lines** - If someone changed the subject mid-conversation, messages may end up in separate threads.
+
+3. **Resync may help** - Run `swea mail sync --full` to rebuild thread assignments from scratch.
+
+4. **Check headers** - Use `swea mail show <id> --raw` to inspect the actual headers of a message and verify threading headers are present.
+
+#### "Thread not found" error
+
+If `swea mail thread <id>` returns "Thread not found":
+
+1. Verify the thread ID is correct (32-character hex string)
+2. Thread IDs are displayed in `swea mail threads` output
+3. Run `swea mail sync` to ensure threads are up to date
+
+#### Empty thread list
+
+If `swea mail threads` returns no results:
+
+1. Run `swea mail sync` first - threads are created during sync
+2. Check that messages were synced successfully with `swea mail search "*"`
+3. Threading requires at least one message with valid headers
+
+#### Single-message threads
+
+It's normal for standalone emails (not part of a conversation) to appear as single-message threads. The threading algorithm creates a thread for every message, even if it's not a reply.
+
+#### Forwarded messages in wrong thread
+
+Forwarded messages may be grouped with the original thread if they contain the original `References` header. This is RFC-compliant behavior. If forwarded messages should start new threads, the forwarding mail client needs to strip threading headers.
 
 ## Architecture
 
