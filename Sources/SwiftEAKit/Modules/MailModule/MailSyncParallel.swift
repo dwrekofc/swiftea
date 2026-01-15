@@ -330,11 +330,13 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
             senderEmail = parsed.email
         }
 
-        // Try to get body content from .emlx file
+        // Try to get body content and threading headers from .emlx file
         var bodyText: String? = nil
         var bodyHtml: String? = nil
         var emlxPath: String? = nil
         var parseError: String? = nil
+        var inReplyTo: String? = nil
+        var references: [String] = []
 
         if let url = row.mailboxUrl {
             let mailboxPath = convertMailboxUrlToPath(url, mailBasePath: mailBasePath)
@@ -357,6 +359,9 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
                     let parsed = try emlxParser.parse(path: path)
                     bodyText = parsed.bodyText
                     bodyHtml = parsed.bodyHtml
+                    // Extract threading headers
+                    inReplyTo = parsed.inReplyTo
+                    references = parsed.references
                 } catch {
                     // Record error but don't fail - body content is optional
                     parseError = "Warning: Could not parse body for message \(row.rowId): \(error.localizedDescription)"
@@ -382,7 +387,9 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
             hasAttachments: false,
             emlxPath: emlxPath,
             bodyText: bodyText,
-            bodyHtml: bodyHtml
+            bodyHtml: bodyHtml,
+            inReplyTo: inReplyTo,
+            references: references
         )
 
         return ParsedMessageResult(message: message, isNew: false, error: parseError)

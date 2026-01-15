@@ -92,6 +92,9 @@ public final class MailDatabase: @unchecked Sendable {
         if currentVersion < 2 {
             try applyMigrationV2(conn)
         }
+        if currentVersion < 3 {
+            try applyMigrationV3(conn)
+        }
     }
 
     /// Migration v1: Initial schema with all mail tables
@@ -257,6 +260,26 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Migration v3: Add threading header columns (in_reply_to, references)
+    private func applyMigrationV3(_ conn: Connection) throws {
+        do {
+            // Add in_reply_to column (nullable - stores the In-Reply-To header value)
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN in_reply_to TEXT")
+
+            // Add references column (nullable - stores JSON array of message IDs from References header)
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN threading_references TEXT")
+
+            // Create index for looking up messages by in_reply_to (for thread detection)
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_in_reply_to ON messages(in_reply_to)")
+
+            // Record migration version
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (3)")
+
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
     // MARK: - Message Operations
 
     /// Insert or update a message in the mirror database
@@ -267,13 +290,17 @@ public final class MailDatabase: @unchecked Sendable {
 
         let now = Int(Date().timeIntervalSince1970)
 
+        // Serialize references array to JSON for storage
+        let referencesJson = serializeReferences(message.references)
+
         _ = try conn.execute("""
             INSERT INTO messages (
                 id, apple_rowid, message_id, mailbox_id, mailbox_name, account_id,
                 subject, sender_name, sender_email, date_sent, date_received,
                 is_read, is_flagged, is_deleted, has_attachments, emlx_path,
                 body_text, body_html, synced_at, updated_at,
-                mailbox_status, pending_sync_action, last_known_mailbox_id
+                mailbox_status, pending_sync_action, last_known_mailbox_id,
+                in_reply_to, threading_references
             ) VALUES (
                 '\(message.id)', \(message.appleRowId ?? 0), \(message.messageId.map { "'\($0)'" } ?? "NULL"),
                 \(message.mailboxId ?? 0), \(message.mailboxName.map { "'\($0)'" } ?? "NULL"),
@@ -289,7 +316,9 @@ public final class MailDatabase: @unchecked Sendable {
                 \(now), \(now),
                 '\(message.mailboxStatus.rawValue)',
                 \(message.pendingSyncAction.map { "'\($0.rawValue)'" } ?? "NULL"),
-                \(message.lastKnownMailboxId.map { String($0) } ?? "NULL")
+                \(message.lastKnownMailboxId.map { String($0) } ?? "NULL"),
+                \(message.inReplyTo.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                \(referencesJson.map { "'\(escapeSql($0))'" } ?? "NULL")
             )
             ON CONFLICT(id) DO UPDATE SET
                 apple_rowid = excluded.apple_rowid,
@@ -312,7 +341,9 @@ public final class MailDatabase: @unchecked Sendable {
                 updated_at = \(now),
                 mailbox_status = excluded.mailbox_status,
                 pending_sync_action = excluded.pending_sync_action,
-                last_known_mailbox_id = excluded.last_known_mailbox_id
+                last_known_mailbox_id = excluded.last_known_mailbox_id,
+                in_reply_to = excluded.in_reply_to,
+                threading_references = excluded.threading_references
             """)
     }
 
@@ -1110,6 +1141,9 @@ public final class MailDatabase: @unchecked Sendable {
                     break
                 }
 
+                // Serialize references to JSON for storage
+                let referencesJson = serializeReferences(message.references)
+
                 // Execute upsert
                 _ = try conn.execute("""
                     INSERT INTO messages (
@@ -1117,7 +1151,8 @@ public final class MailDatabase: @unchecked Sendable {
                         subject, sender_name, sender_email, date_sent, date_received,
                         is_read, is_flagged, is_deleted, has_attachments, emlx_path,
                         body_text, body_html, synced_at, updated_at,
-                        mailbox_status, pending_sync_action, last_known_mailbox_id
+                        mailbox_status, pending_sync_action, last_known_mailbox_id,
+                        in_reply_to, threading_references
                     ) VALUES (
                         '\(escapeSql(message.id))', \(message.appleRowId ?? 0), \(message.messageId.map { "'\(escapeSql($0))'" } ?? "NULL"),
                         \(message.mailboxId ?? 0), \(message.mailboxName.map { "'\(escapeSql($0))'" } ?? "NULL"),
@@ -1133,7 +1168,9 @@ public final class MailDatabase: @unchecked Sendable {
                         \(timestamp), \(timestamp),
                         '\(message.mailboxStatus.rawValue)',
                         \(message.pendingSyncAction.map { "'\($0.rawValue)'" } ?? "NULL"),
-                        \(message.lastKnownMailboxId.map { String($0) } ?? "NULL")
+                        \(message.lastKnownMailboxId.map { String($0) } ?? "NULL"),
+                        \(message.inReplyTo.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(referencesJson.map { "'\(escapeSql($0))'" } ?? "NULL")
                     )
                     ON CONFLICT(id) DO UPDATE SET
                         apple_rowid = excluded.apple_rowid,
@@ -1156,7 +1193,9 @@ public final class MailDatabase: @unchecked Sendable {
                         updated_at = \(timestamp),
                         mailbox_status = excluded.mailbox_status,
                         pending_sync_action = excluded.pending_sync_action,
-                        last_known_mailbox_id = excluded.last_known_mailbox_id
+                        last_known_mailbox_id = excluded.last_known_mailbox_id,
+                        in_reply_to = excluded.in_reply_to,
+                        threading_references = excluded.threading_references
                     """)
 
                 if exists {
@@ -1474,6 +1513,26 @@ public final class MailDatabase: @unchecked Sendable {
     private func escapeSql(_ string: String) -> String {
         string.replacingOccurrences(of: "'", with: "''")
     }
+
+    /// Serialize a references array to JSON string for database storage
+    private func serializeReferences(_ references: [String]) -> String? {
+        guard !references.isEmpty else { return nil }
+        guard let data = try? JSONEncoder().encode(references),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return json
+    }
+
+    /// Deserialize a JSON string to references array
+    private func deserializeReferences(_ json: String?) -> [String] {
+        guard let json = json,
+              let data = json.data(using: .utf8),
+              let references = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return references
+    }
 }
 
 /// Parse a date string in YYYY-MM-DD format
@@ -1515,6 +1574,11 @@ extension MailDatabase {
         let pendingSyncActionStr = getStringValue(row, 22)
         let pendingSyncAction = pendingSyncActionStr.flatMap { SyncAction(rawValue: $0) }
 
+        // Parse threading headers (columns 24, 25) - added in migration V3
+        let inReplyTo = getStringValue(row, 24)
+        let referencesJson = getStringValue(row, 25)
+        let references = deserializeReferences(referencesJson)
+
         return MailMessage(
             id: getStringValue(row, 0) ?? "",
             appleRowId: getIntValue(row, 1),
@@ -1537,7 +1601,9 @@ extension MailDatabase {
             exportPath: getStringValue(row, 18),
             mailboxStatus: mailboxStatus,
             pendingSyncAction: pendingSyncAction,
-            lastKnownMailboxId: getIntValue(row, 23)
+            lastKnownMailboxId: getIntValue(row, 23),
+            inReplyTo: inReplyTo,
+            references: references
         )
     }
 
@@ -1594,6 +1660,9 @@ public struct MailMessage: Sendable {
     public let mailboxStatus: MailboxStatus
     public let pendingSyncAction: SyncAction?
     public let lastKnownMailboxId: Int?
+    // Threading headers (added in migration V3)
+    public let inReplyTo: String?
+    public let references: [String]
 
     public init(
         id: String,
@@ -1617,7 +1686,9 @@ public struct MailMessage: Sendable {
         exportPath: String? = nil,
         mailboxStatus: MailboxStatus = .inbox,
         pendingSyncAction: SyncAction? = nil,
-        lastKnownMailboxId: Int? = nil
+        lastKnownMailboxId: Int? = nil,
+        inReplyTo: String? = nil,
+        references: [String] = []
     ) {
         self.id = id
         self.appleRowId = appleRowId
@@ -1641,6 +1712,8 @@ public struct MailMessage: Sendable {
         self.mailboxStatus = mailboxStatus
         self.pendingSyncAction = pendingSyncAction
         self.lastKnownMailboxId = lastKnownMailboxId
+        self.inReplyTo = inReplyTo
+        self.references = references
     }
 }
 

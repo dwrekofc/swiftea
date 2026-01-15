@@ -824,10 +824,12 @@ public final class MailSync: @unchecked Sendable {
             }
         }
 
-        // Try to get body content from .emlx file
+        // Try to get body content and threading headers from .emlx file
         var bodyText: String? = nil
         var bodyHtml: String? = nil
         var emlxPath: String? = nil
+        var inReplyTo: String? = nil
+        var references: [String] = []
 
         if let mailboxId = row.mailboxId {
             // Find mailbox path
@@ -845,6 +847,9 @@ public final class MailSync: @unchecked Sendable {
                         let parsed = try emlxParser.parse(path: path)
                         bodyText = parsed.bodyText
                         bodyHtml = parsed.bodyHtml
+                        // Extract threading headers
+                        inReplyTo = parsed.inReplyTo
+                        references = parsed.references
                     } catch {
                         // Log but don't fail - body content is optional
                     }
@@ -870,7 +875,9 @@ public final class MailSync: @unchecked Sendable {
             hasAttachments: row.hasAttachments,
             emlxPath: emlxPath,
             bodyText: bodyText,
-            bodyHtml: bodyHtml
+            bodyHtml: bodyHtml,
+            inReplyTo: inReplyTo,
+            references: references
         )
 
         try mailDatabase.upsertMessage(message)
@@ -910,10 +917,12 @@ public final class MailSync: @unchecked Sendable {
             }
         }
 
-        // Try to get body content from .emlx file
+        // Try to get body content and threading headers from .emlx file
         var bodyText: String? = nil
         var bodyHtml: String? = nil
         var emlxPath: String? = nil
+        var inReplyTo: String? = nil
+        var references: [String] = []
 
         if let mailboxId = row.mailboxId {
             // Find mailbox path
@@ -931,6 +940,9 @@ public final class MailSync: @unchecked Sendable {
                         let parsed = try emlxParser.parse(path: path)
                         bodyText = parsed.bodyText
                         bodyHtml = parsed.bodyHtml
+                        // Extract threading headers
+                        inReplyTo = parsed.inReplyTo
+                        references = parsed.references
                     } catch {
                         // Log but don't fail - body content is optional
                     }
@@ -956,7 +968,9 @@ public final class MailSync: @unchecked Sendable {
             hasAttachments: row.hasAttachments,
             emlxPath: emlxPath,
             bodyText: bodyText,
-            bodyHtml: bodyHtml
+            bodyHtml: bodyHtml,
+            inReplyTo: inReplyTo,
+            references: references
         )
     }
 
