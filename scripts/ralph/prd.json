@@ -97,7 +97,7 @@
         "Tests pass"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "New file: Sources/SwiftEAKit/Modules/MailModule/MailSyncBackward.swift"
     },
     {
@@ -115,7 +115,7 @@
         "Tests pass"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "File: Sources/SwiftEACLI/Commands/MailCommand.swift (~line 50-100)"
     },
     {
@@ -134,7 +134,7 @@
         "Tests pass"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "File: Sources/SwiftEACLI/Commands/MailCommand.swift (~line 200-300)"
     },
     {

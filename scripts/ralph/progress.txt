@@ -103,3 +103,90 @@ Started: Thu Jan 15 09:23:26 MST 2026
   - Use batch size of 500 for efficient Apple Mail DB queries
   - NULL vs 0 in database: appleRowId=nil is stored as 0, not NULL, so queries should use IS NOT NULL
 ---
+
+## 2026-01-15 09:38 - US-005
+- **What was implemented**: Push archive/delete actions to Apple Mail (backward sync)
+- **Files changed**:
+  - Sources/SwiftEAKit/Modules/MailModule/MailSyncBackward.swift (NEW FILE - 260 lines)
+- **Implementation details**:
+  - Created MailSyncBackward class with mailDatabase and appleScriptService dependencies
+  - archiveMessage(id:) method using optimistic update pattern:
+    1. Get current message state for rollback
+    2. Update local DB: mailbox_status='archived', pending_sync_action='archive'
+    3. Execute AppleScript to move to Archive mailbox
+    4. On success: clear pending_sync_action
+    5. On failure: rollback to original status and clear pending action
+  - deleteMessage(id:) method with same optimistic update pattern for Trash
+  - processPendingActions() method that processes all queued actions (for daemon sync)
+  - BackwardSyncResult struct with archived, deleted, failed counts and errors array
+  - BackwardSyncError enum: messageNotFound, noMessageId, appleScriptFailed, rollbackFailed
+  - MailSyncBackwardScripts struct with AppleScript templates for archive/delete
+- **AppleScript implementation**:
+  - archiveMessage: finds message by RFC822 Message-ID, moves to account's Archive mailbox
+  - deleteMessage: finds message by RFC822 Message-ID, uses Mail.app delete command (moves to Trash)
+  - Both scripts include error handling for message not found (-1728)
+- **Key design decisions**:
+  - Uses RFC822 Message-ID (not SwiftEA ID) for AppleScript lookup
+  - Optimistic update ensures local DB reflects intent immediately
+  - Rollback on failure prevents desync between local state and Apple Mail
+  - processPendingActions() doesn't clear pending action on failure (will retry next sync)
+- **Learnings for future iterations**:
+  - AppleScript uses "message id" property which is the RFC822 Message-ID
+  - Account's Archive mailbox is accessed via: mailbox "Archive" of theAccount
+  - Mail.app delete command automatically moves to account's Trash
+  - Always validate message exists and has RFC822 Message-ID before AppleScript
+---
+
+## 2026-01-15 09:43 - US-006
+- **What was implemented**: Update daemon to 60-second interval with backward sync
+- **Files changed**:
+  - Sources/SwiftEACLI/Commands/MailCommand.swift (updated default interval, added backward sync integration)
+- **Implementation details**:
+  - Changed defaultIntervalSeconds from 300 to 60 (5 minutes → 1 minute)
+  - Added MailSyncBackward instance to MailSyncDaemonController class
+  - Added performBackwardSync() method to MailSyncCommand for manual sync
+  - Added performBackwardSync() method to MailSyncDaemonController for daemon sync
+  - Added performDaemonBackwardSync() function for daemon startup
+  - Integrated backward sync after forward sync in:
+    - executeSync() - manual 'swea mail sync' command
+    - performSync() - MailSyncDaemonController scheduled/wake syncs
+    - performDaemonSync() - daemon startup initial sync
+  - Logging for backward sync results:
+    - Success: "Backward sync: X archived, Y deleted"
+    - Warnings: "WARNING: Backward sync failed for N message(s)" with error details
+- **Learnings for future iterations**:
+  - Backward sync should be called after forward sync to process any queued actions
+  - Failed backward sync should not fail the overall sync (log warning, continue)
+  - Default interval comments should match the actual value (was "5 minutes" with 60)
+---
+
+## 2026-01-15 09:47 - US-007
+- **What was implemented**: Update CLI archive/delete commands to use backward sync with --status search filter
+- **Files changed**:
+  - Sources/SwiftEACLI/Commands/MailCommand.swift (updated MailArchiveCommand, MailDeleteCommand, MailSearchCommand)
+  - Sources/SwiftEAKit/Modules/MailModule/MailDatabase.swift (added mailboxStatus to SearchFilter)
+- **Implementation details**:
+  - **MailArchiveCommand**: Now uses MailSyncBackward.archiveMessage() instead of raw AppleScript
+    - Removed inline AppleScript and escapeAppleScript helper
+    - Creates MailSyncBackward instance and calls archiveMessage(id:)
+    - Benefits: optimistic update pattern with automatic rollback on failure
+  - **MailDeleteCommand**: Now uses MailSyncBackward.deleteMessage() instead of raw AppleScript
+    - Removed MailActionScripts.deleteMessage() call
+    - Creates MailSyncBackward instance and calls deleteMessage(id:)
+    - Benefits: consistent behavior with archive, proper status tracking
+  - **MailSearchCommand --status option**:
+    - Added @Option status: String? to parse --status flag
+    - Added validation for valid status values (inbox, archived, deleted)
+    - Added MailValidationError.invalidStatus(value:) with helpful error message
+    - Applied status filter to SearchFilter.mailboxStatus in run()
+    - Updated filter summary display to show status when filtered
+    - Updated help text with STATUS FILTER section and examples
+  - **SearchFilter.mailboxStatus**: Added mailboxStatus: MailboxStatus? property
+    - Updated hasFilters computed property to include mailboxStatus
+    - Added WHERE clause in searchMessagesWithFilters() for mailbox_status column
+- **Tests**: Build and validation tests pass; database tests have known libsql threading issue
+- **Learnings for future iterations**:
+  - Use MailSyncBackward for all archive/delete operations to ensure consistent state tracking
+  - SearchFilter is mutable (var) when applying CLI options after parseQuery()
+  - Validation errors should provide helpful message with valid options list
+---

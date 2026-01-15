@@ -381,6 +381,7 @@ public final class MailDatabase: @unchecked Sendable {
         public var dateBefore: Date?
         public var hasAttachments: Bool?
         public var freeText: String?
+        public var mailboxStatus: MailboxStatus?
 
         public init() {}
 
@@ -388,7 +389,7 @@ public final class MailDatabase: @unchecked Sendable {
         public var hasFilters: Bool {
             from != nil || to != nil || subject != nil || mailbox != nil ||
             isRead != nil || isFlagged != nil || dateAfter != nil ||
-            dateBefore != nil || hasAttachments != nil
+            dateBefore != nil || hasAttachments != nil || mailboxStatus != nil
         }
 
         /// Check if there's free text for FTS
@@ -548,6 +549,11 @@ public final class MailDatabase: @unchecked Sendable {
         if let dateBefore = filter.dateBefore {
             let timestamp = Int(dateBefore.timeIntervalSince1970)
             whereClauses.append("m.date_received < \(timestamp)")
+        }
+
+        // Mailbox status filter (inbox, archived, deleted)
+        if let mailboxStatus = filter.mailboxStatus {
+            whereClauses.append("m.mailbox_status = '\(mailboxStatus.rawValue)'")
         }
 
         // Always exclude deleted messages

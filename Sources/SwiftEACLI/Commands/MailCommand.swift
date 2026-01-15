@@ -1190,11 +1190,18 @@ struct MailSearchCommand: ParsableCommand {
               before:YYYY-MM-DD - Messages received before date
               date:YYYY-MM-DD  - Messages received on specific date
 
+            STATUS FILTER (--status):
+              inbox    - Messages in your inbox
+              archived - Messages you've archived
+              deleted  - Messages you've deleted
+
             EXAMPLES:
               swea mail search "from:alice@example.com project"
               swea mail search "is:unread is:flagged"
               swea mail search "after:2024-01-01 before:2024-02-01"
               swea mail search "mailbox:INBOX from:support"
+              swea mail search --status inbox "from:support"
+              swea mail search --status archived ""
 
             Use quotes around values with spaces: from:"Alice Smith"
             """
@@ -1202,6 +1209,9 @@ struct MailSearchCommand: ParsableCommand {
 
     @Argument(help: "Search query with optional structured filters")
     var query: String
+
+    @Option(name: .long, help: "Filter by mailbox status: inbox, archived, deleted")
+    var status: String?
 
     @Option(name: .long, help: "Maximum results to return")
     var limit: Int = 20
@@ -1213,6 +1223,14 @@ struct MailSearchCommand: ParsableCommand {
         // --limit must be a positive integer
         if limit <= 0 {
             throw MailValidationError.invalidLimit
+        }
+
+        // --status must be a valid value if provided
+        if let status = status {
+            let validStatuses = ["inbox", "archived", "deleted"]
+            if !validStatuses.contains(status.lowercased()) {
+                throw MailValidationError.invalidStatus(value: status)
+            }
         }
     }
 
@@ -1226,7 +1244,12 @@ struct MailSearchCommand: ParsableCommand {
         defer { mailDatabase.close() }
 
         // Parse the query for structured filters
-        let filter = mailDatabase.parseQuery(query)
+        var filter = mailDatabase.parseQuery(query)
+
+        // Apply --status option if provided
+        if let statusValue = status {
+            filter.mailboxStatus = MailboxStatus(rawValue: statusValue.lowercased())
+        }
 
         // Use structured search if we have filters, otherwise fall back to basic FTS
         let results: [MailMessage]
@@ -1271,6 +1294,7 @@ struct MailSearchCommand: ParsableCommand {
                 if let to = filter.to { filterDesc.append("to:\(to)") }
                 if let subject = filter.subject { filterDesc.append("subject:\(subject)") }
                 if let mailbox = filter.mailbox { filterDesc.append("mailbox:\(mailbox)") }
+                if let mailboxStatus = filter.mailboxStatus { filterDesc.append("status:\(mailboxStatus.rawValue)") }
                 if let isRead = filter.isRead { filterDesc.append(isRead ? "is:read" : "is:unread") }
                 if let isFlagged = filter.isFlagged { filterDesc.append(isFlagged ? "is:flagged" : "is:unflagged") }
                 if filter.hasAttachments == true { filterDesc.append("has:attachments") }
@@ -1742,6 +1766,7 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
     case emptyRecipient
     case watchAndStopMutuallyExclusive
     case invalidInterval(minimum: Int)
+    case invalidStatus(value: String)
 
     public var errorDescription: String? {
         switch self {
@@ -1753,6 +1778,8 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
             return "--watch and --stop cannot be used together"
         case .invalidInterval(let minimum):
             return "--interval must be at least \(minimum) seconds"
+        case .invalidStatus(let value):
+            return "Invalid status '\(value)'. Valid options: inbox, archived, deleted"
         }
     }
 }
@@ -1835,33 +1862,12 @@ struct MailArchiveCommand: ParsableCommand {
             return
         }
 
-        // Execute archive via AppleScript
-        // Archive in Mail.app moves to the account's Archive mailbox
-        let script = """
-            set targetMessages to (every message whose message id is "\(escapeAppleScript(resolved.messageId))")
-            if (count of targetMessages) = 0 then
-                error "Message not found" number -1728
-            end if
-            set theMessage to item 1 of targetMessages
-            set theAccount to account of mailbox of theMessage
-            set archiveMailbox to mailbox "Archive" of theAccount
-            move theMessage to archiveMailbox
-            return "archived"
-            """
+        // Use MailSyncBackward for optimistic update pattern
+        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
+        try backwardSync.archiveMessage(id: resolved.swiftEAId)
 
-        let appleScriptService = AppleScriptService.shared
-        let result = try appleScriptService.executeMailScript(script)
-
-        if result.success {
-            print("Archived message: \(resolved.swiftEAId)")
-            print("  Subject: \(resolved.message.subject)")
-        }
-    }
-
-    private func escapeAppleScript(_ string: String) -> String {
-        string
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        print("Archived message: \(resolved.swiftEAId)")
+        print("  Subject: \(resolved.message.subject)")
     }
 }
 
@@ -1917,16 +1923,12 @@ struct MailDeleteCommand: ParsableCommand {
             return
         }
 
-        // Execute delete via AppleScript
-        let script = MailActionScripts.deleteMessage(byMessageId: resolved.messageId)
+        // Use MailSyncBackward for optimistic update pattern
+        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
+        try backwardSync.deleteMessage(id: resolved.swiftEAId)
 
-        let appleScriptService = AppleScriptService.shared
-        let result = try appleScriptService.executeMailScript(script)
-
-        if result.success {
-            print("Deleted message: \(resolved.swiftEAId)")
-            print("  Subject: \(resolved.message.subject)")
-        }
+        print("Deleted message: \(resolved.swiftEAId)")
+        print("  Subject: \(resolved.message.subject)")
     }
 }
 
