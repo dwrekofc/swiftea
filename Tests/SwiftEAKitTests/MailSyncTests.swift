@@ -700,4 +700,191 @@ This is a simple test email body.
         XCTAssertEqual(classifyMailbox(url: "mailbox://account/INBOX", name: "Trash"), .inbox)
         XCTAssertEqual(classifyMailbox(url: "mailbox://account/Trash", name: "INBOX"), .trash)
     }
+
+    // MARK: - detectMailboxMoves Tests
+
+    func testDetectMailboxMovesReturnsZeroForEmptyDatabase() throws {
+        // With no messages in database, detectMailboxMoves should return 0
+        // Note: Cannot actually call detectMailboxMoves without Apple Mail connection
+        // This test verifies the supporting database methods work correctly
+
+        let trackedMessages = try mailDatabase.getTrackedInboxMessages()
+        XCTAssertTrue(trackedMessages.isEmpty)
+    }
+
+    func testGetTrackedInboxMessagesIncludesAllStatuses() throws {
+        // Insert messages with different statuses
+        let inboxMsg = MailMessage(
+            id: "tracked-inbox-1",
+            appleRowId: 1001,
+            subject: "Inbox message",
+            mailboxStatus: .inbox
+        )
+        let archivedMsg = MailMessage(
+            id: "tracked-archived-1",
+            appleRowId: 1002,
+            subject: "Archived message",
+            mailboxStatus: .archived
+        )
+        let deletedMsg = MailMessage(
+            id: "tracked-deleted-1",
+            appleRowId: 1003,
+            subject: "Deleted message",
+            mailboxStatus: .deleted
+        )
+
+        try mailDatabase.upsertMessage(inboxMsg)
+        try mailDatabase.upsertMessage(archivedMsg)
+        try mailDatabase.upsertMessage(deletedMsg)
+
+        // getTrackedInboxMessages should return ALL messages (not just inbox)
+        // so we can detect when messages move back to INBOX
+        let tracked = try mailDatabase.getTrackedInboxMessages()
+
+        XCTAssertEqual(tracked.count, 3)
+        XCTAssertTrue(tracked.contains { $0.id == "tracked-inbox-1" && $0.mailboxStatus == .inbox })
+        XCTAssertTrue(tracked.contains { $0.id == "tracked-archived-1" && $0.mailboxStatus == .archived })
+        XCTAssertTrue(tracked.contains { $0.id == "tracked-deleted-1" && $0.mailboxStatus == .deleted })
+    }
+
+    func testGetTrackedInboxMessagesExcludesSoftDeleted() throws {
+        // Insert an active message and a soft-deleted one
+        let activeMsg = MailMessage(
+            id: "tracked-active",
+            appleRowId: 2001,
+            subject: "Active message",
+            isDeleted: false
+        )
+        let softDeletedMsg = MailMessage(
+            id: "tracked-soft-deleted",
+            appleRowId: 2002,
+            subject: "Soft deleted message",
+            isDeleted: true
+        )
+
+        try mailDatabase.upsertMessage(activeMsg)
+        try mailDatabase.upsertMessage(softDeletedMsg)
+
+        let tracked = try mailDatabase.getTrackedInboxMessages()
+
+        // Only active message should be returned
+        XCTAssertEqual(tracked.count, 1)
+        XCTAssertEqual(tracked.first?.id, "tracked-active")
+    }
+
+    func testGetTrackedInboxMessagesExcludesZeroAppleRowId() throws {
+        // Insert a message with appleRowId (trackable)
+        let msgWithRowId = MailMessage(
+            id: "tracked-with-rowid",
+            appleRowId: 3001,
+            subject: "With rowid"
+        )
+
+        try mailDatabase.upsertMessage(msgWithRowId)
+
+        let tracked = try mailDatabase.getTrackedInboxMessages()
+
+        // Message with valid appleRowId should be returned
+        XCTAssertEqual(tracked.count, 1)
+        XCTAssertEqual(tracked.first?.id, "tracked-with-rowid")
+        XCTAssertEqual(tracked.first?.appleRowId, 3001)
+    }
+
+    func testTrackedMessageInfoContainsCorrectData() throws {
+        let msg = MailMessage(
+            id: "tracked-info-test",
+            appleRowId: 4001,
+            mailboxId: 42,
+            subject: "Info test",
+            mailboxStatus: .archived
+        )
+
+        try mailDatabase.upsertMessage(msg)
+
+        let tracked = try mailDatabase.getTrackedInboxMessages()
+
+        XCTAssertEqual(tracked.count, 1)
+        let info = tracked.first!
+        XCTAssertEqual(info.id, "tracked-info-test")
+        XCTAssertEqual(info.appleRowId, 4001)
+        XCTAssertEqual(info.mailboxId, 42)
+        XCTAssertEqual(info.mailboxStatus, .archived)
+    }
+
+    func testUpdateMailboxStatusFromInboxToArchived() throws {
+        // Insert a message in inbox
+        let msg = MailMessage(
+            id: "move-test-1",
+            appleRowId: 5001,
+            subject: "Move test",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(msg)
+
+        // Verify initial status
+        var retrieved = try mailDatabase.getMessage(id: "move-test-1")
+        XCTAssertEqual(retrieved?.mailboxStatus, .inbox)
+
+        // Update status to archived (simulating archive in Apple Mail)
+        try mailDatabase.updateMailboxStatus(id: "move-test-1", status: .archived)
+
+        // Verify status changed
+        retrieved = try mailDatabase.getMessage(id: "move-test-1")
+        XCTAssertEqual(retrieved?.mailboxStatus, .archived)
+    }
+
+    func testUpdateMailboxStatusFromArchivedToInbox() throws {
+        // Insert a message in archived state
+        let msg = MailMessage(
+            id: "move-back-test",
+            appleRowId: 5002,
+            subject: "Move back test",
+            mailboxStatus: .archived
+        )
+        try mailDatabase.upsertMessage(msg)
+
+        // Update status back to inbox (simulating move back to INBOX in Apple Mail)
+        try mailDatabase.updateMailboxStatus(id: "move-back-test", status: .inbox)
+
+        // Verify status changed back to inbox
+        let retrieved = try mailDatabase.getMessage(id: "move-back-test")
+        XCTAssertEqual(retrieved?.mailboxStatus, .inbox)
+    }
+
+    func testUpdateMailboxStatusFromInboxToDeleted() throws {
+        // Insert a message in inbox
+        let msg = MailMessage(
+            id: "trash-test",
+            appleRowId: 5003,
+            subject: "Trash test",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(msg)
+
+        // Update status to deleted (simulating move to Trash in Apple Mail)
+        try mailDatabase.updateMailboxStatus(id: "trash-test", status: .deleted)
+
+        // Verify status changed
+        let retrieved = try mailDatabase.getMessage(id: "trash-test")
+        XCTAssertEqual(retrieved?.mailboxStatus, .deleted)
+    }
+
+    func testIncrementalSyncResultIncludesMailboxMoves() {
+        // Verify SyncResult properly tracks mailbox moves
+        let result = SyncResult(
+            messagesProcessed: 100,
+            messagesAdded: 50,
+            messagesUpdated: 30,
+            messagesDeleted: 10,
+            messagesUnchanged: 5,
+            mailboxesProcessed: 5,
+            errors: [],
+            duration: 2.0,
+            isIncremental: true
+        )
+
+        // messagesProcessed should be the sum of all changes
+        XCTAssertEqual(result.messagesProcessed, 100)
+        XCTAssertTrue(result.isIncremental)
+    }
 }

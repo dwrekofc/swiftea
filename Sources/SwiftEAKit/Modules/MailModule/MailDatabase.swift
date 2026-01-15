@@ -1419,6 +1419,50 @@ public final class MailDatabase: @unchecked Sendable {
         return counts
     }
 
+    /// Represents tracked message info for mailbox move detection
+    public struct TrackedMessageInfo {
+        public let id: String
+        public let appleRowId: Int
+        public let mailboxId: Int?
+        public let mailboxStatus: MailboxStatus
+    }
+
+    /// Get all tracked messages with their mailbox IDs for move detection
+    /// This includes all messages (inbox, archived, deleted status) so we can detect
+    /// when messages move between mailboxes, including moves back to INBOX.
+    /// - Returns: Array of tracked message info for all non-soft-deleted messages
+    public func getTrackedInboxMessages() throws -> [TrackedMessageInfo] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT id, apple_rowid, mailbox_id, mailbox_status
+            FROM messages
+            WHERE is_deleted = 0
+              AND apple_rowid IS NOT NULL
+            """)
+
+        var messages: [TrackedMessageInfo] = []
+        for row in result {
+            guard let id = getStringValue(row, 0),
+                  let appleRowId = getIntValue(row, 1) else {
+                continue
+            }
+            let mailboxId = getIntValue(row, 2)
+            let statusStr = getStringValue(row, 3)
+            let status = statusStr.flatMap { MailboxStatus(rawValue: $0) } ?? .inbox
+
+            messages.append(TrackedMessageInfo(
+                id: id,
+                appleRowId: appleRowId,
+                mailboxId: mailboxId,
+                mailboxStatus: status
+            ))
+        }
+        return messages
+    }
+
     // MARK: - Helpers
 
     private func escapeSql(_ string: String) -> String {

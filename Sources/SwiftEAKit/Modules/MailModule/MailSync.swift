@@ -338,6 +338,7 @@ public final class MailSync: @unchecked Sendable {
         var updated: Int = 0
         var deleted: Int = 0
         var unchanged: Int = 0
+        var mailboxMoves: Int = 0
     }
 
     private func performIncrementalSync(
@@ -395,7 +396,13 @@ public final class MailSync: @unchecked Sendable {
             result.processed += statusChanges
         }
 
-        // Phase 3: Detect deleted messages
+        // Phase 3: Detect mailbox moves (forward sync - Apple Mail wins)
+        reportProgress(.detectingChanges, 0, 1, "Detecting mailbox moves...")
+        let mailboxMoves = try detectMailboxMoves()
+        result.mailboxMoves = mailboxMoves
+        result.processed += mailboxMoves
+
+        // Phase 4: Detect deleted messages
         reportProgress(.detectingDeletions, 0, 1, "Detecting deleted messages...")
         let deletions = try detectDeletedMessages()
         result.deleted = deletions
@@ -488,6 +495,84 @@ public final class MailSync: @unchecked Sendable {
         }
 
         return deletedCount
+    }
+
+    /// Detect messages that have moved between mailboxes in Apple Mail (forward sync)
+    /// This detects when users archive or delete messages in Apple Mail and updates the mirror.
+    /// Apple Mail is the source of truth - if a message moves back to INBOX, we reset to .inbox status.
+    /// - Returns: Count of status changes detected
+    public func detectMailboxMoves() throws -> Int {
+        // Get all inbox messages we're tracking
+        let trackedMessages = try mailDatabase.getTrackedInboxMessages()
+        guard !trackedMessages.isEmpty else { return 0 }
+
+        var changesDetected = 0
+
+        // Batch query current mailbox from Apple Mail for these messages
+        let batchSize = 500
+        for batch in stride(from: 0, to: trackedMessages.count, by: batchSize) {
+            let end = min(batch + batchSize, trackedMessages.count)
+            let batchMessages = Array(trackedMessages[batch..<end])
+
+            let rowIds = batchMessages.map { $0.appleRowId }
+            let idList = rowIds.map { String($0) }.joined(separator: ",")
+
+            // Query current mailbox for each message
+            let sql = """
+                SELECT m.ROWID, m.mailbox, mb.url
+                FROM messages m
+                LEFT JOIN mailboxes mb ON m.mailbox = mb.ROWID
+                WHERE m.ROWID IN (\(idList))
+                """
+
+            let rows = try executeQuery(sql)
+
+            // Build a map of rowId -> mailbox info
+            var mailboxInfoMap: [Int: (mailboxId: Int, mailboxType: MailboxType)] = [:]
+            for row in rows {
+                guard let rowId = row["ROWID"] as? Int64,
+                      let mailboxId = row["mailbox"] as? Int64 else {
+                    continue
+                }
+                let url = row["url"] as? String
+                let mailboxType = classifyMailbox(url: url, name: nil)
+                mailboxInfoMap[Int(rowId)] = (Int(mailboxId), mailboxType)
+            }
+
+            // Check each tracked message for moves
+            for tracked in batchMessages {
+                guard let mailboxInfo = mailboxInfoMap[tracked.appleRowId] else {
+                    // Message no longer exists in Apple Mail - will be handled by deletion detection
+                    continue
+                }
+
+                let newMailboxType = mailboxInfo.mailboxType
+                let currentStatus = tracked.mailboxStatus
+
+                // Determine if status needs to change based on mailbox type
+                let newStatus: MailboxStatus
+                switch newMailboxType {
+                case .inbox:
+                    newStatus = .inbox
+                case .archive:
+                    newStatus = .archived
+                case .trash:
+                    newStatus = .deleted
+                default:
+                    // For other mailbox types (sent, drafts, junk, other), keep as inbox
+                    // These moves are less common and don't fit our status model
+                    continue
+                }
+
+                // Update if status changed
+                if newStatus != currentStatus {
+                    try mailDatabase.updateMailboxStatus(id: tracked.id, status: newStatus)
+                    changesDetected += 1
+                }
+            }
+        }
+
+        return changesDetected
     }
 
     // MARK: - Source Database Operations
