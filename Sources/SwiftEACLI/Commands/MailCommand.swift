@@ -1858,6 +1858,9 @@ struct MailThreadsCommand: ParsableCommand {
             EXAMPLES
               swea mail threads                         # List threads (default: text)
               swea mail threads --limit 100             # List more threads
+              swea mail threads --sort subject          # Sort by subject alphabetically
+              swea mail threads --sort message_count    # Sort by number of messages
+              swea mail threads --participant john@     # Filter by participant email
               swea mail threads --format json           # Output as JSON for scripting
               swea mail threads --format markdown       # Output as Markdown
             """
@@ -1868,6 +1871,12 @@ struct MailThreadsCommand: ParsableCommand {
 
     @Option(name: .shortAndLong, help: "Number of threads to skip (for pagination)")
     var offset: Int = 0
+
+    @Option(name: .shortAndLong, help: "Sort by: date (default), subject, or message_count")
+    var sort: ThreadSortOption = .date
+
+    @Option(name: .shortAndLong, help: "Filter threads by participant email (partial match)")
+    var participant: String?
 
     @Option(name: .long, help: "Output format: text (default), json, or markdown")
     var format: ThreadOutputFormat = .text
@@ -1881,14 +1890,26 @@ struct MailThreadsCommand: ParsableCommand {
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        // Get threads ordered by most recent activity
-        let threads = try mailDatabase.getThreads(limit: limit, offset: offset)
+        // Get threads with filtering and sorting options
+        let threads = try mailDatabase.getThreads(
+            limit: limit,
+            offset: offset,
+            sortBy: sort.toDbSortOrder(),
+            participant: participant
+        )
 
         if threads.isEmpty {
             if format.isJson {
-                print("{\"threads\": [], \"count\": 0, \"message\": \"No threads found\"}")
+                let message = participant != nil
+                    ? "No threads found matching participant '\(participant!)'"
+                    : "No threads found"
+                print("{\"threads\": [], \"count\": 0, \"message\": \"\(message)\"}")
             } else {
-                print("No email threads found.")
+                if let participant = participant {
+                    print("No email threads found with participant '\(participant)'.")
+                } else {
+                    print("No email threads found.")
+                }
                 print("")
                 print("To build threads from your synced messages, run:")
                 print("  swea mail sync")
@@ -1899,7 +1920,7 @@ struct MailThreadsCommand: ParsableCommand {
             return
         }
 
-        let totalCount = try mailDatabase.getThreadCount()
+        let totalCount = try mailDatabase.getThreadCount(participant: participant)
 
         switch format {
         case .json:
@@ -1929,13 +1950,17 @@ struct MailThreadsCommand: ParsableCommand {
             threadsArray.append(threadDict)
         }
 
-        let output: [String: Any] = [
+        var output: [String: Any] = [
             "threads": threadsArray,
             "count": threads.count,
             "total": totalCount,
             "offset": offset,
-            "limit": limit
+            "limit": limit,
+            "sort": sort.rawValue
         ]
+        if let participant = participant {
+            output["participant_filter"] = participant
+        }
 
         if let data = try? JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys]),
            let jsonString = String(data: data, encoding: .utf8) {
@@ -1954,13 +1979,24 @@ struct MailThreadsCommand: ParsableCommand {
         print("total: \(totalCount)")
         print("offset: \(offset)")
         print("limit: \(limit)")
+        print("sort: \(sort.rawValue)")
+        if let participant = participant {
+            print("participant_filter: \(participant)")
+        }
         print("---")
         print("")
 
         // Header
         print("# Email Threads")
         print("")
-        print("Showing \(threads.count) of \(totalCount) threads")
+        var summaryLine = "Showing \(threads.count) of \(totalCount) threads"
+        if let participant = participant {
+            summaryLine += " (filtered by: \(participant))"
+        }
+        if sort != .date {
+            summaryLine += " (sorted by: \(sort.rawValue))"
+        }
+        print(summaryLine)
         print("")
 
         // Date formatter for display
@@ -2003,7 +2039,14 @@ struct MailThreadsCommand: ParsableCommand {
     }
 
     private func outputAsText<T: ThreadLike>(threads: [T], totalCount: Int) {
-        print("Email Threads")
+        var headerLine = "Email Threads"
+        if let participant = participant {
+            headerLine += " (filtered by: \(participant))"
+        }
+        if sort != .date {
+            headerLine += " (sorted by: \(sort.rawValue))"
+        }
+        print(headerLine)
         print(String(repeating: "=", count: 70))
         print("")
 
@@ -2110,6 +2153,31 @@ public enum ThreadOutputFormat: String, CaseIterable, ExpressibleByArgument {
     /// Check if this format produces plain text output
     var isText: Bool {
         self == .text
+    }
+}
+
+/// Sort options for thread listing commands.
+/// Allows sorting threads by date, subject, or message count.
+public enum ThreadSortOption: String, CaseIterable, ExpressibleByArgument {
+    case date
+    case subject
+    case messageCount = "message_count"
+
+    /// All valid sort values for help text
+    public static var allValueStrings: [String] {
+        allCases.map { $0.rawValue }
+    }
+
+    /// Convert to database sort order enum
+    func toDbSortOrder() -> ThreadSortOrder {
+        switch self {
+        case .date:
+            return .date
+        case .subject:
+            return .subject
+        case .messageCount:
+            return .messageCount
+        }
     }
 }
 

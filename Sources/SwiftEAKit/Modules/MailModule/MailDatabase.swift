@@ -24,6 +24,25 @@ public enum MailDatabaseError: Error, LocalizedError {
     }
 }
 
+/// Sort options for thread listing
+public enum ThreadSortOrder: String, CaseIterable, Sendable {
+    case date = "date"
+    case subject = "subject"
+    case messageCount = "message_count"
+
+    /// SQL ORDER BY clause for this sort option
+    var sqlOrderBy: String {
+        switch self {
+        case .date:
+            return "last_date DESC"
+        case .subject:
+            return "subject ASC NULLS LAST"
+        case .messageCount:
+            return "message_count DESC"
+        }
+    }
+}
+
 /// Manages the libSQL mirror database for Apple Mail data
 public final class MailDatabase: @unchecked Sendable {
     private var database: Database?
@@ -1645,6 +1664,86 @@ public final class MailDatabase: @unchecked Sendable {
             }
         }
         return threads
+    }
+
+    /// Get threads with filtering and sorting options
+    /// - Parameters:
+    ///   - limit: Maximum number of threads to return
+    ///   - offset: Number of threads to skip (for pagination)
+    ///   - sortBy: Sort order for results
+    ///   - participant: Filter by participant email (matches sender or recipient)
+    /// - Returns: Array of threads matching the criteria
+    public func getThreads(
+        limit: Int = 100,
+        offset: Int = 0,
+        sortBy: ThreadSortOrder = .date,
+        participant: String? = nil
+    ) throws -> [Thread] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var sql: String
+        if let participant = participant {
+            // Filter threads by participant (sender or recipient in any message)
+            let escaped = escapeSql(participant.lowercased())
+            sql = """
+                SELECT DISTINCT t.* FROM threads t
+                JOIN thread_messages tm ON t.id = tm.thread_id
+                JOIN messages m ON tm.message_id = m.id
+                LEFT JOIN recipients r ON m.id = r.message_id
+                WHERE LOWER(m.sender_email) LIKE '%\(escaped)%'
+                   OR LOWER(r.email) LIKE '%\(escaped)%'
+                ORDER BY t.\(sortBy.sqlOrderBy)
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        } else {
+            sql = """
+                SELECT * FROM threads
+                ORDER BY \(sortBy.sqlOrderBy)
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        }
+
+        let result = try conn.query(sql)
+
+        var threads: [Thread] = []
+        for row in result {
+            if let thread = try? rowToThread(row) {
+                threads.append(thread)
+            }
+        }
+        return threads
+    }
+
+    /// Get count of threads matching filter criteria
+    /// - Parameter participant: Filter by participant email (matches sender or recipient)
+    /// - Returns: Count of matching threads
+    public func getThreadCount(participant: String? = nil) throws -> Int {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var sql: String
+        if let participant = participant {
+            let escaped = escapeSql(participant.lowercased())
+            sql = """
+                SELECT COUNT(DISTINCT t.id) FROM threads t
+                JOIN thread_messages tm ON t.id = tm.thread_id
+                JOIN messages m ON tm.message_id = m.id
+                LEFT JOIN recipients r ON m.id = r.message_id
+                WHERE LOWER(m.sender_email) LIKE '%\(escaped)%'
+                   OR LOWER(r.email) LIKE '%\(escaped)%'
+                """
+        } else {
+            sql = "SELECT COUNT(*) FROM threads"
+        }
+
+        let result = try conn.query(sql)
+        for row in result {
+            return getIntValue(row, 0) ?? 0
+        }
+        return 0
     }
 
     /// Get all messages in a thread
