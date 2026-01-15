@@ -1,0 +1,33 @@
+# Ralph Progress Log
+Started: Thu Jan 15 09:23:26 MST 2026
+---
+
+## Codebase Patterns
+- Schema migrations are in MailDatabase.swift using versioned migration functions (applyMigrationV1, applyMigrationV2, etc.)
+- Enums for database-backed values use String raw values and are defined at the bottom of MailDatabase.swift
+- MailMessage struct properties must be updated when adding new DB columns
+- Both upsertMessage() and batchUpsertMessages() need to be updated when adding new columns
+- rowToMessage() needs column index updates when adding new columns (indexes are positional)
+- Tests for database functionality are in Tests/SwiftEAKitTests/MailDatabaseTests.swift
+- libsql has threading issues in tests - some tests may fail due to infrastructure, not code
+
+---
+
+## 2026-01-15 09:24 - US-001
+- **What was implemented**: Schema migration V2 for mailbox status tracking (already existed in codebase)
+- **Files reviewed**:
+  - Sources/SwiftEAKit/Modules/MailModule/MailDatabase.swift
+  - Tests/SwiftEAKitTests/MailDatabaseTests.swift
+- **Implementation details**:
+  - applyMigrationV2() adds: mailbox_status (TEXT, default 'inbox'), pending_sync_action (TEXT), last_known_mailbox_id (INTEGER)
+  - MailboxStatus enum: .inbox, .archived, .deleted
+  - SyncAction enum: .archive, .delete
+  - MailMessage struct updated with mailboxStatus, pendingSyncAction, lastKnownMailboxId properties
+  - upsertMessage() and batchUpsertMessages() handle the new columns
+  - rowToMessage() parses columns at indexes 21 (mailbox_status), 22 (pending_sync_action), 23 (last_known_mailbox_id)
+- **Status**: ALREADY COMPLETE - US-001 was implemented in a prior commit (3584cd2)
+- **Learnings for future iterations**:
+  - Check git history before assuming features need implementation
+  - Column indexes in rowToMessage() are positional and must match SELECT * order
+  - Migration V2 already creates indexes for mailbox_status and pending_sync_action
+---
