@@ -53,6 +53,7 @@ public enum SyncPhase: String, Sendable {
     case syncingMailboxes = "Syncing mailboxes"
     case syncingMessages = "Syncing messages"
     case parsingContent = "Parsing content"
+    case threadingMessages = "Threading messages"
     case detectingChanges = "Detecting changes"
     case detectingDeletions = "Detecting deletions"
     case indexing = "Indexing"
@@ -136,13 +137,16 @@ public struct SyncResult: Sendable {
     public let messagesDeleted: Int
     public let messagesUnchanged: Int
     public let mailboxesProcessed: Int
+    public let threadsCreated: Int
+    public let threadsUpdated: Int
     public let errors: [String]
     public let duration: TimeInterval
     public let isIncremental: Bool
 
     public init(messagesProcessed: Int, messagesAdded: Int, messagesUpdated: Int,
                 messagesDeleted: Int = 0, messagesUnchanged: Int = 0,
-                mailboxesProcessed: Int, errors: [String], duration: TimeInterval,
+                mailboxesProcessed: Int, threadsCreated: Int = 0, threadsUpdated: Int = 0,
+                errors: [String], duration: TimeInterval,
                 isIncremental: Bool = false) {
         self.messagesProcessed = messagesProcessed
         self.messagesAdded = messagesAdded
@@ -150,6 +154,8 @@ public struct SyncResult: Sendable {
         self.messagesDeleted = messagesDeleted
         self.messagesUnchanged = messagesUnchanged
         self.mailboxesProcessed = mailboxesProcessed
+        self.threadsCreated = threadsCreated
+        self.threadsUpdated = threadsUpdated
         self.errors = errors
         self.duration = duration
         self.isIncremental = isIncremental
@@ -162,6 +168,7 @@ public final class MailSync: @unchecked Sendable {
     private let discovery: EnvelopeIndexDiscovery
     private let emlxParser: EmlxParser
     private let idGenerator: StableIdGenerator
+    private let threadDetectionService: ThreadDetectionService
 
     private var sourceDb: OpaquePointer?
     private var envelopeInfo: EnvelopeIndexInfo?
@@ -177,12 +184,14 @@ public final class MailSync: @unchecked Sendable {
         discovery: EnvelopeIndexDiscovery = EnvelopeIndexDiscovery(),
         emlxParser: EmlxParser = EmlxParser(),
         idGenerator: StableIdGenerator = StableIdGenerator(),
+        threadDetectionService: ThreadDetectionService = ThreadDetectionService(),
         options: MailSyncOptions = .default
     ) {
         self.mailDatabase = mailDatabase
         self.discovery = discovery
         self.emlxParser = emlxParser
         self.idGenerator = idGenerator
+        self.threadDetectionService = threadDetectionService
         self.options = options
     }
 
@@ -199,6 +208,8 @@ public final class MailSync: @unchecked Sendable {
         var messagesDeleted = 0
         var messagesUnchanged = 0
         var mailboxesProcessed = 0
+        var threadsCreated = 0
+        var threadsUpdated = 0
 
         // Auto-detect incremental mode: use incremental if we have a previous sync and not forcing full
         let lastSyncTime = try mailDatabase.getLastSyncTime()
@@ -218,7 +229,9 @@ public final class MailSync: @unchecked Sendable {
                 messagesUpdated: &messagesUpdated,
                 messagesDeleted: &messagesDeleted,
                 messagesUnchanged: &messagesUnchanged,
-                mailboxesProcessed: &mailboxesProcessed
+                mailboxesProcessed: &mailboxesProcessed,
+                threadsCreated: &threadsCreated,
+                threadsUpdated: &threadsUpdated
             )
         } catch {
             // Record sync failure
@@ -238,7 +251,9 @@ public final class MailSync: @unchecked Sendable {
         messagesUpdated: inout Int,
         messagesDeleted: inout Int,
         messagesUnchanged: inout Int,
-        mailboxesProcessed: inout Int
+        mailboxesProcessed: inout Int,
+        threadsCreated: inout Int,
+        threadsUpdated: inout Int
     ) throws -> SyncResult {
         // Discover envelope index
         reportProgress(.discovering, 0, 1, "Discovering Apple Mail database...")
@@ -266,6 +281,8 @@ public final class MailSync: @unchecked Sendable {
             messagesUpdated = result.updated
             messagesDeleted = result.deleted
             messagesUnchanged = result.unchanged
+            threadsCreated = result.threadsCreated
+            threadsUpdated = result.threadsUpdated
         } else {
             // Full sync: process all messages with batched database transactions
             reportProgress(.syncingMessages, 0, 1, "Querying messages...")
@@ -308,6 +325,14 @@ public final class MailSync: @unchecked Sendable {
 
             // Report indexing phase (FTS rebuild happens in batchUpsertMessages defer block)
             reportProgress(.indexing, messagesProcessed, messagesProcessed, "Full-text index rebuilt")
+
+            // Phase 3: Thread detection - assign messages to threads
+            let threadingResult = performThreadDetection(
+                for: processedMessages,
+                errors: &errors
+            )
+            threadsCreated = threadingResult.created
+            threadsUpdated = threadingResult.updated
         }
 
         reportProgress(.complete, messagesProcessed, messagesProcessed, "Sync complete")
@@ -319,6 +344,8 @@ public final class MailSync: @unchecked Sendable {
             messagesDeleted: messagesDeleted,
             messagesUnchanged: messagesUnchanged,
             mailboxesProcessed: mailboxesProcessed,
+            threadsCreated: threadsCreated,
+            threadsUpdated: threadsUpdated,
             errors: errors,
             duration: Date().timeIntervalSince(startTime),
             isIncremental: useIncremental
@@ -339,6 +366,8 @@ public final class MailSync: @unchecked Sendable {
         var deleted: Int = 0
         var unchanged: Int = 0
         var mailboxMoves: Int = 0
+        var threadsCreated: Int = 0
+        var threadsUpdated: Int = 0
     }
 
     private func performIncrementalSync(
@@ -386,6 +415,14 @@ public final class MailSync: @unchecked Sendable {
 
             // Report indexing phase (FTS rebuild happens in batchUpsertMessages defer block)
             reportProgress(.indexing, result.processed, result.processed, "Full-text index rebuilt")
+
+            // Thread detection for new messages
+            let threadingResult = performThreadDetection(
+                for: processedMessages,
+                errors: &errors
+            )
+            result.threadsCreated = threadingResult.created
+            result.threadsUpdated = threadingResult.updated
         }
 
         // Phase 2: Check for status changes on existing messages (read/flagged)
@@ -1006,6 +1043,67 @@ public final class MailSync: @unchecked Sendable {
         // Try to construct path from mailbox URL
         // This is simplified - actual implementation needs to handle various URL formats
         return (mailBasePath as NSString).appendingPathComponent(url)
+    }
+
+    // MARK: - Thread Detection
+
+    /// Result of thread detection operation
+    private struct ThreadDetectionSyncResult {
+        var created: Int = 0
+        var updated: Int = 0
+    }
+
+    /// Perform thread detection for a batch of messages.
+    ///
+    /// This method processes messages through the ThreadDetectionService to:
+    /// 1. Generate thread IDs based on threading headers
+    /// 2. Create new threads or update existing ones
+    /// 3. Link messages to their threads
+    ///
+    /// Thread detection errors are non-fatal - they are logged but don't fail the sync.
+    ///
+    /// - Parameters:
+    ///   - messages: The messages to process for threading
+    ///   - errors: Array to append any threading errors to
+    /// - Returns: Threading statistics (threads created/updated)
+    private func performThreadDetection(
+        for messages: [MailMessage],
+        errors: inout [String]
+    ) -> ThreadDetectionSyncResult {
+        var result = ThreadDetectionSyncResult()
+
+        guard !messages.isEmpty else { return result }
+
+        reportProgress(.threadingMessages, 0, messages.count, "Detecting threads for \(messages.count) messages...")
+
+        let progressBatchSize = 100
+        for (index, message) in messages.enumerated() {
+            do {
+                let threadResult = try threadDetectionService.processMessageForThreading(
+                    message,
+                    database: mailDatabase
+                )
+
+                if threadResult.isNewThread {
+                    result.created += 1
+                } else {
+                    result.updated += 1
+                }
+
+                if index % progressBatchSize == 0 || index == messages.count - 1 {
+                    reportProgress(.threadingMessages, index + 1, messages.count,
+                                   "Threaded \(index + 1)/\(messages.count) messages")
+                }
+            } catch {
+                // Thread detection errors are non-fatal - log but continue
+                errors.append("Threading for message \(message.id): \(error.localizedDescription)")
+            }
+        }
+
+        reportProgress(.threadingMessages, messages.count, messages.count,
+                       "Created \(result.created) threads, updated \(result.updated)")
+
+        return result
     }
 
     // MARK: - Progress Reporting
