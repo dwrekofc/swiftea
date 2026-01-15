@@ -591,6 +591,38 @@ public final class MailDatabase: @unchecked Sendable {
         return messages
     }
 
+    /// Get messages that haven't been exported yet (export_path IS NULL)
+    /// Used for incremental auto-export after sync
+    /// - Parameter limit: Maximum number of messages to return (default: unlimited via 0)
+    /// - Returns: Array of messages that need to be exported
+    public func getMessagesNeedingExport(limit: Int = 0) throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var query = """
+            SELECT id, apple_rowid, message_id, mailbox_id, subject, sender_name, sender_email,
+                   recipients, date_sent, date_received, is_read, is_flagged, is_deleted,
+                   body_text, body_html, emlx_path, export_path, created_at, updated_at
+            FROM messages
+            WHERE is_deleted = 0 AND export_path IS NULL
+            ORDER BY date_received DESC
+            """
+
+        if limit > 0 {
+            query += " LIMIT \(limit)"
+        }
+
+        let result = try conn.query(query)
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
     /// Update the export path for a message
     public func updateExportPath(id: String, path: String) throws {
         guard let conn = connection else {
@@ -852,6 +884,64 @@ public final class MailDatabase: @unchecked Sendable {
         return mailboxes
     }
 
+    // MARK: - FTS5 Trigger Management
+
+    /// Disable FTS5 triggers to prevent per-row FTS updates during bulk operations.
+    /// Call `rebuildFTSIndex()` after bulk operations complete to sync the FTS index.
+    public func disableFTSTriggers() throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        _ = try conn.execute("DROP TRIGGER IF EXISTS messages_ai")
+        _ = try conn.execute("DROP TRIGGER IF EXISTS messages_ad")
+        _ = try conn.execute("DROP TRIGGER IF EXISTS messages_au")
+    }
+
+    /// Re-enable FTS5 triggers for incremental updates after bulk operations.
+    public func enableFTSTriggers() throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        // Recreate the triggers (same as in migration)
+        _ = try conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, subject, sender_name, sender_email, body_text)
+                VALUES (NEW.rowid, NEW.subject, NEW.sender_name, NEW.sender_email, NEW.body_text);
+            END
+            """)
+
+        _ = try conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, subject, sender_name, sender_email, body_text)
+                VALUES ('delete', OLD.rowid, OLD.subject, OLD.sender_name, OLD.sender_email, OLD.body_text);
+            END
+            """)
+
+        _ = try conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, subject, sender_name, sender_email, body_text)
+                VALUES ('delete', OLD.rowid, OLD.subject, OLD.sender_name, OLD.sender_email, OLD.body_text);
+                INSERT INTO messages_fts(rowid, subject, sender_name, sender_email, body_text)
+                VALUES (NEW.rowid, NEW.subject, NEW.sender_name, NEW.sender_email, NEW.body_text);
+            END
+            """)
+    }
+
+    /// Rebuild the FTS5 index from scratch using the messages table content.
+    /// This is much faster than per-row trigger updates for bulk operations.
+    /// Should be called after `disableFTSTriggers()` + bulk operations.
+    public func rebuildFTSIndex() throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        // Delete all FTS content and rebuild from the messages table
+        // The 'rebuild' command is a special FTS5 command that repopulates from the content table
+        _ = try conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+    }
+
     // MARK: - Batch Insert Operations
 
     /// Configuration for batch insert operations
@@ -859,11 +949,15 @@ public final class MailDatabase: @unchecked Sendable {
         /// Number of messages to insert per transaction batch
         public let batchSize: Int
 
-        /// Default configuration with batch size of 1000
-        public static let `default` = BatchInsertConfig(batchSize: 1000)
+        /// Whether to disable FTS triggers during bulk operations (recommended for large syncs)
+        public let disableFTSTriggersForBulk: Bool
 
-        public init(batchSize: Int = 1000) {
+        /// Default configuration with batch size of 1000 and FTS trigger optimization enabled
+        public static let `default` = BatchInsertConfig(batchSize: 1000, disableFTSTriggersForBulk: true)
+
+        public init(batchSize: Int = 1000, disableFTSTriggersForBulk: Bool = true) {
             self.batchSize = max(1, batchSize)  // Ensure at least 1
+            self.disableFTSTriggersForBulk = disableFTSTriggersForBulk
         }
     }
 
@@ -888,6 +982,10 @@ public final class MailDatabase: @unchecked Sendable {
     /// Each batch is wrapped in a transaction for atomicity - if any insert in a batch fails,
     /// the entire batch is rolled back.
     ///
+    /// When `config.disableFTSTriggersForBulk` is true (default), FTS5 triggers are disabled
+    /// during the bulk operation and the FTS index is rebuilt once at the end. This prevents
+    /// the O(n^2) slowdown caused by per-row FTS trigger updates.
+    ///
     /// - Parameters:
     ///   - messages: Array of messages to insert/update
     ///   - config: Batch configuration (default batch size: 1000)
@@ -904,6 +1002,25 @@ public final class MailDatabase: @unchecked Sendable {
         var errors: [String] = []
 
         let now = Int(Date().timeIntervalSince1970)
+
+        // Disable FTS triggers for bulk operations to prevent per-row FTS updates
+        // This is critical for performance: without this, second sync takes 5+ minutes
+        // because each UPDATE fires 2 FTS operations (delete old + insert new)
+        if config.disableFTSTriggersForBulk {
+            try disableFTSTriggers()
+        }
+
+        defer {
+            // Always re-enable triggers and rebuild FTS index
+            if config.disableFTSTriggersForBulk {
+                do {
+                    try rebuildFTSIndex()
+                    try enableFTSTriggers()
+                } catch {
+                    errors.append("FTS rebuild failed: \(error.localizedDescription)")
+                }
+            }
+        }
 
         // Process in batches
         let batches = stride(from: 0, to: messages.count, by: config.batchSize).map { startIndex in

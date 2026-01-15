@@ -26,8 +26,30 @@ public struct Mail: ParsableCommand {
         commandName: "mail",
         abstract: "Mail operations (sync, search, show, export, actions)",
         discussion: """
-            SwiftEA mail commands interact with Apple Mail.app to sync, search,
+            swea mail commands interact with Apple Mail.app to sync, search,
             and perform actions on your email.
+
+            GETTING STARTED
+            The typical workflow is: sync -> search/show -> export
+
+              swea mail sync              # Sync mail to local database
+              swea mail sync --watch      # Start automatic background sync
+              swea mail search "query"    # Search synced messages
+              swea mail export            # Export to markdown files
+
+            QUICK WORKFLOW
+              # First time: sync all mail
+              swea mail sync
+
+              # For ongoing use: start automatic sync
+              swea mail sync --watch
+
+              # Search and export as needed
+              swea mail search "from:alice@example.com"
+              swea mail export --query "from:alice"
+
+            NOTE: 'sync' populates the database. 'export' creates .md files.
+            Run both if you want files you can open in Obsidian.
 
             AUTOMATION PERMISSION
             Action commands (archive, delete, move, flag, mark, reply, compose)
@@ -35,7 +57,7 @@ public struct Mail: ParsableCommand {
             will prompt you to grant permission. To grant permission manually:
 
               1. Open System Settings > Privacy & Security > Automation
-              2. Find SwiftEA (or Terminal if running from terminal)
+              2. Find swea (or Terminal if running from terminal)
               3. Enable the toggle for Mail.app
 
             SAFETY FLAGS
@@ -49,22 +71,34 @@ public struct Mail: ParsableCommand {
 
             EXAMPLES
               # Sync mail from Apple Mail
-              swiftea mail sync
+              swea mail sync
+
+              # Start automatic sync (recommended for regular use)
+              swea mail sync --watch
+
+              # Force a full resync if needed
+              swea mail sync --full
 
               # Search for emails from a specific sender
-              swiftea mail search "from:alice@example.com"
+              swea mail search "from:alice@example.com"
+
+              # Export all mail to markdown files
+              swea mail export
+
+              # Export filtered mail to custom location
+              swea mail export --query "from:alice" --output ~/Documents/Mail
 
               # Preview archiving a message (no changes made)
-              swiftea mail archive --id mail-abc123 --dry-run
+              swea mail archive --id mail-abc123 --dry-run
 
               # Archive a message (requires confirmation)
-              swiftea mail archive --id mail-abc123 --yes
+              swea mail archive --id mail-abc123 --yes
 
               # Flag a message
-              swiftea mail flag --id mail-abc123 --set
+              swea mail flag --id mail-abc123 --set
 
               # Compose a new email draft
-              swiftea mail compose --to bob@example.com --subject "Hello"
+              swea mail compose --to bob@example.com --subject "Hello"
             """,
         subcommands: [
             MailSyncCommand.self,
@@ -88,7 +122,27 @@ public struct Mail: ParsableCommand {
 struct MailSyncCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sync",
-        abstract: "Sync mail data from Apple Mail"
+        abstract: "Sync mail data from Apple Mail and export to Swiftea/Mail/",
+        discussion: """
+            Syncs mail data from Apple Mail to a local SQLite database for fast
+            searching. By default, performs an incremental sync (only new/changed
+            messages). Use --full to resync everything.
+
+            After sync, new messages are automatically exported as markdown files
+            to Swiftea/Mail/ for use with Obsidian or other markdown tools.
+            Use --no-export to disable automatic export.
+
+            For automatic sync, use --watch to start a background daemon that
+            keeps your mail database and markdown exports up to date.
+
+            EXAMPLES
+              swea mail sync              # Incremental sync + auto-export
+              swea mail sync --full       # Full resync + export all
+              swea mail sync --no-export  # Sync only, skip markdown export
+              swea mail sync --watch      # Start automatic sync daemon
+              swea mail sync --status     # Check sync/daemon status
+              swea mail sync --stop       # Stop the daemon
+            """
     )
 
     @Flag(name: .long, help: "Install and start watch daemon for continuous sync")
@@ -100,14 +154,20 @@ struct MailSyncCommand: ParsableCommand {
     @Flag(name: .long, help: "Show sync status and watch daemon state")
     var status: Bool = false
 
-    @Flag(name: .long, help: "Only sync messages changed since last sync")
-    var incremental: Bool = false
+    @Flag(name: .long, help: "Force a full sync, ignoring previous sync state")
+    var full: Bool = false
 
     @Flag(name: .long, help: "Show detailed progress")
     var verbose: Bool = false
 
     @Flag(name: .long, help: "Run as persistent daemon with sleep/wake detection (internal use)")
     var daemon: Bool = false
+
+    @Flag(name: .long, help: "Disable automatic export to Swiftea/Mail/ after sync")
+    var noExport: Bool = false
+
+    @Option(name: .long, help: "Sync interval in seconds for watch mode (default: 300, minimum: 30)")
+    var interval: Int?
 
     // MARK: - Retry Configuration (for daemon mode)
 
@@ -163,10 +223,23 @@ struct MailSyncCommand: ParsableCommand {
         }
     }
 
+    /// Minimum allowed sync interval in seconds
+    private static let minIntervalSeconds = 30
+
+    /// Default sync interval in seconds (5 minutes)
+    private static let defaultIntervalSeconds = 300
+
     func validate() throws {
         // --watch and --stop are mutually exclusive
         if watch && stop {
             throw MailValidationError.watchAndStopMutuallyExclusive
+        }
+
+        // Validate --interval if provided
+        if let interval = interval {
+            if interval < Self.minIntervalSeconds {
+                throw MailValidationError.invalidInterval(minimum: Self.minIntervalSeconds)
+            }
         }
     }
 
@@ -268,17 +341,53 @@ struct MailSyncCommand: ParsableCommand {
 
         // Handle --daemon flag: run as persistent daemon with sleep/wake detection
         if daemon {
-            try runPersistentDaemon(mailDatabase: mailDatabase)
+            try runPersistentDaemon(mailDatabase: mailDatabase, vault: vault)
             return
         }
 
         // Create sync engine
         let sync = MailSync(mailDatabase: mailDatabase)
 
+        // Wire up progress callback for verbose mode
+        if verbose {
+            var lastPhase: String = ""
+            var lastProgressTime = Date()
+            sync.onProgress = { progress in
+                // Always show phase changes
+                if progress.phase.rawValue != lastPhase {
+                    if !lastPhase.isEmpty {
+                        print("") // newline after previous phase
+                    }
+                    lastPhase = progress.phase.rawValue
+                    lastProgressTime = Date()
+                }
+
+                // For message sync, show periodic updates (every 0.5s or phase change)
+                let now = Date()
+                let elapsed = now.timeIntervalSince(lastProgressTime)
+                if elapsed >= 0.5 || progress.current == progress.total {
+                    lastProgressTime = now
+                    if progress.total > 0 {
+                        let pct = Int(progress.percentage)
+                        // Use carriage return to update in place
+                        print("\r  [\(progress.phase.rawValue)] \(progress.current)/\(progress.total) (\(pct)%) - \(progress.message)", terminator: "")
+                        fflush(stdout)
+                    } else {
+                        print("\r  [\(progress.phase.rawValue)] \(progress.message)", terminator: "")
+                        fflush(stdout)
+                    }
+                }
+            }
+        }
+
         log("Syncing mail from Apple Mail...")
 
         do {
-            let result = try sync.sync(incremental: incremental)
+            let result = try sync.sync(forceFullSync: full)
+
+            if verbose {
+                print("") // Final newline after progress
+            }
 
             log("Sync complete:")
             log("  Messages processed: \(result.messagesProcessed)")
@@ -296,9 +405,43 @@ struct MailSyncCommand: ParsableCommand {
                     log("  ... and \(result.errors.count - 10) more")
                 }
             }
+
+            // Auto-export new messages to Swiftea/Mail/ unless disabled
+            if !noExport {
+                try performAutoExport(mailDatabase: mailDatabase, vault: vault)
+            }
         } catch let error as MailSyncError {
             logError("Sync failed: \(error.localizedDescription)")
             throw ExitCode.failure
+        }
+    }
+
+    // MARK: - Auto-Export
+
+    /// Export newly synced messages to Swiftea/Mail/ as markdown files
+    private func performAutoExport(mailDatabase: MailDatabase, vault: VaultContext) throws {
+        let exportDir = (vault.dataFolderPath as NSString).appendingPathComponent("Mail")
+        let exporter = MailExporter(mailDatabase: mailDatabase)
+
+        do {
+            let exportResult = try exporter.exportNewMessages(to: exportDir)
+
+            if exportResult.exported > 0 {
+                log("Auto-export:")
+                log("  Exported \(exportResult.exported) message(s) to Swiftea/Mail/")
+            }
+
+            if !exportResult.errors.isEmpty && verbose {
+                for error in exportResult.errors.prefix(5) {
+                    log("  Warning: \(error)")
+                }
+                if exportResult.errors.count > 5 {
+                    log("  ... and \(exportResult.errors.count - 5) more export errors")
+                }
+            }
+        } catch {
+            // Log but don't fail sync if export has issues
+            logError("Auto-export failed: \(error.localizedDescription)")
         }
     }
 
@@ -406,11 +549,25 @@ struct MailSyncCommand: ParsableCommand {
     // MARK: - Watch Daemon
 
     private static let launchAgentLabel = "com.swiftea.mail.sync"
-    private static let syncIntervalSeconds = 300 // 5 minutes
+
+    /// Get the effective sync interval (user-specified or default)
+    private var effectiveSyncInterval: Int {
+        interval ?? Self.defaultIntervalSeconds
+    }
 
     private func getLaunchAgentPath() -> String {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
         return "\(homeDir)/Library/LaunchAgents/\(Self.launchAgentLabel).plist"
+    }
+
+    /// Format interval for human-readable output
+    private func formatInterval(_ seconds: Int) -> String {
+        if seconds >= 60 && seconds % 60 == 0 {
+            let minutes = seconds / 60
+            return "\(minutes) minute\(minutes == 1 ? "" : "s")"
+        } else {
+            return "\(seconds) seconds"
+        }
     }
 
     private func installWatchDaemon(vault: VaultContext, verbose: Bool) throws {
@@ -445,14 +602,11 @@ struct MailSyncCommand: ParsableCommand {
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
 
-        // Check if we have any messages - if not, do a full sync; otherwise incremental
-        let existingMessages = try mailDatabase.getAllMessages(limit: 1)
-        let isFirstSync = existingMessages.isEmpty
-
+        // Sync will auto-detect incremental mode based on last_sync_time in database
         let sync = MailSync(mailDatabase: mailDatabase)
 
         do {
-            let result = try sync.sync(incremental: !isFirstSync)
+            let result = try sync.sync()
             print("Initial sync complete:")
             print("  Messages: +\(result.messagesAdded) ~\(result.messagesUpdated)")
             print("  Duration: \(String(format: "%.2f", result.duration))s")
@@ -469,6 +623,7 @@ struct MailSyncCommand: ParsableCommand {
         // Generate plist content
         // Uses --daemon mode for a persistent process with sleep/wake detection.
         // KeepAlive ensures the daemon is restarted if it exits.
+        let syncInterval = effectiveSyncInterval
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
             <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -482,6 +637,8 @@ struct MailSyncCommand: ParsableCommand {
                     <string>mail</string>
                     <string>sync</string>
                     <string>--daemon</string>
+                    <string>--interval</string>
+                    <string>\(syncInterval)</string>
                 </array>
                 <key>RunAtLoad</key>
                 <true/>
@@ -538,11 +695,11 @@ struct MailSyncCommand: ParsableCommand {
 
         print("Watch daemon installed and started")
         print("  Mode: Persistent daemon with sleep/wake detection")
-        print("  Syncing every \(Self.syncIntervalSeconds / 60) minutes + on wake")
+        print("  Interval: \(formatInterval(syncInterval))")
         print("  Logs: \(logDir)/mail-sync.log")
         print("")
-        print("Use 'swiftea mail sync --status' to check status")
-        print("Use 'swiftea mail sync --stop' to stop the daemon")
+        print("Use 'swea mail sync --status' to check status")
+        print("Use 'swea mail sync --stop' to stop the daemon")
     }
 
     private func stopWatchDaemon(verbose: Bool) throws {
@@ -588,15 +745,25 @@ struct MailSyncCommand: ParsableCommand {
 
     /// Run as a persistent daemon that syncs on startup, on a schedule, and on system wake.
     /// This mode is used internally by the LaunchAgent for sleep/wake-aware syncing.
-    private func runPersistentDaemon(mailDatabase: MailDatabase) throws {
+    private func runPersistentDaemon(mailDatabase: MailDatabase, vault: VaultContext) throws {
+        let syncInterval = effectiveSyncInterval
+        let exportDir = (vault.dataFolderPath as NSString).appendingPathComponent("Mail")
+
         log("Starting persistent mail sync daemon (pid=\(ProcessInfo.processInfo.processIdentifier))")
+        log("Sync interval: \(formatInterval(syncInterval))")
+        log("Export directory: \(exportDir)")
 
         // Run initial incremental sync on startup
         log("Running initial sync...")
-        performDaemonSync(mailDatabase: mailDatabase)
+        performDaemonSync(mailDatabase: mailDatabase, exportDir: exportDir)
 
         // Create a daemon controller to handle sleep/wake events
-        let controller = MailSyncDaemonController(mailDatabase: mailDatabase, logger: log)
+        let controller = MailSyncDaemonController(
+            mailDatabase: mailDatabase,
+            exportDir: exportDir,
+            syncIntervalSeconds: TimeInterval(syncInterval),
+            logger: log
+        )
 
         // Start the run loop - this blocks until the daemon is terminated
         controller.startRunLoop()
@@ -611,13 +778,14 @@ struct MailSyncCommand: ParsableCommand {
 /// Uses NSWorkspace notifications to detect system wake and trigger incremental sync.
 final class MailSyncDaemonController: NSObject {
     private let mailDatabase: MailDatabase
+    private let exportDir: String
     private let logger: (String) -> Void
     private var isSyncing = false
     private let syncQueue = DispatchQueue(label: "com.swiftea.mail.sync.daemon")
     private var syncTimer: Timer?
 
-    /// Interval between scheduled syncs (5 minutes)
-    private static let syncIntervalSeconds: TimeInterval = 300
+    /// Interval between scheduled syncs (configurable, default 5 minutes)
+    private let syncIntervalSeconds: TimeInterval
 
     /// Minimum interval between syncs to prevent rapid-fire syncing
     private static let minSyncIntervalSeconds: TimeInterval = 30
@@ -625,8 +793,10 @@ final class MailSyncDaemonController: NSObject {
     /// Track last sync time to debounce wake events
     private var lastSyncTime: Date?
 
-    init(mailDatabase: MailDatabase, logger: @escaping (String) -> Void) {
+    init(mailDatabase: MailDatabase, exportDir: String, syncIntervalSeconds: TimeInterval = 300, logger: @escaping (String) -> Void) {
         self.mailDatabase = mailDatabase
+        self.exportDir = exportDir
+        self.syncIntervalSeconds = syncIntervalSeconds
         self.logger = logger
         super.init()
 
@@ -697,11 +867,11 @@ final class MailSyncDaemonController: NSObject {
         syncTimer?.invalidate()
 
         // Schedule new timer on the main run loop
-        syncTimer = Timer.scheduledTimer(withTimeInterval: Self.syncIntervalSeconds, repeats: true) { [weak self] _ in
+        syncTimer = Timer.scheduledTimer(withTimeInterval: syncIntervalSeconds, repeats: true) { [weak self] _ in
             self?.triggerSync(reason: "scheduled")
         }
 
-        logger("Scheduled sync timer (every \(Int(Self.syncIntervalSeconds))s)")
+        logger("Scheduled sync timer (every \(Int(syncIntervalSeconds))s)")
     }
 
     // MARK: - Sync Execution
@@ -756,13 +926,16 @@ final class MailSyncDaemonController: NSObject {
         while attempt < maxRetryAttempts {
             do {
                 let sync = MailSync(mailDatabase: mailDatabase)
-                let result = try sync.sync(incremental: true)
+                let result = try sync.sync()
 
                 logger("Sync complete: +\(result.messagesAdded) ~\(result.messagesUpdated) (\(String(format: "%.2f", result.duration))s)")
 
                 if !result.errors.isEmpty {
                     logger("  \(result.errors.count) warning(s)")
                 }
+
+                // Auto-export new messages after successful sync
+                performAutoExport()
                 return
 
             } catch {
@@ -796,11 +969,30 @@ final class MailSyncDaemonController: NSObject {
             logger("ERROR: Sync failed after \(attempt) attempt(s): \(error.localizedDescription)")
         }
     }
+
+    /// Export newly synced messages to Swiftea/Mail/ as markdown files
+    private func performAutoExport() {
+        let exporter = MailExporter(mailDatabase: mailDatabase)
+
+        do {
+            let exportResult = try exporter.exportNewMessages(to: exportDir)
+
+            if exportResult.exported > 0 {
+                logger("Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/")
+            }
+
+            if !exportResult.errors.isEmpty {
+                logger("  \(exportResult.errors.count) export warning(s)")
+            }
+        } catch {
+            logger("ERROR: Auto-export failed: \(error.localizedDescription)")
+        }
+    }
 }
 
 /// Perform a sync in daemon mode with retry logic.
 /// This is a standalone function for use during daemon startup.
-private func performDaemonSync(mailDatabase: MailDatabase) {
+private func performDaemonSync(mailDatabase: MailDatabase, exportDir: String) {
     let maxRetryAttempts = 5
     let baseRetryDelay: TimeInterval = 2.0
     let maxRetryDelay: TimeInterval = 60.0
@@ -810,11 +1002,14 @@ private func performDaemonSync(mailDatabase: MailDatabase) {
     while attempt < maxRetryAttempts {
         do {
             let sync = MailSync(mailDatabase: mailDatabase)
-            let result = try sync.sync(incremental: true)
+            let result = try sync.sync()
 
             let timestamp = ISO8601DateFormatter().string(from: Date())
             fputs("[\(timestamp)] Sync complete: +\(result.messagesAdded) ~\(result.messagesUpdated) (\(String(format: "%.2f", result.duration))s)\n", stdout)
             fflush(stdout)
+
+            // Auto-export new messages after successful sync
+            performDaemonAutoExport(mailDatabase: mailDatabase, exportDir: exportDir)
             return
 
         } catch {
@@ -848,6 +1043,31 @@ private func performDaemonSync(mailDatabase: MailDatabase) {
     }
 }
 
+/// Perform auto-export in daemon mode
+private func performDaemonAutoExport(mailDatabase: MailDatabase, exportDir: String) {
+    let exporter = MailExporter(mailDatabase: mailDatabase)
+
+    do {
+        let exportResult = try exporter.exportNewMessages(to: exportDir)
+
+        if exportResult.exported > 0 {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            fputs("[\(timestamp)] Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/\n", stdout)
+            fflush(stdout)
+        }
+
+        if !exportResult.errors.isEmpty {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            fputs("[\(timestamp)]   \(exportResult.errors.count) export warning(s)\n", stdout)
+            fflush(stdout)
+        }
+    } catch {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        fputs("[\(timestamp)] ERROR: Auto-export failed: \(error.localizedDescription)\n", stderr)
+        fflush(stderr)
+    }
+}
+
 struct MailSearchCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "search",
@@ -870,10 +1090,10 @@ struct MailSearchCommand: ParsableCommand {
               date:YYYY-MM-DD  - Messages received on specific date
 
             EXAMPLES:
-              swiftea mail search "from:alice@example.com project"
-              swiftea mail search "is:unread is:flagged"
-              swiftea mail search "after:2024-01-01 before:2024-02-01"
-              swiftea mail search "mailbox:INBOX from:support"
+              swea mail search "from:alice@example.com project"
+              swea mail search "is:unread is:flagged"
+              swea mail search "after:2024-01-01 before:2024-02-01"
+              swea mail search "mailbox:INBOX from:support"
 
             Use quotes around values with spaces: from:"Alice Smith"
             """
@@ -1164,9 +1384,20 @@ public enum OutputFormat: String, CaseIterable, ExpressibleByArgument {
 struct MailExportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "export",
-        abstract: "Export mail messages to markdown or JSON",
+        abstract: "Export synced messages to markdown or JSON files",
         discussion: """
-            Export mail messages in markdown or JSON format.
+            Creates .md or .json files from synced messages. Note: 'swea mail sync'
+            now auto-exports new messages, so manual export is usually not needed.
+
+            Default output: Swiftea/Mail/ (same as auto-export)
+            Markdown files include YAML frontmatter for Obsidian compatibility.
+
+            EXAMPLES
+              swea mail export                              # Export all (up to limit)
+              swea mail export --query "from:alice"         # Export matching messages
+              swea mail export --output ~/Obsidian/Mail     # Export to custom folder
+              swea mail export --format json                # Export as JSON
+              swea mail export --include-attachments        # Also save attachments
 
             Use --include-attachments to also extract and save attachment files.
             Attachments are saved in an 'attachments/<message-id>/' subdirectory.
@@ -1179,7 +1410,7 @@ struct MailExportCommand: ParsableCommand {
     @Option(name: .long, help: "Message ID to export (or 'all' for all synced messages)")
     var id: String = "all"
 
-    @Option(name: .shortAndLong, help: "Output directory (default: vault exports folder)")
+    @Option(name: .shortAndLong, help: "Output directory (default: Swiftea/Mail/)")
     var output: String?
 
     @Option(name: .long, help: "Search query to filter messages for export")
@@ -1202,12 +1433,12 @@ struct MailExportCommand: ParsableCommand {
     func run() throws {
         let vault = try VaultContext.require()
 
-        // Determine output directory
+        // Determine output directory (default: Swiftea/Mail/ for Obsidian compatibility)
         let outputDir: String
         if let specifiedOutput = output {
             outputDir = specifiedOutput
         } else {
-            outputDir = (vault.rootPath as NSString).appendingPathComponent("exports/mail")
+            outputDir = (vault.dataFolderPath as NSString).appendingPathComponent("Mail")
         }
 
         // Create output directory if needed
@@ -1409,6 +1640,7 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
     case invalidLimit
     case emptyRecipient
     case watchAndStopMutuallyExclusive
+    case invalidInterval(minimum: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -1418,6 +1650,8 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
             return "--to requires a non-empty email address"
         case .watchAndStopMutuallyExclusive:
             return "--watch and --stop cannot be used together"
+        case .invalidInterval(let minimum):
+            return "--interval must be at least \(minimum) seconds"
         }
     }
 }

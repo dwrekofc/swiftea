@@ -5,17 +5,18 @@ import SwiftEAKit
 public struct Vault: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "vault",
-        abstract: "Manage swiftea vaults",
-        subcommands: [VaultInit.self, VaultStatus.self, VaultBind.self, VaultUnbind.self]
+        abstract: "Manage swea vaults",
+        subcommands: [Init.self, VaultStatus.self, VaultBind.self, VaultUnbind.self]
     )
 
     public init() {}
 }
 
-struct VaultInit: ParsableCommand {
-    static let configuration = CommandConfiguration(
+/// Top-level init command (also available as `vault init` for backwards compatibility)
+public struct Init: ParsableCommand {
+    public static let configuration = CommandConfiguration(
         commandName: "init",
-        abstract: "Initialize a new vault"
+        abstract: "Initialize a new vault in the current directory"
     )
 
     @Option(name: .long, help: "Path where the vault will be created (defaults to current directory)")
@@ -24,7 +25,9 @@ struct VaultInit: ParsableCommand {
     @Flag(name: .long, help: "Reinitialize even if vault already exists")
     var force: Bool = false
 
-    func run() throws {
+    public init() {}
+
+    public func run() throws {
         let vaultPath = path ?? FileManager.default.currentDirectoryPath
         let manager = VaultManager()
 
@@ -46,8 +49,15 @@ struct VaultInit: ParsableCommand {
             print("Vault version: \(config.version)")
             print("")
             print("Next steps:")
-            print("  1. Bind accounts with: swiftea vault bind")
-            print("  2. Sync data with: swiftea sync")
+            print("  1. Bind accounts with: swea vault bind")
+            print("  2. Sync mail data: swea mail sync")
+            print("     (or start automatic sync: swea mail sync --watch)")
+            print("  3. Export to files: swea mail export")
+            print("")
+            print("Folder structure:")
+            print("  Swiftea/Mail/      - For exported mail files (.md)")
+            print("  exports/mail/      - Default export location")
+            print("  .swiftea/mail.db   - Synced mail database")
         } catch let error as VaultError {
             throw ValidationError(error.localizedDescription)
         }
@@ -69,7 +79,7 @@ struct VaultStatus: ParsableCommand {
 
         guard manager.isVault(at: vaultPath) else {
             print("Not a vault: \(vaultPath)")
-            print("Run 'swiftea vault init' to create a vault here.")
+            print("Run 'swea init' to create a vault here.")
             throw ExitCode.failure
         }
 
@@ -85,7 +95,7 @@ struct VaultStatus: ParsableCommand {
 
             if config.accounts.isEmpty {
                 print("No accounts bound.")
-                print("Run 'swiftea vault bind' to bind accounts.")
+                print("Run 'swea vault bind' to bind accounts.")
             } else {
                 print("Bound accounts (\(config.accounts.count)):")
                 for account in config.accounts {
@@ -122,7 +132,7 @@ struct VaultBind: ParsableCommand {
         // Verify vault exists
         guard vaultManager.isVault(at: vaultPath) else {
             print("Not a vault: \(vaultPath)")
-            print("Run 'swiftea vault init' to create a vault first.")
+            print("Run 'swea init' to create a vault first.")
             throw ExitCode.failure
         }
 

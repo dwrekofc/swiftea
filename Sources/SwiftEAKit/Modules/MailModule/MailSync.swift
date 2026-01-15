@@ -118,8 +118,10 @@ public final class MailSync: @unchecked Sendable {
     }
 
     /// Run a sync from Apple Mail to the mirror database
-    /// - Parameter incremental: If true, only sync changes since last sync (faster). If false, full rebuild.
-    public func sync(incremental: Bool = false) throws -> SyncResult {
+    /// - Parameter forceFullSync: If true, force a full sync even if previous sync exists. If false, auto-detect:
+    ///   - If last_sync_time exists in database, do incremental sync (only changes since last sync)
+    ///   - If no previous sync exists, do full sync
+    public func sync(forceFullSync: Bool = false) throws -> SyncResult {
         let startTime = Date()
         var errors: [String] = []
         var messagesProcessed = 0
@@ -129,12 +131,17 @@ public final class MailSync: @unchecked Sendable {
         var messagesUnchanged = 0
         var mailboxesProcessed = 0
 
+        // Auto-detect incremental mode: use incremental if we have a previous sync and not forcing full
+        let lastSyncTime = try mailDatabase.getLastSyncTime()
+        let useIncremental = !forceFullSync && lastSyncTime != nil
+
         // Record sync start
-        try mailDatabase.recordSyncStart(isIncremental: incremental)
+        try mailDatabase.recordSyncStart(isIncremental: useIncremental)
 
         do {
             return try performSync(
-                incremental: incremental,
+                useIncremental: useIncremental,
+                lastSyncTime: lastSyncTime,
                 startTime: startTime,
                 errors: &errors,
                 messagesProcessed: &messagesProcessed,
@@ -153,7 +160,8 @@ public final class MailSync: @unchecked Sendable {
 
     /// Internal sync implementation
     private func performSync(
-        incremental: Bool,
+        useIncremental: Bool,
+        lastSyncTime: Date?,
         startTime: Date,
         errors: inout [String],
         messagesProcessed: inout Int,
@@ -172,22 +180,16 @@ public final class MailSync: @unchecked Sendable {
         try connectToSource(path: info.envelopeIndexPath)
         defer { disconnectSource() }
 
-        // Get last sync time for incremental
-        var lastSyncTime: Date? = nil
-        if incremental {
-            lastSyncTime = try mailDatabase.getLastSyncTime()
-        }
-
         // Sync mailboxes first
         reportProgress(.syncingMailboxes, 0, 1, "Syncing mailboxes...")
         let mailboxCount = try syncMailboxes()
         mailboxesProcessed = mailboxCount
 
-        if incremental && lastSyncTime != nil {
+        if useIncremental, let syncTime = lastSyncTime {
             // Incremental sync: new messages + status changes + deletions
             let result = try performIncrementalSync(
                 info: info,
-                lastSyncTime: lastSyncTime!,
+                lastSyncTime: syncTime,
                 errors: &errors
             )
             messagesProcessed = result.processed
@@ -223,6 +225,8 @@ public final class MailSync: @unchecked Sendable {
             }
 
             // Phase 2: Batch insert all processed messages
+            // Note: FTS triggers are disabled during batch insert and index is rebuilt after
+            // This prevents the O(n^2) slowdown from per-row FTS updates on second sync
             reportProgress(.syncingMessages, totalMessages, totalMessages, "Writing \(processedMessages.count) messages to database...")
 
             let batchConfig = MailDatabase.BatchInsertConfig(batchSize: options.databaseBatchSize)
@@ -232,6 +236,9 @@ public final class MailSync: @unchecked Sendable {
             messagesUpdated = batchResult.updated
             messagesProcessed = batchResult.inserted + batchResult.updated
             errors.append(contentsOf: batchResult.errors)
+
+            // Report indexing phase (FTS rebuild happens in batchUpsertMessages defer block)
+            reportProgress(.indexing, messagesProcessed, messagesProcessed, "Full-text index rebuilt")
         }
 
         reportProgress(.complete, messagesProcessed, messagesProcessed, "Sync complete")
@@ -245,7 +252,7 @@ public final class MailSync: @unchecked Sendable {
             mailboxesProcessed: mailboxesProcessed,
             errors: errors,
             duration: Date().timeIntervalSince(startTime),
-            isIncremental: incremental
+            isIncremental: useIncremental
         )
 
         // Record successful sync completion with all stats
@@ -298,6 +305,7 @@ public final class MailSync: @unchecked Sendable {
             }
 
             // Batch insert all processed messages
+            // Note: FTS triggers are disabled during batch insert and index is rebuilt after
             let batchConfig = MailDatabase.BatchInsertConfig(batchSize: options.databaseBatchSize)
             let batchResult = try mailDatabase.batchUpsertMessages(processedMessages, config: batchConfig)
 
@@ -305,6 +313,9 @@ public final class MailSync: @unchecked Sendable {
             result.updated = batchResult.updated
             result.processed = batchResult.inserted + batchResult.updated
             errors.append(contentsOf: batchResult.errors)
+
+            // Report indexing phase (FTS rebuild happens in batchUpsertMessages defer block)
+            reportProgress(.indexing, result.processed, result.processed, "Full-text index rebuilt")
         }
 
         // Phase 2: Check for status changes on existing messages (read/flagged)
@@ -428,6 +439,10 @@ public final class MailSync: @unchecked Sendable {
             ])
             throw MailSyncError.sourceConnectionFailed(underlying: error)
         }
+
+        // Set busy timeout to prevent indefinite hangs when Mail.app holds locks
+        // 5 second timeout - if locked longer, fail with SQLITE_BUSY rather than hang
+        sqlite3_busy_timeout(db, 5000)
 
         sourceDb = db
     }

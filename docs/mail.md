@@ -2,6 +2,58 @@
 
 The mail module provides read-only access to Apple Mail data with sync, search, and export capabilities.
 
+## Quick Start
+
+Getting started with mail sync involves three steps:
+
+```bash
+# 1. Initialize a vault (if not already done)
+swea init
+
+# 2. Sync mail from Apple Mail to the local database
+swea mail sync
+
+# 3. Export messages to markdown files (for use in Obsidian, etc.)
+swea mail export
+```
+
+For automatic sync, use watch mode to keep your mail mirror up to date:
+
+```bash
+# Start automatic sync (syncs every 5 minutes + on system wake)
+swea mail sync --watch
+
+# For near-realtime sync, use a shorter interval (minimum 30 seconds)
+swea mail sync --watch --interval 60
+
+# Check sync status
+swea mail sync --status
+
+# Stop automatic sync
+swea mail sync --stop
+```
+
+**Key commands at a glance:**
+
+| Command | Purpose |
+|---------|---------|
+| `swea mail sync` | Sync mail data (incremental by default) |
+| `swea mail sync --full` | Full resync from scratch |
+| `swea mail sync --watch` | Start automatic background sync |
+| `swea mail search "query"` | Search synced messages |
+| `swea mail show <id>` | View a single message |
+| `swea mail export` | Export messages to markdown/JSON files |
+
+## Understanding the Workflow
+
+The mail module works in two stages:
+
+1. **Sync** (`swea mail sync`) - Reads Apple Mail's database and mirrors message metadata and content to a local SQLite database at `<vault>/.swiftea/mail.db`. This is fast and gives you search capabilities.
+
+2. **Export** (`swea mail export`) - Writes individual `.md` or `.json` files from the synced database to `<vault>/Swiftea/Mail/` (or a custom location). Use this when you want files you can open in Obsidian or other tools.
+
+**Why two steps?** The sync step is designed to run frequently (even automatically with `--watch`). The export step is heavier and creates files, so you run it when you actually need the files.
+
 ## Phase 1 Scope
 
 Phase 1 implements a **read-only mail mirror** with the following capabilities:
@@ -13,7 +65,7 @@ Phase 1 implements a **read-only mail mirror** with the following capabilities:
 | Full-text search with structured filters | Implemented |
 | Markdown and JSON export | Implemented |
 | Attachment extraction | Implemented |
-| Configuration via `swiftea config` | Implemented |
+| Configuration via `swea config` | Implemented |
 | Mail actions (archive/delete/move/flag) | Placeholder only |
 | Email threading | Not yet implemented |
 
@@ -43,68 +95,93 @@ To grant permission:
 
 1. Open **System Settings** > **Privacy & Security** > **Full Disk Access**
 2. Click the **+** button
-3. Navigate to and select the `swiftea` executable (or Terminal.app if running from terminal)
+3. Navigate to and select the `swea` executable (or Terminal.app if running from terminal)
 4. Toggle the permission **on**
 
 If permission is missing, sync commands will fail with a permission error and guidance.
 
 ## Commands
 
-### swiftea mail sync
+### swea mail sync
 
 Sync mail data from Apple Mail to the local mirror database.
 
 ```bash
-# Full sync (first time or refresh)
-swiftea mail sync
+# Incremental sync (default - only new/changed messages)
+swea mail sync
 
-# Incremental sync (only changed messages)
-swiftea mail sync --incremental
+# Full resync (first time or to refresh everything)
+swea mail sync --full
 
-# Verbose output
-swiftea mail sync --verbose
+# Verbose output (shows progress)
+swea mail sync --verbose
 ```
 
-### swiftea mail sync --watch
+**Note**: Sync is incremental by default - it only processes messages that changed since the last sync. Use `--full` to resync everything from scratch.
 
-Install and start a persistent daemon that keeps the mirror in sync.
+### swea mail sync --watch (Recommended for Regular Use)
+
+For hands-off sync, install the watch daemon. It runs in the background and keeps your mail mirror up to date automatically.
 
 ```bash
-# Start the watch daemon
-swiftea mail sync --watch
+# Start automatic sync daemon (default: every 5 minutes)
+swea mail sync --watch
 
-# Check daemon status
-swiftea mail sync --status
+# Near-realtime sync (every 1 minute)
+swea mail sync --watch --interval 60
 
-# Stop the watch daemon
-swiftea mail sync --stop
+# Near-realtime sync (every 30 seconds - minimum)
+swea mail sync --watch --interval 30
+
+# Check daemon status and last sync time
+swea mail sync --status
+
+# Stop the daemon
+swea mail sync --stop
 ```
 
-The watch daemon:
-- Runs as a LaunchAgent (`com.swiftea.mail.sync`)
-- Syncs every 5 minutes
-- Syncs immediately when the system wakes from sleep
-- Retries with exponential backoff on transient errors
-- Logs to `<vault>/.swiftea/logs/mail-sync.log`
+**The `--interval` option:**
+- Configures how often the daemon syncs (in seconds)
+- Default: 300 seconds (5 minutes)
+- Minimum: 30 seconds
+- For near-realtime sync, use `--interval 60` (1 minute) or `--interval 30` (30 seconds)
+- Shorter intervals mean faster updates but more CPU/disk usage
 
-### swiftea mail search
+**What the watch daemon does:**
+- Runs as a macOS LaunchAgent (`com.swiftea.mail.sync`)
+- Performs incremental sync at the configured interval
+- Syncs immediately when your Mac wakes from sleep (catches up on new mail)
+- Handles transient errors with automatic retry
+- Logs activity to `<vault>/.swiftea/logs/mail-sync.log`
+
+**When to use watch mode:**
+- You want your mail database always up to date
+- You use the search feature frequently
+- You run periodic exports (e.g., via cron or manually)
+
+**Choosing an interval:**
+- **5 minutes (default)**: Good balance for most users
+- **1 minute**: Near-realtime for active email monitoring
+- **30 seconds**: Fastest updates, slightly higher resource usage
+
+### swea mail search
 
 Search for messages using full-text search and structured filters.
 
 ```bash
 # Simple text search
-swiftea mail search "quarterly report"
+swea mail search "quarterly report"
 
 # Search with structured filters
-swiftea mail search "from:alice@example.com project"
-swiftea mail search "is:unread is:flagged"
-swiftea mail search "mailbox:INBOX after:2024-01-01"
+swea mail search "from:alice@example.com project"
+swea mail search "is:unread is:flagged"
+swea mail search "mailbox:INBOX after:2024-01-01"
 
 # Output as JSON
-swiftea mail search "budget" --json
+swea mail search "budget" --json
 
 # Limit results
-swiftea mail search "invoice" --limit 50
+swea mail search "invoice" --limit 50
 ```
 
 #### Structured Filters
@@ -126,52 +203,61 @@ swiftea mail search "invoice" --limit 50
 
 Combine filters in a single query:
 ```bash
-swiftea mail search "from:support is:unread after:2024-01-01 has:attachments"
+swea mail search "from:support is:unread after:2024-01-01 has:attachments"
 ```
 
-### swiftea mail show
+### swea mail show
 
 Display a single message by ID.
 
 ```bash
 # Show message in text format
-swiftea mail show abc123def456
+swea mail show abc123def456
 
 # Show HTML body instead of plain text
-swiftea mail show abc123def456 --html
+swea mail show abc123def456 --html
 
 # Show raw .emlx content
-swiftea mail show abc123def456 --raw
+swea mail show abc123def456 --raw
 
 # Output as JSON
-swiftea mail show abc123def456 --json
+swea mail show abc123def456 --json
 ```
 
-### swiftea mail export
+### swea mail export
 
-Export messages to markdown or JSON format.
+Export messages from the synced database to markdown or JSON files.
+
+**Important**: This command creates the actual `.md` files. Running `swea mail sync` alone only populates the database - you must run `swea mail export` to get files you can open in Obsidian or other tools.
+
+Default export location: `<vault>/exports/mail/`
 
 ```bash
-# Export all synced messages to markdown
-swiftea mail export
+# Export all synced messages to markdown files
+swea mail export
 
 # Export a specific message
-swiftea mail export --id abc123def456
+swea mail export --id abc123def456
 
 # Export messages matching a query
-swiftea mail export --query "from:alice"
+swea mail export --query "from:alice"
 
 # Export to JSON format
-swiftea mail export --format json
+swea mail export --format json
 
-# Export to custom directory
-swiftea mail export --output ~/Documents/mail-exports
+# Export to custom directory (e.g., your Obsidian vault)
+swea mail export --output ~/Documents/Obsidian/Mail
 
 # Include attachment extraction
-swiftea mail export --include-attachments
+swea mail export --include-attachments
 
 # Limit export count
-swiftea mail export --limit 500
+swea mail export --limit 500
+```
+
+**Tip**: For Obsidian users, export directly to your vault:
+```bash
+swea mail export --output ~/Documents/ObsidianVault/Mail
 ```
 
 #### Export Format: Markdown
@@ -225,17 +311,17 @@ When using `--include-attachments`, attachments are saved to:
 
 ## Configuration
 
-Use `swiftea config` to manage mail settings.
+Use `swea config` to manage mail settings.
 
 ```bash
 # View current mail settings
-swiftea config get modules.mail
+swea config get modules.mail
 
 # Set custom Envelope Index path
-swiftea config set modules.mail.envelopeIndexPath "/path/to/Envelope Index"
+swea config set modules.mail.envelopeIndexPath "/path/to/Envelope Index"
 
 # Set default export format
-swiftea config set modules.mail.exportFormat "json"
+swea config set modules.mail.exportFormat "json"
 ```
 
 ### Configuration Keys
@@ -279,7 +365,7 @@ ls ~/Library/Mail/
 
 If you see `V10`, `V11`, etc., the auto-detection should find it. If not, set the path manually:
 ```bash
-swiftea config set modules.mail.envelopeIndexPath "~/Library/Mail/V10/MailData/Envelope Index"
+swea config set modules.mail.envelopeIndexPath "~/Library/Mail/V10/MailData/Envelope Index"
 ```
 
 ### "Database is locked"
@@ -293,13 +379,13 @@ The watch daemon uses retry with backoff for transient lock errors. If you see r
 
 Check status:
 ```bash
-swiftea mail sync --status
+swea mail sync --status
 ```
 
 If the daemon crashed, restart it:
 ```bash
-swiftea mail sync --stop
-swiftea mail sync --watch
+swea mail sync --stop
+swea mail sync --watch
 ```
 
 Check logs:

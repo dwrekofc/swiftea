@@ -262,10 +262,10 @@ final class MailSyncTests: XCTestCase {
         let mockDiscovery = EnvelopeIndexDiscovery(fileManager: mockFileManager)
         let sync = MailSync(mailDatabase: mailDatabase, discovery: mockDiscovery)
 
-        // Verify that incremental parameter is accepted
+        // Verify that forceFullSync parameter is accepted
         // Actual behavior requires Apple Mail access
-        XCTAssertThrowsError(try sync.sync(incremental: true))
-        XCTAssertThrowsError(try sync.sync(incremental: false))
+        XCTAssertThrowsError(try sync.sync(forceFullSync: true))
+        XCTAssertThrowsError(try sync.sync(forceFullSync: false))
     }
 
     // MARK: - Last Sync Time Integration
