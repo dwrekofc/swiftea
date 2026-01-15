@@ -105,6 +105,7 @@ public struct Mail: ParsableCommand {
             MailSearchCommand.self,
             MailShowCommand.self,
             MailExportCommand.self,
+            MailExportThreadsCommand.self,
             // Action commands
             MailArchiveCommand.self,
             MailDeleteCommand.self,
@@ -1826,6 +1827,260 @@ struct MailExportCommand: ParsableCommand {
             printError("Failed to serialize thread to JSON")
             throw ExitCode.failure
         }
+    }
+
+    private func formatSender(_ message: MailMessage) -> String {
+        if let name = message.senderName, let email = message.senderEmail {
+            return "\(name) <\(email)>"
+        } else if let email = message.senderEmail {
+            return email
+        } else if let name = message.senderName {
+            return name
+        }
+        return "Unknown"
+    }
+
+    private func escapeYaml(_ text: String) -> String {
+        text.replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private func stripHtml(_ html: String) -> String {
+        var result = html
+        result = result.replacingOccurrences(of: "<script[^>]*>.*?</script>", with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: "<style[^>]*>.*?</style>", with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: "&nbsp;", with: " ")
+        result = result.replacingOccurrences(of: "&amp;", with: "&")
+        result = result.replacingOccurrences(of: "&lt;", with: "<")
+        result = result.replacingOccurrences(of: "&gt;", with: ">")
+        result = result.replacingOccurrences(of: "&quot;", with: "\"")
+        result = result.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression)
+        result = result.replacingOccurrences(of: "</p>", with: "\n\n")
+        result = result.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Mail Export Threads Command
+
+struct MailExportThreadsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "export-threads",
+        abstract: "Export entire email threads as single units",
+        discussion: """
+            Exports complete email threads (conversations) to markdown or JSON files.
+            Each thread is exported as a single file containing all messages in the
+            conversation, ordered chronologically.
+
+            EXAMPLES
+              swea mail export-threads                          # Export all threads (up to limit)
+              swea mail export-threads --thread-id abc123       # Export specific thread
+              swea mail export-threads --format json            # Export as JSON
+              swea mail export-threads --output ~/Threads       # Export to custom folder
+              swea mail export-threads --limit 50               # Export up to 50 threads
+            """
+    )
+
+    @Option(name: .long, help: "Export format: \(OutputFormat.allValueStrings.joined(separator: ", "))")
+    var format: OutputFormat = .markdown
+
+    @Option(name: .long, help: "Specific thread ID to export")
+    var threadId: String?
+
+    @Option(name: .shortAndLong, help: "Output directory (default: Swiftea/Threads/)")
+    var output: String?
+
+    @Option(name: .long, help: "Maximum threads to export (default: 100)")
+    var limit: Int = 100
+
+    func validate() throws {
+        if limit <= 0 {
+            throw MailValidationError.invalidLimit
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // Determine output directory (default: Swiftea/Threads/)
+        let outputDir: String
+        if let specifiedOutput = output {
+            outputDir = specifiedOutput
+        } else {
+            outputDir = (vault.dataFolderPath as NSString).appendingPathComponent("Threads")
+        }
+
+        // Create output directory if needed
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: outputDir) {
+            try fileManager.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        }
+
+        // Open mail database
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        // Get threads to export - handle single thread vs all threads differently
+        // to avoid type annotation issues with SwiftEAKit.Thread shadowing
+        if let specificThreadId = threadId {
+            // Export single thread
+            guard let thread = try mailDatabase.getThread(id: specificThreadId) else {
+                printError("Thread not found: \(specificThreadId)")
+                throw ExitCode.failure
+            }
+
+            let filename = "thread-\(thread.id).\(format.fileExtension)"
+            let filePath = (outputDir as NSString).appendingPathComponent(filename)
+            let messages = try mailDatabase.getMessagesInThreadViaJunction(threadId: thread.id, limit: 10000)
+
+            let content: String
+            if format.isJson {
+                content = formatThreadAsJson(threadId: thread.id, subject: thread.subject, participantCount: thread.participantCount, messageCount: thread.messageCount, firstDate: thread.firstDate, lastDate: thread.lastDate, messages: messages)
+            } else {
+                content = formatThreadAsMarkdown(threadId: thread.id, subject: thread.subject, participantCount: thread.participantCount, messageCount: thread.messageCount, firstDate: thread.firstDate, lastDate: thread.lastDate, messages: messages)
+            }
+
+            try content.write(toFile: filePath, atomically: true, encoding: .utf8)
+            print("Exported 1 thread to \(outputDir)")
+            return
+        }
+
+        // Export all threads (up to limit)
+        let threads = try mailDatabase.getThreads(limit: limit)
+
+        if threads.isEmpty {
+            printError("No threads to export")
+            return
+        }
+
+        print("Exporting \(threads.count) thread(s) to \(outputDir)...")
+
+        var exportedCount = 0
+
+        for thread in threads {
+            let filename = "thread-\(thread.id).\(format.fileExtension)"
+            let filePath = (outputDir as NSString).appendingPathComponent(filename)
+
+            // Get all messages in the thread, sorted by date
+            let messages = try mailDatabase.getMessagesInThreadViaJunction(threadId: thread.id, limit: 10000)
+
+            let content: String
+            if format.isJson {
+                content = formatThreadAsJson(threadId: thread.id, subject: thread.subject, participantCount: thread.participantCount, messageCount: thread.messageCount, firstDate: thread.firstDate, lastDate: thread.lastDate, messages: messages)
+            } else {
+                content = formatThreadAsMarkdown(threadId: thread.id, subject: thread.subject, participantCount: thread.participantCount, messageCount: thread.messageCount, firstDate: thread.firstDate, lastDate: thread.lastDate, messages: messages)
+            }
+
+            try content.write(toFile: filePath, atomically: true, encoding: .utf8)
+            exportedCount += 1
+        }
+
+        print("Exported \(exportedCount) thread(s) to \(outputDir)")
+    }
+
+    private func formatThreadAsJson(threadId: String, subject: String?, participantCount: Int, messageCount: Int, firstDate: Date?, lastDate: Date?, messages: [MailMessage]) -> String {
+        let threadTotal = messages.count
+
+        // Build nested messages array with thread position
+        var messagesArray: [[String: Any]] = []
+        for (index, message) in messages.enumerated() {
+            let position = index + 1  // 1-indexed position
+            messagesArray.append(messageToDict(message, threadPosition: position, threadTotal: threadTotal))
+        }
+
+        // Build thread export structure
+        let threadExport: [String: Any] = [
+            "thread_id": threadId,
+            "subject": subject ?? "",
+            "participant_count": participantCount,
+            "message_count": messageCount,
+            "first_date": firstDate?.iso8601String ?? "",
+            "last_date": lastDate?.iso8601String ?? "",
+            "messages": messagesArray
+        ]
+
+        if let data = try? JSONSerialization.data(withJSONObject: threadExport, options: [.prettyPrinted, .sortedKeys]),
+           let jsonString = String(data: data, encoding: .utf8) {
+            return jsonString
+        }
+        return "{}"
+    }
+
+    private func formatThreadAsMarkdown(threadId: String, subject: String?, participantCount: Int, messageCount: Int, firstDate: Date?, lastDate: Date?, messages: [MailMessage]) -> String {
+        var lines: [String] = []
+        let threadTotal = messages.count
+
+        // YAML frontmatter with thread metadata
+        lines.append("---")
+        lines.append("thread_id: \"\(threadId)\"")
+        lines.append("subject: \"\(escapeYaml(subject ?? ""))\"")
+        lines.append("participant_count: \(participantCount)")
+        lines.append("message_count: \(messageCount)")
+        if let firstDate = firstDate {
+            lines.append("first_date: \(firstDate.iso8601String)")
+        }
+        if let lastDate = lastDate {
+            lines.append("last_date: \(lastDate.iso8601String)")
+        }
+        lines.append("---")
+        lines.append("")
+
+        // Thread heading
+        lines.append("# Thread: \(subject ?? "(No Subject)")")
+        lines.append("")
+        lines.append("**\(threadTotal) message(s) between \(participantCount) participant(s)**")
+        lines.append("")
+
+        // Each message in the thread
+        for (index, message) in messages.enumerated() {
+            let position = index + 1
+            lines.append("---")
+            lines.append("")
+            lines.append("## Message \(position) of \(threadTotal)")
+            lines.append("")
+            lines.append("**From:** \(formatSender(message))")
+            if let date = message.dateSent {
+                lines.append("**Date:** \(date.iso8601String)")
+            }
+            lines.append("**Subject:** \(message.subject)")
+            lines.append("")
+
+            // Body content
+            if let textBody = message.bodyText, !textBody.isEmpty {
+                lines.append(textBody)
+            } else if let htmlBody = message.bodyHtml {
+                lines.append(stripHtml(htmlBody))
+            } else {
+                lines.append("*(No message body)*")
+            }
+            lines.append("")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func messageToDict(_ message: MailMessage, threadPosition: Int, threadTotal: Int) -> [String: Any] {
+        return [
+            "id": message.id,
+            "messageId": message.messageId ?? "",
+            "subject": message.subject,
+            "from": [
+                "name": message.senderName ?? "",
+                "email": message.senderEmail ?? ""
+            ],
+            "date": message.dateSent?.iso8601String ?? "",
+            "mailbox": message.mailboxName ?? "",
+            "isRead": message.isRead,
+            "isFlagged": message.isFlagged,
+            "hasAttachments": message.hasAttachments,
+            "bodyText": message.bodyText ?? "",
+            "bodyHtml": message.bodyHtml ?? "",
+            "thread_id": message.threadId ?? "",
+            "thread_position": threadPosition,
+            "thread_total": threadTotal
+        ]
     }
 
     private func formatSender(_ message: MailMessage) -> String {
