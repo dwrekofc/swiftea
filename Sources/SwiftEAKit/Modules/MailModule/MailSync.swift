@@ -59,6 +59,75 @@ public enum SyncPhase: String, Sendable {
     case complete = "Complete"
 }
 
+/// Types of mailboxes in Apple Mail
+public enum MailboxType: String, Sendable {
+    case inbox
+    case archive
+    case trash
+    case sent
+    case drafts
+    case junk
+    case other
+}
+
+/// Classify a mailbox based on its URL and name
+/// - Parameters:
+///   - url: The mailbox URL (e.g., "mailbox://account/INBOX" or file path)
+///   - name: The mailbox name (fallback if URL doesn't contain useful info)
+/// - Returns: The classified mailbox type
+public func classifyMailbox(url: String?, name: String?) -> MailboxType {
+    // Extract the mailbox identifier from URL or use name
+    let identifier: String
+    if let url = url {
+        // Extract last path component from URL
+        if let lastComponent = url.components(separatedBy: "/").last, !lastComponent.isEmpty {
+            identifier = lastComponent
+        } else if let name = name {
+            identifier = name
+        } else {
+            return .other
+        }
+    } else if let name = name {
+        identifier = name
+    } else {
+        return .other
+    }
+
+    let lowercased = identifier.lowercased()
+
+    // Check for INBOX (case-insensitive)
+    if lowercased == "inbox" {
+        return .inbox
+    }
+
+    // Check for Archive (various names used by different providers)
+    if lowercased == "archive" || lowercased == "all mail" || lowercased == "all" || lowercased.contains("archive") {
+        return .archive
+    }
+
+    // Check for Trash/Deleted
+    if lowercased == "trash" || lowercased == "deleted" || lowercased == "deleted messages" || lowercased.contains("trash") {
+        return .trash
+    }
+
+    // Check for Sent
+    if lowercased == "sent" || lowercased == "sent messages" || lowercased == "sent mail" || lowercased.contains("sent") {
+        return .sent
+    }
+
+    // Check for Drafts
+    if lowercased == "drafts" || lowercased == "draft" || lowercased.contains("draft") {
+        return .drafts
+    }
+
+    // Check for Junk/Spam
+    if lowercased == "junk" || lowercased == "spam" || lowercased == "junk e-mail" || lowercased.contains("junk") || lowercased.contains("spam") {
+        return .junk
+    }
+
+    return .other
+}
+
 /// Result of a sync operation
 public struct SyncResult: Sendable {
     public let messagesProcessed: Int
@@ -581,17 +650,20 @@ public final class MailSync: @unchecked Sendable {
         // Query message columns with JOINs to resolve subject/sender foreign keys
         // The messages.subject and messages.sender columns are FK integers, not text
         // Attachment detection is done during .emlx parsing instead
+        // Filter to INBOX only: we join with mailboxes and only select messages from INBOX folders
         var sql = """
             SELECT m.ROWID, s.subject, a.address AS sender_email, a.comment AS sender_name,
                    m.date_received, m.date_sent, m.message_id, m.mailbox, m.read, m.flagged
             FROM messages m
             LEFT JOIN subjects s ON m.subject = s.ROWID
             LEFT JOIN addresses a ON m.sender = a.ROWID
+            INNER JOIN mailboxes mb ON m.mailbox = mb.ROWID
+            WHERE LOWER(mb.url) LIKE '%/inbox' OR LOWER(mb.url) LIKE '%/inbox/%'
             """
 
         if let sinceDate = since {
             let timestamp = sinceDate.timeIntervalSince1970
-            sql += " WHERE m.date_received > \(timestamp)"
+            sql += " AND m.date_received > \(timestamp)"
         }
 
         sql += " ORDER BY m.date_received DESC"

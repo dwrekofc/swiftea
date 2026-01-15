@@ -609,4 +609,95 @@ This is a simple test email body.
         XCTAssertTrue(incrementalResult.isIncremental)
         XCTAssertFalse(fullResult.isIncremental)
     }
+
+    // MARK: - MailboxType Tests
+
+    func testMailboxTypeRawValues() {
+        XCTAssertEqual(MailboxType.inbox.rawValue, "inbox")
+        XCTAssertEqual(MailboxType.archive.rawValue, "archive")
+        XCTAssertEqual(MailboxType.trash.rawValue, "trash")
+        XCTAssertEqual(MailboxType.sent.rawValue, "sent")
+        XCTAssertEqual(MailboxType.drafts.rawValue, "drafts")
+        XCTAssertEqual(MailboxType.junk.rawValue, "junk")
+        XCTAssertEqual(MailboxType.other.rawValue, "other")
+    }
+
+    // MARK: - classifyMailbox Tests
+
+    func testClassifyMailboxInbox() {
+        // Test case-insensitive INBOX detection
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/INBOX", name: nil), .inbox)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/inbox", name: nil), .inbox)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Inbox", name: nil), .inbox)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "INBOX"), .inbox)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "inbox"), .inbox)
+    }
+
+    func testClassifyMailboxArchive() {
+        // Test Archive folder detection
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Archive", name: nil), .archive)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/All Mail", name: nil), .archive)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Archive"), .archive)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "All Mail"), .archive)
+    }
+
+    func testClassifyMailboxTrash() {
+        // Test Trash folder detection
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Trash", name: nil), .trash)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Deleted", name: nil), .trash)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Trash"), .trash)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Deleted Messages"), .trash)
+    }
+
+    func testClassifyMailboxSent() {
+        // Test Sent folder detection
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Sent", name: nil), .sent)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Sent Messages", name: nil), .sent)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Sent"), .sent)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Sent Mail"), .sent)
+    }
+
+    func testClassifyMailboxDrafts() {
+        // Test Drafts folder detection
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Drafts", name: nil), .drafts)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Drafts"), .drafts)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Draft"), .drafts)
+    }
+
+    func testClassifyMailboxJunk() {
+        // Test Junk/Spam folder detection
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Junk", name: nil), .junk)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Spam", name: nil), .junk)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Junk"), .junk)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Junk E-mail"), .junk)
+    }
+
+    func testClassifyMailboxOther() {
+        // Test custom folders return .other
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Work", name: nil), .other)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Personal", name: nil), .other)
+        XCTAssertEqual(classifyMailbox(url: nil, name: "Projects"), .other)
+        XCTAssertEqual(classifyMailbox(url: nil, name: nil), .other)
+    }
+
+    func testClassifyMailboxIsCaseInsensitive() {
+        // Test that classification is case-insensitive
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/INBOX", name: nil), .inbox)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/inbox", name: nil), .inbox)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/InBoX", name: nil), .inbox)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/ARCHIVE", name: nil), .archive)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/archive", name: nil), .archive)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/TRASH", name: nil), .trash)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/trash", name: nil), .trash)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/SENT", name: nil), .sent)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/sent", name: nil), .sent)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/JUNK", name: nil), .junk)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/junk", name: nil), .junk)
+    }
+
+    func testClassifyMailboxUrlTakesPrecedence() {
+        // URL should be used if available, name is fallback
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/INBOX", name: "Trash"), .inbox)
+        XCTAssertEqual(classifyMailbox(url: "mailbox://account/Trash", name: "INBOX"), .trash)
+    }
 }
