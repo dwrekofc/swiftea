@@ -226,8 +226,8 @@ struct MailSyncCommand: ParsableCommand {
     /// Minimum allowed sync interval in seconds
     private static let minIntervalSeconds = 30
 
-    /// Default sync interval in seconds (5 minutes)
-    private static let defaultIntervalSeconds = 300
+    /// Default sync interval in seconds (1 minute)
+    private static let defaultIntervalSeconds = 60
 
     func validate() throws {
         // --watch and --stop are mutually exclusive
@@ -410,6 +410,9 @@ struct MailSyncCommand: ParsableCommand {
             if !noExport {
                 try performAutoExport(mailDatabase: mailDatabase, vault: vault)
             }
+
+            // Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
+            try performBackwardSync(mailDatabase: mailDatabase)
         } catch let error as MailSyncError {
             logError("Sync failed: \(error.localizedDescription)")
             throw ExitCode.failure
@@ -442,6 +445,37 @@ struct MailSyncCommand: ParsableCommand {
         } catch {
             // Log but don't fail sync if export has issues
             logError("Auto-export failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Backward Sync
+
+    /// Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
+    private func performBackwardSync(mailDatabase: MailDatabase) throws {
+        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
+
+        do {
+            let result = try backwardSync.processPendingActions()
+
+            // Log results if any actions were processed
+            if result.archived > 0 || result.deleted > 0 {
+                log("Backward sync:")
+                log("  Archived: \(result.archived), Deleted: \(result.deleted)")
+            }
+
+            // Log warnings for failed actions
+            if result.failed > 0 {
+                logError("Backward sync failed for \(result.failed) message(s)")
+                for error in result.errors.prefix(5) {
+                    logError("  - \(error)")
+                }
+                if result.errors.count > 5 {
+                    logError("  ... and \(result.errors.count - 5) more errors")
+                }
+            }
+        } catch {
+            // Log but don't fail sync if backward sync has issues
+            logError("Backward sync failed: \(error.localizedDescription)")
         }
     }
 
@@ -783,8 +817,9 @@ final class MailSyncDaemonController: NSObject {
     private var isSyncing = false
     private let syncQueue = DispatchQueue(label: "com.swiftea.mail.sync.daemon")
     private var syncTimer: Timer?
+    private let backwardSync: MailSyncBackward
 
-    /// Interval between scheduled syncs (configurable, default 5 minutes)
+    /// Interval between scheduled syncs (configurable, default 1 minute)
     private let syncIntervalSeconds: TimeInterval
 
     /// Minimum interval between syncs to prevent rapid-fire syncing
@@ -793,11 +828,12 @@ final class MailSyncDaemonController: NSObject {
     /// Track last sync time to debounce wake events
     private var lastSyncTime: Date?
 
-    init(mailDatabase: MailDatabase, exportDir: String, syncIntervalSeconds: TimeInterval = 300, logger: @escaping (String) -> Void) {
+    init(mailDatabase: MailDatabase, exportDir: String, syncIntervalSeconds: TimeInterval = 60, logger: @escaping (String) -> Void) {
         self.mailDatabase = mailDatabase
         self.exportDir = exportDir
         self.syncIntervalSeconds = syncIntervalSeconds
         self.logger = logger
+        self.backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
         super.init()
 
         // Register for sleep/wake notifications
@@ -936,6 +972,9 @@ final class MailSyncDaemonController: NSObject {
 
                 // Auto-export new messages after successful sync
                 performAutoExport()
+
+                // Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
+                performBackwardSync()
                 return
 
             } catch {
@@ -988,6 +1027,31 @@ final class MailSyncDaemonController: NSObject {
             logger("ERROR: Auto-export failed: \(error.localizedDescription)")
         }
     }
+
+    /// Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
+    private func performBackwardSync() {
+        do {
+            let result = try backwardSync.processPendingActions()
+
+            // Log results if any actions were processed
+            if result.archived > 0 || result.deleted > 0 {
+                logger("Backward sync: \(result.archived) archived, \(result.deleted) deleted")
+            }
+
+            // Log warnings for failed actions
+            if result.failed > 0 {
+                logger("WARNING: Backward sync failed for \(result.failed) message(s)")
+                for error in result.errors.prefix(3) {
+                    logger("  - \(error)")
+                }
+                if result.errors.count > 3 {
+                    logger("  ... and \(result.errors.count - 3) more errors")
+                }
+            }
+        } catch {
+            logger("ERROR: Backward sync failed: \(error.localizedDescription)")
+        }
+    }
 }
 
 /// Perform a sync in daemon mode with retry logic.
@@ -1010,6 +1074,9 @@ private func performDaemonSync(mailDatabase: MailDatabase, exportDir: String) {
 
             // Auto-export new messages after successful sync
             performDaemonAutoExport(mailDatabase: mailDatabase, exportDir: exportDir)
+
+            // Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
+            performDaemonBackwardSync(mailDatabase: mailDatabase)
             return
 
         } catch {
@@ -1064,6 +1131,40 @@ private func performDaemonAutoExport(mailDatabase: MailDatabase, exportDir: Stri
     } catch {
         let timestamp = ISO8601DateFormatter().string(from: Date())
         fputs("[\(timestamp)] ERROR: Auto-export failed: \(error.localizedDescription)\n", stderr)
+        fflush(stderr)
+    }
+}
+
+/// Process pending backward sync actions in daemon mode (archive/delete from SwiftEA to Apple Mail)
+private func performDaemonBackwardSync(mailDatabase: MailDatabase) {
+    let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
+
+    do {
+        let result = try backwardSync.processPendingActions()
+
+        // Log results if any actions were processed
+        if result.archived > 0 || result.deleted > 0 {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            fputs("[\(timestamp)] Backward sync: \(result.archived) archived, \(result.deleted) deleted\n", stdout)
+            fflush(stdout)
+        }
+
+        // Log warnings for failed actions
+        if result.failed > 0 {
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            fputs("[\(timestamp)] WARNING: Backward sync failed for \(result.failed) message(s)\n", stdout)
+            fflush(stdout)
+            for error in result.errors.prefix(3) {
+                fputs("[\(timestamp)]   - \(error)\n", stdout)
+            }
+            if result.errors.count > 3 {
+                fputs("[\(timestamp)]   ... and \(result.errors.count - 3) more errors\n", stdout)
+            }
+            fflush(stdout)
+        }
+    } catch {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        fputs("[\(timestamp)] ERROR: Backward sync failed: \(error.localizedDescription)\n", stderr)
         fflush(stderr)
     }
 }
