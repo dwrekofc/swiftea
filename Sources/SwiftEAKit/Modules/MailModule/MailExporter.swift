@@ -80,12 +80,47 @@ public final class MailExporter {
         return filePath
     }
 
+    // MARK: - Thread Metadata
+
+    /// Get thread metadata for a message including position in thread
+    private func getThreadMetadata(for message: MailMessage) -> (thread: Thread, position: Int, total: Int)? {
+        guard let threadId = message.threadId else {
+            return nil
+        }
+
+        do {
+            guard let thread = try mailDatabase.getThread(id: threadId) else {
+                return nil
+            }
+
+            // Get all messages in the thread to calculate position
+            let messages = try mailDatabase.getMessagesInThreadViaJunction(threadId: threadId, limit: 10000)
+            let sortedMessages = messages.sorted { (m1, m2) -> Bool in
+                guard let d1 = m1.dateSent, let d2 = m2.dateSent else {
+                    return m1.dateSent != nil
+                }
+                return d1 < d2
+            }
+
+            // Find position of current message (1-indexed)
+            let position = (sortedMessages.firstIndex(where: { $0.id == message.id }) ?? 0) + 1
+            let total = sortedMessages.count
+
+            return (thread, position, total)
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Markdown Formatting
 
     private func formatAsMarkdown(_ message: MailMessage) -> String {
         var lines: [String] = []
 
-        // Minimal YAML frontmatter: id, subject, from, date, aliases
+        // Get thread metadata if available
+        let threadMeta = getThreadMetadata(for: message)
+
+        // Minimal YAML frontmatter: id, subject, from, date, aliases, thread info
         lines.append("---")
         lines.append("id: \"\(message.id)\"")
         lines.append("subject: \"\(escapeYaml(message.subject))\"")
@@ -96,6 +131,16 @@ public final class MailExporter {
         if let mailbox = message.mailboxName {
             lines.append("mailbox: \"\(escapeYaml(mailbox))\"")
         }
+
+        // Thread metadata
+        if let (thread, position, total) = threadMeta {
+            lines.append("thread_id: \"\(escapeYaml(thread.id))\"")
+            lines.append("thread_position: \"Message \(position) of \(total)\"")
+            if let threadSubject = thread.subject {
+                lines.append("thread_subject: \"\(escapeYaml(threadSubject))\"")
+            }
+        }
+
         // aliases: use subject as an alias for linking by topic
         lines.append("aliases:")
         lines.append("  - \"\(escapeYaml(message.subject))\"")

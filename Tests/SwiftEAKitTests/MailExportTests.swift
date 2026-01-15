@@ -204,4 +204,175 @@ final class MailExportTests: XCTestCase {
     private func escapeYaml(_ text: String) -> String {
         text.replacingOccurrences(of: "\"", with: "\\\"")
     }
+
+    // MARK: - Thread Metadata Export Tests
+
+    func testMarkdownExportIncludesThreadId() throws {
+        try database.initialize()
+
+        let threadId = "thread123thread123thread12345678"
+
+        // Create thread first
+        let thread = Thread(
+            id: threadId,
+            subject: "Important Discussion",
+            participantCount: 2,
+            messageCount: 3,
+            firstDate: Date(timeIntervalSince1970: 1736177400),
+            lastDate: Date(timeIntervalSince1970: 1736180000)
+        )
+        try database.upsertThread(thread)
+
+        // Create messages in thread
+        let message1 = MailMessage(
+            id: "msg1_123msg1_123msg1_12345678",
+            subject: "Important Discussion",
+            dateSent: Date(timeIntervalSince1970: 1736177400),
+            threadId: threadId
+        )
+        let message2 = MailMessage(
+            id: "msg2_123msg2_123msg2_12345678",
+            subject: "Re: Important Discussion",
+            dateSent: Date(timeIntervalSince1970: 1736178000),
+            threadId: threadId
+        )
+        let message3 = MailMessage(
+            id: "msg3_123msg3_123msg3_12345678",
+            subject: "Re: Important Discussion",
+            dateSent: Date(timeIntervalSince1970: 1736180000),
+            threadId: threadId
+        )
+
+        try database.upsertMessage(message1)
+        try database.upsertMessage(message2)
+        try database.upsertMessage(message3)
+
+        // Link messages to thread
+        try database.addMessageToThread(messageId: message1.id, threadId: threadId)
+        try database.addMessageToThread(messageId: message2.id, threadId: threadId)
+        try database.addMessageToThread(messageId: message3.id, threadId: threadId)
+
+        // Export using actual MailExporter
+        let outputDir = (testDir as NSString).appendingPathComponent("export")
+        try FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        let exporter = MailExporter(mailDatabase: database)
+        try exporter.exportMessage(message2, to: outputDir)
+
+        // Read exported file
+        let exportedPath = (outputDir as NSString).appendingPathComponent("\(message2.id).md")
+        let content = try String(contentsOfFile: exportedPath, encoding: .utf8)
+
+        // Verify thread metadata is present
+        XCTAssertTrue(content.contains("thread_id: \"\(threadId)\""), "Should contain thread_id")
+    }
+
+    func testMarkdownExportIncludesThreadPosition() throws {
+        try database.initialize()
+
+        let threadId = "posthread123posthread123posth90"
+
+        // Create thread
+        let thread = Thread(
+            id: threadId,
+            subject: "Thread Position Test",
+            participantCount: 2,
+            messageCount: 5
+        )
+        try database.upsertThread(thread)
+
+        // Create messages with different dates to establish order
+        let baseDate = Date(timeIntervalSince1970: 1736177400)
+        var messages: [MailMessage] = []
+        for i in 0..<5 {
+            let msg = MailMessage(
+                id: "postest\(i)_postest\(i)_postest\(i)_pt\(i)0",
+                subject: i == 0 ? "Thread Position Test" : "Re: Thread Position Test",
+                dateSent: baseDate.addingTimeInterval(Double(i * 3600)),
+                threadId: threadId
+            )
+            messages.append(msg)
+            try database.upsertMessage(msg)
+            try database.addMessageToThread(messageId: msg.id, threadId: threadId)
+        }
+
+        // Export the 3rd message (index 2, position 3)
+        let outputDir = (testDir as NSString).appendingPathComponent("export-position")
+        try FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        let exporter = MailExporter(mailDatabase: database)
+        try exporter.exportMessage(messages[2], to: outputDir)
+
+        // Read exported file
+        let exportedPath = (outputDir as NSString).appendingPathComponent("\(messages[2].id).md")
+        let content = try String(contentsOfFile: exportedPath, encoding: .utf8)
+
+        // Verify thread position format "Message 3 of 5"
+        XCTAssertTrue(content.contains("thread_position: \"Message 3 of 5\""),
+                      "Should show thread position as 'Message 3 of 5', got: \(content)")
+    }
+
+    func testMarkdownExportIncludesThreadSubject() throws {
+        try database.initialize()
+
+        let threadId = "subjthread12subjthread12subjth34"
+        let threadSubject = "Weekly Status Update"
+
+        // Create thread with specific subject
+        let thread = Thread(
+            id: threadId,
+            subject: threadSubject,
+            participantCount: 3,
+            messageCount: 2
+        )
+        try database.upsertThread(thread)
+
+        // Create messages
+        let message = MailMessage(
+            id: "subjmsg123subjmsg123subjmsg1234",
+            subject: "Re: Weekly Status Update",
+            dateSent: Date(),
+            threadId: threadId
+        )
+        try database.upsertMessage(message)
+        try database.addMessageToThread(messageId: message.id, threadId: threadId)
+
+        // Export
+        let outputDir = (testDir as NSString).appendingPathComponent("export-subject")
+        try FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        let exporter = MailExporter(mailDatabase: database)
+        try exporter.exportMessage(message, to: outputDir)
+
+        // Read exported file
+        let exportedPath = (outputDir as NSString).appendingPathComponent("\(message.id).md")
+        let content = try String(contentsOfFile: exportedPath, encoding: .utf8)
+
+        // Verify thread subject is in header
+        XCTAssertTrue(content.contains("thread_subject: \"\(threadSubject)\""),
+                      "Should contain thread subject in frontmatter")
+    }
+
+    func testMarkdownExportWithoutThreadDoesNotIncludeThreadFields() throws {
+        try database.initialize()
+
+        // Create message without thread
+        let message = MailMessage(
+            id: "nothreadmsg12nothreadmsg1234567",
+            subject: "Standalone Email"
+        )
+        try database.upsertMessage(message)
+
+        // Export
+        let outputDir = (testDir as NSString).appendingPathComponent("export-no-thread")
+        try FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        let exporter = MailExporter(mailDatabase: database)
+        try exporter.exportMessage(message, to: outputDir)
+
+        // Read exported file
+        let exportedPath = (outputDir as NSString).appendingPathComponent("\(message.id).md")
+        let content = try String(contentsOfFile: exportedPath, encoding: .utf8)
+
+        // Verify no thread fields
+        XCTAssertFalse(content.contains("thread_id:"), "Should not contain thread_id for non-threaded message")
+        XCTAssertFalse(content.contains("thread_position:"), "Should not contain thread_position for non-threaded message")
+        XCTAssertFalse(content.contains("thread_subject:"), "Should not contain thread_subject for non-threaded message")
+    }
 }
