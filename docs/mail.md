@@ -280,7 +280,7 @@ aliases:
 
 #### Export Format: JSON
 
-JSON exports include full message metadata:
+JSON exports include full message metadata with thread information:
 
 ```json
 {
@@ -297,9 +297,77 @@ JSON exports include full message metadata:
   "isFlagged": false,
   "hasAttachments": false,
   "bodyText": "...",
-  "bodyHtml": "..."
+  "bodyHtml": "...",
+  "thread_id": "a1b2c3d4e5f6789012345678901234567"
 }
 ```
+
+**Thread Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `thread_id` | string | 32-character hex thread ID (present if message is threaded) |
+| `thread_position` | integer | 1-indexed position within thread (present in thread exports) |
+| `thread_total` | integer | Total messages in thread (present in thread exports) |
+
+#### Thread Export
+
+Export a complete thread with nested messages:
+
+```bash
+swea mail export --format json --thread <thread-id>
+```
+
+Thread exports create a single JSON file with full thread structure:
+
+```json
+{
+  "thread_id": "a1b2c3d4e5f6789012345678901234567",
+  "subject": "Weekly Status Update",
+  "participant_count": 3,
+  "message_count": 5,
+  "first_date": "2024-01-15T10:30:00Z",
+  "last_date": "2024-01-17T14:20:00Z",
+  "messages": [
+    {
+      "id": "msg1",
+      "messageId": "<original@example.com>",
+      "subject": "Weekly Status Update",
+      "from": { "name": "Alice", "email": "alice@example.com" },
+      "date": "2024-01-15T10:30:00Z",
+      "thread_id": "a1b2c3d4e5f6789012345678901234567",
+      "thread_position": 1,
+      "thread_total": 5,
+      "bodyText": "..."
+    },
+    {
+      "id": "msg2",
+      "messageId": "<reply1@example.com>",
+      "subject": "Re: Weekly Status Update",
+      "from": { "name": "Bob", "email": "bob@example.com" },
+      "date": "2024-01-15T11:00:00Z",
+      "thread_id": "a1b2c3d4e5f6789012345678901234567",
+      "thread_position": 2,
+      "thread_total": 5,
+      "bodyText": "..."
+    }
+  ]
+}
+```
+
+**Thread Export Schema:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `thread_id` | string | 32-character hex thread ID |
+| `subject` | string | Thread subject (from first message) |
+| `participant_count` | integer | Number of unique participants |
+| `message_count` | integer | Total messages in thread |
+| `first_date` | string | ISO 8601 date of first message |
+| `last_date` | string | ISO 8601 date of last message |
+| `messages` | array | Nested array of message objects (sorted by date) |
+
+Each message in the `messages` array includes all standard message fields plus `thread_position` and `thread_total`.
 
 #### Attachment Extraction
 

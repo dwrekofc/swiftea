@@ -1526,6 +1526,11 @@ struct MailExportCommand: ParsableCommand {
 
             Use --include-attachments to also extract and save attachment files.
             Attachments are saved in an 'attachments/<message-id>/' subdirectory.
+
+            THREAD EXPORT
+              swea mail export --format json --thread <thread-id>   # Export full thread structure
+
+            Thread exports include a nested messages array with thread_position for each message.
             """
     )
 
@@ -1547,10 +1552,17 @@ struct MailExportCommand: ParsableCommand {
     @Flag(name: .long, help: "Extract and save attachment files")
     var includeAttachments: Bool = false
 
+    @Option(name: .long, help: "Thread ID to export as full thread structure (JSON only)")
+    var thread: String?
+
     func validate() throws {
         // --limit must be a positive integer
         if limit <= 0 {
             throw MailValidationError.invalidLimit
+        }
+        // --thread requires --format json
+        if thread != nil && !format.isJson {
+            throw ValidationError("--thread requires --format json")
         }
         // Note: --format validation is handled automatically by ArgumentParser via OutputFormat enum
     }
@@ -1577,6 +1589,12 @@ struct MailExportCommand: ParsableCommand {
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
+
+        // Handle thread export mode
+        if let threadId = thread {
+            try exportThread(threadId: threadId, outputDir: outputDir, database: mailDatabase)
+            return
+        }
 
         // Get messages to export
         var messages: [MailMessage] = []
@@ -1701,8 +1719,8 @@ struct MailExportCommand: ParsableCommand {
         return lines.joined(separator: "\n")
     }
 
-    private func formatAsJson(_ message: MailMessage) -> String {
-        let output: [String: Any] = [
+    private func formatAsJson(_ message: MailMessage, threadPosition: Int? = nil, threadTotal: Int? = nil) -> String {
+        var output: [String: Any] = [
             "id": message.id,
             "messageId": message.messageId ?? "",
             "subject": message.subject,
@@ -1719,11 +1737,95 @@ struct MailExportCommand: ParsableCommand {
             "bodyHtml": message.bodyHtml ?? ""
         ]
 
+        // Add thread fields if available
+        if let threadId = message.threadId {
+            output["thread_id"] = threadId
+        }
+        if let position = threadPosition {
+            output["thread_position"] = position
+        }
+        if let total = threadTotal {
+            output["thread_total"] = total
+        }
+
         if let data = try? JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys]),
            let jsonString = String(data: data, encoding: .utf8) {
             return jsonString
         }
         return "{}"
+    }
+
+    /// Convert a MailMessage to a dictionary for JSON serialization (used in thread exports)
+    private func messageToDict(_ message: MailMessage, threadPosition: Int, threadTotal: Int) -> [String: Any] {
+        return [
+            "id": message.id,
+            "messageId": message.messageId ?? "",
+            "subject": message.subject,
+            "from": [
+                "name": message.senderName ?? "",
+                "email": message.senderEmail ?? ""
+            ],
+            "date": message.dateSent?.iso8601String ?? "",
+            "mailbox": message.mailboxName ?? "",
+            "isRead": message.isRead,
+            "isFlagged": message.isFlagged,
+            "hasAttachments": message.hasAttachments,
+            "bodyText": message.bodyText ?? "",
+            "bodyHtml": message.bodyHtml ?? "",
+            "thread_id": message.threadId ?? "",
+            "thread_position": threadPosition,
+            "thread_total": threadTotal
+        ]
+    }
+
+    /// Export a thread with full structure including nested messages array
+    private func exportThread(threadId: String, outputDir: String, database: MailDatabase) throws {
+        // Get thread metadata
+        guard let thread = try database.getThread(id: threadId) else {
+            printError("Thread not found: \(threadId)")
+            throw ExitCode.failure
+        }
+
+        // Get all messages in the thread, sorted by date
+        let messages = try database.getMessagesInThreadViaJunction(threadId: threadId, limit: 10000)
+
+        if messages.isEmpty {
+            printError("Thread has no messages: \(threadId)")
+            throw ExitCode.failure
+        }
+
+        let threadTotal = messages.count
+
+        // Build nested messages array with thread position
+        var messagesArray: [[String: Any]] = []
+        for (index, message) in messages.enumerated() {
+            let position = index + 1  // 1-indexed position
+            messagesArray.append(messageToDict(message, threadPosition: position, threadTotal: threadTotal))
+        }
+
+        // Build thread export structure
+        let threadExport: [String: Any] = [
+            "thread_id": threadId,
+            "subject": thread.subject ?? "",
+            "participant_count": thread.participantCount,
+            "message_count": thread.messageCount,
+            "first_date": thread.firstDate?.iso8601String ?? "",
+            "last_date": thread.lastDate?.iso8601String ?? "",
+            "messages": messagesArray
+        ]
+
+        // Write to file
+        let filename = "thread-\(threadId).json"
+        let filePath = (outputDir as NSString).appendingPathComponent(filename)
+
+        if let data = try? JSONSerialization.data(withJSONObject: threadExport, options: [.prettyPrinted, .sortedKeys]),
+           let jsonString = String(data: data, encoding: .utf8) {
+            try jsonString.write(toFile: filePath, atomically: true, encoding: .utf8)
+            print("Exported thread with \(threadTotal) message(s) to \(filePath)")
+        } else {
+            printError("Failed to serialize thread to JSON")
+            throw ExitCode.failure
+        }
     }
 
     private func formatSender(_ message: MailMessage) -> String {
