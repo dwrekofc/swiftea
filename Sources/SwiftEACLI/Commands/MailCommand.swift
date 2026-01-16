@@ -1591,24 +1591,48 @@ struct MailShowCommand: ParsableCommand {
     }
 
     private func stripHtml(_ html: String) -> String {
-        // Simple HTML tag stripping
+        // HTML to plain text conversion
         var result = html
-        // Remove script and style blocks
-        result = result.replacingOccurrences(of: "<script[^>]*>.*?</script>", with: "", options: .regularExpression)
-        result = result.replacingOccurrences(of: "<style[^>]*>.*?</style>", with: "", options: .regularExpression)
+
+        // Remove script and style blocks (use [\s\S] to match across newlines)
+        result = result.replacingOccurrences(of: "<script[^>]*>[\\s\\S]*?</script>", with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: "<style[^>]*>[\\s\\S]*?</style>", with: "", options: .regularExpression)
+
+        // Remove HTML comments including MS Office conditional comments
+        result = result.replacingOccurrences(of: "<!--[\\s\\S]*?-->", with: "", options: .regularExpression)
+
+        // Remove head section entirely
+        result = result.replacingOccurrences(of: "<head[^>]*>[\\s\\S]*?</head>", with: "", options: .regularExpression)
+
         // Replace common entities
         result = result.replacingOccurrences(of: "&nbsp;", with: " ")
         result = result.replacingOccurrences(of: "&amp;", with: "&")
         result = result.replacingOccurrences(of: "&lt;", with: "<")
         result = result.replacingOccurrences(of: "&gt;", with: ">")
         result = result.replacingOccurrences(of: "&quot;", with: "\"")
-        // Replace <br> and </p> with newlines
+        result = result.replacingOccurrences(of: "&#39;", with: "'")
+        result = result.replacingOccurrences(of: "&apos;", with: "'")
+
+        // Replace block elements with newlines
         result = result.replacingOccurrences(of: "<br[^>]*>", with: "\n", options: .regularExpression)
         result = result.replacingOccurrences(of: "</p>", with: "\n\n")
+        result = result.replacingOccurrences(of: "</div>", with: "\n")
+        result = result.replacingOccurrences(of: "</tr>", with: "\n")
+        result = result.replacingOccurrences(of: "</li>", with: "\n")
+
         // Remove all remaining tags
         result = result.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-        // Collapse multiple newlines
-        result = result.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+
+        // Clean up whitespace: collapse multiple spaces/tabs on same line
+        result = result.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
+
+        // Trim leading/trailing whitespace from each line
+        let lines = result.components(separatedBy: "\n")
+        result = lines.map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+
+        // Collapse multiple newlines (3+ becomes 2)
+        result = result.replacingOccurrences(of: "\\n{3,}", with: "\n\n", options: .regularExpression)
+
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
