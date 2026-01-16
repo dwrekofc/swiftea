@@ -741,6 +741,45 @@ final class MailSyncBackwardTests: XCTestCase {
         XCTAssertTrue(script.contains("Trash mailbox not found"))
     }
 
+    func testArchiveScriptHasNoOrphanEndIf() {
+        let script = MailSyncBackwardScripts.archiveMessage(byMessageId: "<test@example.com>")
+
+        // Verify no orphan "end if" at the start of lines (indicates missing "if")
+        // An orphan end if would be "end if" appearing as the first token after a newline
+        // before any corresponding "if ... then\n" block opener
+        let lines = script.components(separatedBy: "\n")
+        var ifBlockDepth = 0
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Multi-line if block starts when line ends with "then" (not single-line if)
+            if trimmed.hasPrefix("if ") && trimmed.hasSuffix(" then") {
+                ifBlockDepth += 1
+            }
+            if trimmed == "end if" {
+                ifBlockDepth -= 1
+            }
+            XCTAssertGreaterThanOrEqual(ifBlockDepth, 0, "Found orphan 'end if' without matching 'if'")
+        }
+    }
+
+    func testDeleteScriptHasNoOrphanEndIf() {
+        let script = MailSyncBackwardScripts.deleteMessage(byMessageId: "<test@example.com>")
+
+        // Verify no orphan "end if" (same logic as archive test)
+        let lines = script.components(separatedBy: "\n")
+        var ifBlockDepth = 0
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("if ") && trimmed.hasSuffix(" then") {
+                ifBlockDepth += 1
+            }
+            if trimmed == "end if" {
+                ifBlockDepth -= 1
+            }
+            XCTAssertGreaterThanOrEqual(ifBlockDepth, 0, "Found orphan 'end if' without matching 'if'")
+        }
+    }
+
     // MARK: - Integration Tests
 
     func testFullArchiveWorkflow() throws {

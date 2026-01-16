@@ -335,7 +335,7 @@ public struct MailSyncBackwardScripts {
                 set archiveMailbox to mailbox "\(name)" of theAccount
             end try
             """
-            if index < archiveNames.count - 1 {
+            if index > 0 {
                 script += "\nend if\n"
             }
         }
@@ -384,7 +384,7 @@ public struct MailSyncBackwardScripts {
                 set trashMailbox to mailbox "\(name)" of theAccount
             end try
             """
-            if index < trashNames.count - 1 {
+            if index > 0 {
                 script += "\nend if\n"
             }
         }
