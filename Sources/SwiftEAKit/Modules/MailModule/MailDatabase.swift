@@ -649,7 +649,7 @@ public final class MailDatabase: @unchecked Sendable {
         let result = try conn.query("""
             SELECT m.* FROM messages m
             JOIN messages_fts fts ON m.rowid = fts.rowid
-            WHERE messages_fts MATCH '\(escapeSql(query))'
+            WHERE messages_fts MATCH '\(escapeSql(escapeFts5Query(query)))'
             ORDER BY bm25(messages_fts)
             LIMIT \(limit) OFFSET \(offset)
             """)
@@ -864,7 +864,7 @@ public final class MailDatabase: @unchecked Sendable {
             sql = """
                 SELECT m.* FROM messages m
                 JOIN messages_fts fts ON m.rowid = fts.rowid
-                WHERE messages_fts MATCH '\(escapeSql(freeText))'
+                WHERE messages_fts MATCH '\(escapeSql(escapeFts5Query(freeText)))'
                 \(whereClause)
                 ORDER BY bm25(messages_fts)
                 LIMIT \(limit) OFFSET \(offset)
@@ -2233,6 +2233,26 @@ public final class MailDatabase: @unchecked Sendable {
 
     private func escapeSql(_ string: String) -> String {
         string.replacingOccurrences(of: "'", with: "''")
+    }
+
+    /// Escape a query string for safe use in FTS5 MATCH clauses.
+    /// FTS5 has special syntax characters (", *, OR, AND, NOT, NEAR, etc.) that can cause
+    /// syntax errors if not properly escaped. This function wraps the query in double quotes
+    /// to treat it as a literal phrase, escaping any embedded double quotes.
+    /// - Parameter query: The user's search query
+    /// - Returns: A safely escaped FTS5 query string
+    private func escapeFts5Query(_ query: String) -> String {
+        // Empty or whitespace-only queries should return empty (will match nothing)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "\"\""
+        }
+
+        // In FTS5, wrapping a term in double quotes makes it a literal phrase.
+        // Any double quotes within the phrase must be escaped by doubling them.
+        // Example: search for hello"world becomes "hello""world"
+        let escaped = trimmed.replacingOccurrences(of: "\"", with: "\"\"")
+        return "\"\(escaped)\""
     }
 
     /// Serialize a references array to JSON string for database storage

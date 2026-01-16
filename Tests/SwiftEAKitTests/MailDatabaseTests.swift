@@ -216,6 +216,98 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertEqual(results.count, 5)
     }
 
+    // MARK: - FTS5 Special Character Handling
+
+    func testSearchWithSingleQuote() throws {
+        try database.initialize()
+
+        // Insert message containing a single quote
+        let message = MailMessage(id: "quote-test", subject: "It's a test", bodyText: "Don't forget to check this.")
+        try database.upsertMessage(message)
+
+        // Search for single quote - should not crash, should return empty or matching results
+        let results = try database.searchMessages(query: "'")
+        // The query should execute without throwing
+        XCTAssertNotNil(results)
+    }
+
+    func testSearchWithDoubleQuote() throws {
+        try database.initialize()
+
+        // Insert message containing double quotes
+        let message = MailMessage(id: "dquote-test", subject: "He said \"hello\"", bodyText: "Test with quotes")
+        try database.upsertMessage(message)
+
+        // Search for double quote - should not crash
+        let results = try database.searchMessages(query: "\"")
+        XCTAssertNotNil(results)
+    }
+
+    func testSearchWithSqlInjectionAttempt() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "sql-test", subject: "Normal email")
+        try database.upsertMessage(message)
+
+        // SQL injection-like syntax should not crash or cause errors
+        let results = try database.searchMessages(query: "OR 1=1 --")
+        XCTAssertNotNil(results)
+        // Should return empty since this is treated as literal text, not SQL
+        XCTAssertTrue(results.isEmpty)
+    }
+
+    func testSearchWithFts5Operators() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "fts-test", subject: "Test AND or OR words", bodyText: "NOT near NEAR")
+        try database.upsertMessage(message)
+
+        // FTS5 operators (AND, OR, NOT, NEAR) should be treated as literal text
+        XCTAssertNoThrow(try database.searchMessages(query: "AND"))
+        XCTAssertNoThrow(try database.searchMessages(query: "OR"))
+        XCTAssertNoThrow(try database.searchMessages(query: "NOT"))
+        XCTAssertNoThrow(try database.searchMessages(query: "NEAR"))
+    }
+
+    func testSearchWithSpecialCharacters() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "special-test", subject: "Special chars: * ( ) { } [ ]")
+        try database.upsertMessage(message)
+
+        // Various special characters should not crash
+        let specialChars = ["*", "(", ")", "{", "}", "[", "]", "+", "-", "^", "~"]
+        for char in specialChars {
+            XCTAssertNoThrow(try database.searchMessages(query: char), "Search should not crash for character: \(char)")
+        }
+    }
+
+    func testSearchWithMixedSpecialCharacters() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "mixed-test", subject: "Can't say \"hello (world)\"")
+        try database.upsertMessage(message)
+
+        // Complex query with multiple special characters
+        let results = try database.searchMessages(query: "Can't say \"hello\"")
+        XCTAssertNotNil(results)
+    }
+
+    func testSearchWithEmptyQuery() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "empty-test", subject: "Test message")
+        try database.upsertMessage(message)
+
+        // Empty query should not crash
+        let results = try database.searchMessages(query: "")
+        XCTAssertNotNil(results)
+
+        // Whitespace-only query should not crash
+        let results2 = try database.searchMessages(query: "   ")
+        XCTAssertNotNil(results2)
+    }
+
     // MARK: - Export Path
 
     func testUpdateExportPath() throws {
