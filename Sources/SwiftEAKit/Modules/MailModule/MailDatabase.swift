@@ -123,6 +123,9 @@ public final class MailDatabase: @unchecked Sendable {
         if currentVersion < 6 {
             try applyMigrationV6(conn)
         }
+        if currentVersion < 7 {
+            try applyMigrationV7(conn)
+        }
     }
 
     /// Migration v1: Initial schema with all mail tables
@@ -386,6 +389,34 @@ public final class MailDatabase: @unchecked Sendable {
 
             // Record migration version
             _ = try conn.execute("INSERT INTO schema_version (version) VALUES (6)")
+
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
+    /// Migration v7: Add indexes for large inbox query optimization (>100k emails)
+    /// This migration optimizes thread listing and filtering for large inboxes
+    private func applyMigrationV7(_ conn: Connection) throws {
+        do {
+            // Index on threads(subject) for sorting by subject
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_threads_subject ON threads(subject)")
+
+            // Index on threads(message_count) for sorting by message count
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_threads_message_count ON threads(message_count DESC)")
+
+            // Index on messages(sender_email) for participant filtering
+            // Uses LOWER() to support case-insensitive queries
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_sender_email ON messages(sender_email)")
+
+            // Index on recipients(email) for participant filtering
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_recipients_email ON recipients(email)")
+
+            // Composite index for efficient thread position batch updates
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_position ON messages(thread_id, thread_position)")
+
+            // Record migration version
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (7)")
 
         } catch {
             throw MailDatabaseError.migrationFailed(underlying: error)
@@ -1716,14 +1747,25 @@ public final class MailDatabase: @unchecked Sendable {
         var sql: String
         if let participant = participant {
             // Filter threads by participant (sender or recipient in any message)
+            // Uses EXISTS subqueries for better query plan optimization vs JOINs
+            // Note: LIKE with leading % cannot use indexes, but EXISTS limits the scan
+            // to messages within each thread rather than a full cross-join
             let escaped = escapeSql(participant.lowercased())
             sql = """
-                SELECT DISTINCT t.* FROM threads t
-                JOIN thread_messages tm ON t.id = tm.thread_id
-                JOIN messages m ON tm.message_id = m.id
-                LEFT JOIN recipients r ON m.id = r.message_id
-                WHERE LOWER(m.sender_email) LIKE '%\(escaped)%'
-                   OR LOWER(r.email) LIKE '%\(escaped)%'
+                SELECT t.* FROM threads t
+                WHERE EXISTS (
+                    SELECT 1 FROM thread_messages tm
+                    JOIN messages m ON tm.message_id = m.id
+                    WHERE tm.thread_id = t.id
+                    AND LOWER(m.sender_email) LIKE '%\(escaped)%'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM thread_messages tm
+                    JOIN messages m ON tm.message_id = m.id
+                    JOIN recipients r ON m.id = r.message_id
+                    WHERE tm.thread_id = t.id
+                    AND LOWER(r.email) LIKE '%\(escaped)%'
+                )
                 ORDER BY t.\(sortBy.sqlOrderBy)
                 LIMIT \(limit) OFFSET \(offset)
                 """
@@ -1756,14 +1798,23 @@ public final class MailDatabase: @unchecked Sendable {
 
         var sql: String
         if let participant = participant {
+            // Use EXISTS subqueries for efficient counting with participant filter
             let escaped = escapeSql(participant.lowercased())
             sql = """
-                SELECT COUNT(DISTINCT t.id) FROM threads t
-                JOIN thread_messages tm ON t.id = tm.thread_id
-                JOIN messages m ON tm.message_id = m.id
-                LEFT JOIN recipients r ON m.id = r.message_id
-                WHERE LOWER(m.sender_email) LIKE '%\(escaped)%'
-                   OR LOWER(r.email) LIKE '%\(escaped)%'
+                SELECT COUNT(*) FROM threads t
+                WHERE EXISTS (
+                    SELECT 1 FROM thread_messages tm
+                    JOIN messages m ON tm.message_id = m.id
+                    WHERE tm.thread_id = t.id
+                    AND LOWER(m.sender_email) LIKE '%\(escaped)%'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM thread_messages tm
+                    JOIN messages m ON tm.message_id = m.id
+                    JOIN recipients r ON m.id = r.message_id
+                    WHERE tm.thread_id = t.id
+                    AND LOWER(r.email) LIKE '%\(escaped)%'
+                )
                 """
         } else {
             sql = "SELECT COUNT(*) FROM threads"
@@ -1829,9 +1880,10 @@ public final class MailDatabase: @unchecked Sendable {
     }
 
     /// Update thread position metadata for all messages in a thread
+    /// Uses batch update for efficiency with large threads
     /// - Parameter threadId: The thread ID whose messages should be updated
     public func updateThreadPositions(threadId: String) throws {
-        guard connection != nil else {
+        guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
@@ -1839,10 +1891,43 @@ public final class MailDatabase: @unchecked Sendable {
         let messages = try getMessagesInThreadViaJunction(threadId: threadId, limit: 10000, offset: 0)
         let total = messages.count
 
-        // Update each message with its position
-        for (index, message) in messages.enumerated() {
-            try updateMessageThreadPosition(messageId: message.id, threadPosition: index + 1, threadTotal: total)
+        if total == 0 {
+            return
         }
+
+        // For small threads, use individual updates (simpler, avoids query size limits)
+        if total <= 10 {
+            for (index, message) in messages.enumerated() {
+                try updateMessageThreadPosition(messageId: message.id, threadPosition: index + 1, threadTotal: total)
+            }
+            return
+        }
+
+        // For larger threads, use batch update with CASE statement for efficiency
+        // This reduces N database round trips to just 1
+        let now = Int(Date().timeIntervalSince1970)
+
+        // Build CASE statement for positions
+        var caseClauses: [String] = []
+        var idList: [String] = []
+        for (index, message) in messages.enumerated() {
+            let escapedId = escapeSql(message.id)
+            caseClauses.append("WHEN '\(escapedId)' THEN \(index + 1)")
+            idList.append("'\(escapedId)'")
+        }
+
+        let sql = """
+            UPDATE messages SET
+                thread_position = CASE id
+                    \(caseClauses.joined(separator: "\n                "))
+                    ELSE thread_position
+                END,
+                thread_total = \(total),
+                updated_at = \(now)
+            WHERE id IN (\(idList.joined(separator: ", ")))
+            """
+
+        _ = try conn.execute(sql)
     }
 
     /// Get the count of threads

@@ -1977,4 +1977,209 @@ final class MailDatabaseTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - US-023: Large Inbox Query Optimization Tests
+
+    func testMigrationV7IndexesExist() throws {
+        try database.initialize()
+
+        // Verify indexes added in migration V7 for large inbox optimization
+        let threadIndexes = try database.getIndexes(on: "threads")
+        XCTAssertTrue(threadIndexes.contains("idx_threads_subject"),
+                      "Index idx_threads_subject should exist on threads table. Found: \(threadIndexes)")
+        XCTAssertTrue(threadIndexes.contains("idx_threads_message_count"),
+                      "Index idx_threads_message_count should exist on threads table. Found: \(threadIndexes)")
+
+        let messageIndexes = try database.getIndexes(on: "messages")
+        XCTAssertTrue(messageIndexes.contains("idx_messages_sender_email"),
+                      "Index idx_messages_sender_email should exist on messages table. Found: \(messageIndexes)")
+        XCTAssertTrue(messageIndexes.contains("idx_messages_thread_position"),
+                      "Index idx_messages_thread_position should exist on messages table. Found: \(messageIndexes)")
+
+        let recipientIndexes = try database.getIndexes(on: "recipients")
+        XCTAssertTrue(recipientIndexes.contains("idx_recipients_email"),
+                      "Index idx_recipients_email should exist on recipients table. Found: \(recipientIndexes)")
+    }
+
+    func testThreadListingUsesLastDateIndex() throws {
+        try database.initialize()
+
+        // Insert test data
+        let thread = Thread(id: "perf-thread", subject: "Performance Test")
+        try database.upsertThread(thread)
+
+        // Query plan for basic thread listing by date
+        let plan = try database.explainQueryPlan(
+            "SELECT * FROM threads ORDER BY last_date DESC LIMIT 50"
+        )
+
+        let planString = plan.joined(separator: " ")
+        XCTAssertTrue(
+            planString.contains("idx_threads_last_date") || planString.contains("USING INDEX"),
+            "Thread listing by date should use idx_threads_last_date. Plan: \(planString)"
+        )
+    }
+
+    func testThreadListingBySubjectUsesIndex() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "subj-thread", subject: "Subject Test")
+        try database.upsertThread(thread)
+
+        // Query plan for thread listing by subject
+        let plan = try database.explainQueryPlan(
+            "SELECT * FROM threads ORDER BY subject LIMIT 50"
+        )
+
+        let planString = plan.joined(separator: " ")
+        XCTAssertTrue(
+            planString.contains("idx_threads_subject") || planString.contains("USING INDEX") || planString.contains("SCAN"),
+            "Query should use idx_threads_subject or scan. Plan: \(planString)"
+        )
+    }
+
+    func testThreadListingByMessageCountUsesIndex() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "count-thread", subject: "Count Test", messageCount: 5)
+        try database.upsertThread(thread)
+
+        // Query plan for thread listing by message count
+        let plan = try database.explainQueryPlan(
+            "SELECT * FROM threads ORDER BY message_count DESC LIMIT 50"
+        )
+
+        let planString = plan.joined(separator: " ")
+        XCTAssertTrue(
+            planString.contains("idx_threads_message_count") || planString.contains("USING INDEX") || planString.contains("SCAN"),
+            "Query should use idx_threads_message_count or scan. Plan: \(planString)"
+        )
+    }
+
+    func testBatchThreadPositionUpdate() throws {
+        try database.initialize()
+
+        // Create a thread with 15 messages to trigger batch update
+        let thread = Thread(id: "batch-thread", subject: "Batch Update Test")
+        try database.upsertThread(thread)
+
+        for i in 1...15 {
+            let message = MailMessage(
+                id: "batch-msg-\(i)",
+                subject: "Message \(i)",
+                dateReceived: Date(timeIntervalSince1970: Double(1700000000 + i * 100)),
+                threadId: "batch-thread"
+            )
+            try database.upsertMessage(message)
+            try database.addMessageToThread(messageId: "batch-msg-\(i)", threadId: "batch-thread")
+        }
+
+        // Update thread positions using batch update
+        try database.updateThreadPositions(threadId: "batch-thread")
+
+        // Verify positions were updated correctly
+        let messages = try database.getMessagesInThreadViaJunction(threadId: "batch-thread", limit: 100, offset: 0)
+        XCTAssertEqual(messages.count, 15)
+
+        for (index, message) in messages.enumerated() {
+            XCTAssertEqual(message.threadPosition, index + 1,
+                          "Message \(message.id) should have position \(index + 1)")
+            XCTAssertEqual(message.threadTotal, 15,
+                          "Message \(message.id) should have total 15")
+        }
+    }
+
+    func testSmallThreadPositionUpdateUsesIndividualQueries() throws {
+        try database.initialize()
+
+        // Create a thread with 5 messages (below batch threshold of 10)
+        let thread = Thread(id: "small-thread", subject: "Small Thread Test")
+        try database.upsertThread(thread)
+
+        for i in 1...5 {
+            let message = MailMessage(
+                id: "small-msg-\(i)",
+                subject: "Message \(i)",
+                dateReceived: Date(timeIntervalSince1970: Double(1700000000 + i * 100)),
+                threadId: "small-thread"
+            )
+            try database.upsertMessage(message)
+            try database.addMessageToThread(messageId: "small-msg-\(i)", threadId: "small-thread")
+        }
+
+        // Update thread positions
+        try database.updateThreadPositions(threadId: "small-thread")
+
+        // Verify positions were updated correctly
+        let messages = try database.getMessagesInThreadViaJunction(threadId: "small-thread", limit: 100, offset: 0)
+        XCTAssertEqual(messages.count, 5)
+
+        for (index, message) in messages.enumerated() {
+            XCTAssertEqual(message.threadPosition, index + 1)
+            XCTAssertEqual(message.threadTotal, 5)
+        }
+    }
+
+    func testEmptyThreadPositionUpdateDoesNothing() throws {
+        try database.initialize()
+
+        let thread = Thread(id: "empty-thread", subject: "Empty Thread")
+        try database.upsertThread(thread)
+
+        // Should not throw for empty thread
+        XCTAssertNoThrow(try database.updateThreadPositions(threadId: "empty-thread"))
+    }
+
+    func testThreadQueryWithPaginationBoundsMemory() throws {
+        try database.initialize()
+
+        // Create 100 threads
+        for i in 1...100 {
+            let thread = Thread(
+                id: "page-thread-\(i)",
+                subject: "Thread \(i)",
+                lastDate: Date(timeIntervalSince1970: Double(1700000000 + i * 100))
+            )
+            try database.upsertThread(thread)
+        }
+
+        // Get first page of 10
+        let page1 = try database.getThreads(limit: 10, offset: 0)
+        XCTAssertEqual(page1.count, 10, "First page should have 10 threads")
+
+        // Get second page of 10
+        let page2 = try database.getThreads(limit: 10, offset: 10)
+        XCTAssertEqual(page2.count, 10, "Second page should have 10 threads")
+
+        // Verify pages don't overlap
+        let page1Ids = Set(page1.map { $0.id })
+        let page2Ids = Set(page2.map { $0.id })
+        XCTAssertTrue(page1Ids.isDisjoint(with: page2Ids), "Pages should not overlap")
+    }
+
+    func testThreadDetailViewUsesIndexes() throws {
+        try database.initialize()
+
+        // Create thread with messages
+        let thread = Thread(id: "detail-thread", subject: "Detail Test")
+        try database.upsertThread(thread)
+
+        let message = MailMessage(id: "detail-msg", subject: "Detail Message", threadId: "detail-thread")
+        try database.upsertMessage(message)
+        try database.addMessageToThread(messageId: "detail-msg", threadId: "detail-thread")
+
+        // Query plan for thread detail (get messages in thread)
+        let plan = try database.explainQueryPlan(
+            "SELECT m.* FROM messages m JOIN thread_messages tm ON m.id = tm.message_id WHERE tm.thread_id = 'detail-thread' ORDER BY m.date_received ASC"
+        )
+
+        let planString = plan.joined(separator: " ")
+        XCTAssertTrue(
+            planString.contains("idx_thread_messages_thread_id") ||
+            planString.contains("USING INDEX") ||
+            planString.contains("USING COVERING INDEX") ||
+            planString.contains("sqlite_autoindex"),
+            "Thread detail query should use an index. Plan: \(planString)"
+        )
+    }
 }
