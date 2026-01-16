@@ -208,6 +208,101 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Bulk copy mailboxes from attached Envelope Index to the vault mailboxes table.
+    ///
+    /// This method performs a direct `INSERT INTO mailboxes SELECT ... FROM envelope.mailboxes`
+    /// to efficiently copy mailbox/folder metadata without row-by-row processing.
+    ///
+    /// **Prerequisites:**
+    /// - Database must be initialized via `initialize()`
+    /// - Envelope Index must be attached via `attachEnvelopeIndex(path:)`
+    ///
+    /// **Column Mapping:**
+    /// - `envelope.mailboxes.ROWID` → `mailboxes.id`
+    /// - `envelope.mailboxes.url` → `mailboxes.full_path`
+    /// - Extracted from URL: `mailboxes.name` (last path component)
+    /// - Extracted from URL: `mailboxes.account_id` (second path component after "mailbox://")
+    ///
+    /// Note: `parent_id`, `message_count`, and `unread_count` are set to defaults (NULL, 0, 0)
+    /// as the Envelope Index doesn't store this hierarchy information directly.
+    ///
+    /// - Returns: The number of mailboxes copied
+    /// - Throws: `MailDatabaseError.notInitialized` if database connection is not open.
+    /// - Throws: `MailDatabaseError.queryFailed` if the bulk INSERT fails.
+    @discardableResult
+    public func bulkCopyMailboxes() throws -> Int {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        do {
+            let now = Int(Date().timeIntervalSince1970)
+
+            // Use INSERT OR REPLACE to handle cases where mailboxes already exist
+            // The id column preserves the ROWID from Envelope Index for foreign key compatibility
+            //
+            // URL format examples:
+            //   mailbox://account-name/INBOX
+            //   mailbox://account-name/Sent
+            //   imap://user@server/INBOX
+            //
+            // We extract:
+            //   - account_id: Using SUBSTR and INSTR to get the part between :// and next /
+            //   - name: Last path component using SUBSTR after last /
+            //   - full_path: The entire URL for reference
+            // Extract name (last path component after final '/') using a recursive CTE
+            // to find the position of the last slash, since SQLite doesn't have a built-in
+            // function for this. We use REPLACE to count slashes and work backwards.
+            //
+            // For simpler approach: use SUBSTR with calculated position
+            // The name is everything after the last '/'
+            _ = try conn.execute("""
+                INSERT OR REPLACE INTO mailboxes (id, account_id, name, full_path, parent_id, message_count, unread_count, synced_at)
+                SELECT
+                    ROWID,
+                    -- Extract account_id: part between '://' and next '/'
+                    -- e.g., 'mailbox://account-name/INBOX' -> 'account-name'
+                    CASE
+                        WHEN INSTR(url, '://') > 0 THEN
+                            CASE
+                                WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0 THEN
+                                    SUBSTR(url, INSTR(url, '://') + 3, INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1)
+                                ELSE
+                                    SUBSTR(url, INSTR(url, '://') + 3)
+                            END
+                        ELSE
+                            'unknown'
+                    END AS account_id,
+                    -- Extract name: last path component (after final '/')
+                    -- Use a WITH clause to compute the last slash position
+                    -- For URLs like 'mailbox://account/INBOX' -> 'INBOX'
+                    -- For URLs like 'mailbox://account/folder/sub' -> 'sub'
+                    CASE
+                        WHEN INSTR(url, '/') = 0 THEN url
+                        ELSE SUBSTR(url, LENGTH(RTRIM(url, REPLACE(url, '/', ''))) + 1)
+                    END AS name,
+                    url AS full_path,
+                    NULL AS parent_id,
+                    0 AS message_count,
+                    0 AS unread_count,
+                    \(now) AS synced_at
+                FROM envelope.mailboxes
+                WHERE url IS NOT NULL
+                """)
+
+            // Get the count of copied mailboxes
+            let result = try conn.query("SELECT COUNT(*) FROM mailboxes")
+            for row in result {
+                if let count = try? row.getInt(0) {
+                    return count
+                }
+            }
+            return 0
+        } catch {
+            throw MailDatabaseError.queryFailed(underlying: error)
+        }
+    }
+
     // MARK: - Schema Definition
 
     /// Run all pending migrations to bring schema up to date

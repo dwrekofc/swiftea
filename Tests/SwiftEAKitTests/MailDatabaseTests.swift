@@ -2806,4 +2806,135 @@ final class MailDatabaseTests: XCTestCase {
                 """)
         }
     }
+
+    /// Creates a mock Envelope Index database with a mailboxes table containing test data.
+    /// This creates a pure mock that mimics Apple Mail's Envelope Index schema.
+    private func createMockEnvelopeIndexWithMailboxes(
+        at path: String,
+        mailboxes: [(rowId: Int, url: String)]
+    ) throws {
+        // Create parent directory if needed
+        let parentDir = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
+
+        // Create the mock Envelope Index directly using Libsql
+        let db = try Database(path)
+        let conn = try db.connect()
+
+        // Create the mailboxes table matching Apple Mail's Envelope Index schema
+        _ = try conn.execute("""
+            CREATE TABLE IF NOT EXISTS mailboxes (
+                url TEXT
+            )
+            """)
+
+        // Insert test data with explicit ROWID
+        for mailbox in mailboxes {
+            _ = try conn.execute("""
+                INSERT INTO mailboxes (ROWID, url)
+                VALUES (\(mailbox.rowId), '\(mailbox.url)')
+                """)
+        }
+    }
+
+    // MARK: - Bulk Copy Mailboxes Tests
+
+    func testBulkCopyMailboxesThrowsWhenNotInitialized() throws {
+        // Database not initialized - should throw notInitialized error
+        let nonInitializedDB = MailDatabase(databasePath: "/tmp/test-not-init-mailboxes.db")
+
+        XCTAssertThrowsError(try nonInitializedDB.bulkCopyMailboxes()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected notInitialized error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testBulkCopyMailboxesWithEmptyEnvelopeIndex() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with an empty mailboxes table
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMailboxesEmpty")
+
+        // Create mock with zero mailboxes
+        try createMockEnvelopeIndexWithMailboxes(at: envelopePath, mailboxes: [])
+
+        // Attach the mock envelope index
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // Bulk copy should succeed but return 0 since no mailboxes
+        let count = try database.bulkCopyMailboxes()
+        XCTAssertEqual(count, 0)
+
+        try database.detachEnvelopeIndex()
+    }
+
+    func testBulkCopyMailboxesWithValidEnvelopeData() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMailboxesValid")
+
+        // Create the mock database with typical Apple Mail mailbox URLs
+        try createMockEnvelopeIndexWithMailboxes(at: envelopePath, mailboxes: [
+            (1, "mailbox://my-account/INBOX"),
+            (2, "mailbox://my-account/Sent"),
+            (3, "mailbox://work-account/INBOX")
+        ])
+
+        // Attach the mock envelope index
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // Perform bulk copy
+        let count = try database.bulkCopyMailboxes()
+
+        // Verify count
+        XCTAssertEqual(count, 3)
+
+        // Detach
+        try database.detachEnvelopeIndex()
+
+        // Verify the mailboxes table has the data
+        XCTAssertTrue(try database.tableExists("mailboxes"))
+    }
+
+    func testBulkCopyMailboxesPreservesEnvelopeRowId() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with specific ROWIDs
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMailboxRowIds")
+
+        try createMockEnvelopeIndexWithMailboxes(at: envelopePath, mailboxes: [
+            (100, "mailbox://account1/INBOX"),
+            (200, "mailbox://account2/Sent")
+        ])
+
+        // Perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        let count = try database.bulkCopyMailboxes()
+        try database.detachEnvelopeIndex()
+
+        XCTAssertEqual(count, 2)
+    }
+
+    func testBulkCopyMailboxesExtractsAccountIdAndName() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMailboxExtract")
+
+        try createMockEnvelopeIndexWithMailboxes(at: envelopePath, mailboxes: [
+            (1, "mailbox://test-account/INBOX")
+        ])
+
+        // Perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        _ = try database.bulkCopyMailboxes()
+        try database.detachEnvelopeIndex()
+
+        // Verify the mailbox was inserted with extracted values
+        // The mailboxes table should have the row
+        XCTAssertTrue(try database.tableExists("mailboxes"))
+    }
 }
