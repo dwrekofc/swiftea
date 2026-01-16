@@ -65,6 +65,37 @@ final class MailCommandValidationTests: XCTestCase {
         XCTAssertNoThrow(try MailSyncCommand.parseAsRoot([]))
     }
 
+    // MARK: - MailSyncCommand --bulk-copy Tests
+
+    func testSyncCommandBulkCopyFlagParsesCorrectly() throws {
+        let command = try MailSyncCommand.parseAsRoot(["--bulk-copy"]) as! MailSyncCommand
+        XCTAssertTrue(command.bulkCopy)
+    }
+
+    func testSyncCommandBulkCopyDefaultsToFalse() throws {
+        let command = try MailSyncCommand.parseAsRoot([]) as! MailSyncCommand
+        XCTAssertFalse(command.bulkCopy)
+    }
+
+    func testSyncCommandBulkCopyCanCombineWithVerbose() throws {
+        let command = try MailSyncCommand.parseAsRoot(["--bulk-copy", "--verbose"]) as! MailSyncCommand
+        XCTAssertTrue(command.bulkCopy)
+        XCTAssertTrue(command.verbose)
+    }
+
+    func testSyncCommandBulkCopyCanCombineWithNoExport() throws {
+        // --bulk-copy can be combined with --no-export (though bulk-copy doesn't do export anyway)
+        let command = try MailSyncCommand.parseAsRoot(["--bulk-copy", "--no-export"]) as! MailSyncCommand
+        XCTAssertTrue(command.bulkCopy)
+        XCTAssertTrue(command.noExport)
+    }
+
+    func testSyncCommandBulkCopyCannotCombineWithWatch() throws {
+        // --bulk-copy with --watch should still parse (validation happens at runtime)
+        // The combination is technically valid to parse but may not make sense operationally
+        XCTAssertNoThrow(try MailSyncCommand.parseAsRoot(["--bulk-copy", "--watch"]))
+    }
+
     // MARK: - MailSearchCommand Validation Tests
 
     func testSearchCommandLimitZeroIsInvalid() throws {

@@ -172,6 +172,15 @@ struct MailSyncCommand: ParsableCommand {
     @Flag(name: .long, help: "Disable automatic export to Swiftea/Mail/ after sync")
     var noExport: Bool = false
 
+    @Flag(name: .long, help: """
+        Use bulk copy mode for initial sync. This performs a fast direct SQL copy from \
+        Apple Mail's Envelope Index database to the SwiftEA vault, bypassing the normal \
+        incremental sync process. Use this for first-time sync of large mailboxes. \
+        Note: This mode only copies metadata (subjects, senders, dates) and does not \
+        parse .emlx files for body content or threading headers.
+        """)
+    var bulkCopy: Bool = false
+
     @Option(name: .long, help: "Sync interval in seconds for watch mode (default: 300, minimum: 30)")
     var interval: Int?
 
@@ -398,6 +407,12 @@ struct MailSyncCommand: ParsableCommand {
             }
         }
 
+        // Handle --bulk-copy flag: fast direct SQL copy for initial sync
+        if bulkCopy {
+            try performBulkCopySync(mailDatabase: mailDatabase, vault: vault)
+            return
+        }
+
         log("Syncing mail from Apple Mail...")
 
         do {
@@ -501,6 +516,61 @@ struct MailSyncCommand: ParsableCommand {
         } catch {
             // Log but don't fail sync if backward sync has issues
             logError("Backward sync failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Bulk Copy
+
+    /// Perform a fast bulk copy from Apple Mail's Envelope Index to the SwiftEA vault.
+    ///
+    /// This mode performs a direct SQL copy operation, bypassing the normal incremental
+    /// sync process. It's designed for initial sync of large mailboxes where speed is
+    /// critical. The bulk copy only copies metadata (subjects, senders, dates) and does
+    /// not parse .emlx files for body content or threading headers.
+    ///
+    /// After bulk copy, run a normal sync to populate body content and detect threads.
+    private func performBulkCopySync(mailDatabase: MailDatabase, vault: VaultContext) throws {
+        let startTime = Date()
+
+        log("Performing bulk copy from Apple Mail...")
+
+        // Discover Envelope Index path
+        let discovery = EnvelopeIndexDiscovery()
+        let envelopeInfo: EnvelopeIndexInfo
+        do {
+            envelopeInfo = try discovery.discover()
+        } catch {
+            logError("Failed to discover Apple Mail database: \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+
+        if verbose {
+            log("  Envelope Index: \(envelopeInfo.envelopeIndexPath)")
+        }
+
+        // Attach Envelope Index and perform bulk copy
+        do {
+            try mailDatabase.attachEnvelopeIndex(path: envelopeInfo.envelopeIndexPath)
+            defer {
+                try? mailDatabase.detachEnvelopeIndex()
+            }
+
+            let result = try mailDatabase.performBulkCopy()
+            let duration = Date().timeIntervalSince(startTime)
+
+            log("Bulk copy complete:")
+            log("  Addresses: \(result.addressCount)")
+            log("  Mailboxes: \(result.mailboxCount)")
+            log("  Messages: \(result.messageCount)")
+            log("  Total: \(result.totalCount) records")
+            log("  Duration: \(String(format: "%.2f", duration))s")
+            log("")
+            log("Note: Bulk copy only copies metadata. Run 'swea mail sync' to populate")
+            log("body content and detect message threads.")
+
+        } catch let error as MailDatabaseError {
+            logError("Bulk copy failed: \(error.localizedDescription)")
+            throw ExitCode.failure
         }
     }
 
