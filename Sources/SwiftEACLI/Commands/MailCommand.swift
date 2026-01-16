@@ -1220,6 +1220,10 @@ struct MailSearchCommand: ParsableCommand {
               after:YYYY-MM-DD - Messages received after date
               before:YYYY-MM-DD - Messages received before date
               date:YYYY-MM-DD  - Messages received on specific date
+              date:today       - Messages received today
+              date:yesterday   - Messages received yesterday
+              date:week        - Messages from the last 7 days
+              date:month       - Messages from the last 30 days
 
             STATUS FILTER (--status):
               inbox    - Messages in your inbox
@@ -1276,6 +1280,14 @@ struct MailSearchCommand: ParsableCommand {
 
         // Parse the query for structured filters
         var filter = mailDatabase.parseQuery(query)
+
+        // Check for unknown filter names and fail with helpful error
+        if filter.hasUnknownFilters {
+            throw MailValidationError.unknownFilter(
+                names: filter.unknownFilters,
+                validFilters: MailDatabase.SearchFilter.validFilterNames
+            )
+        }
 
         // Apply --status option if provided
         if let statusValue = status {
@@ -2800,6 +2812,7 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
     case watchAndStopMutuallyExclusive
     case invalidInterval(minimum: Int)
     case invalidStatus(value: String)
+    case unknownFilter(names: [String], validFilters: [String])
 
     public var errorDescription: String? {
         switch self {
@@ -2813,6 +2826,14 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
             return "--interval must be at least \(minimum) seconds"
         case .invalidStatus(let value):
             return "Invalid status '\(value)'. Valid options: inbox, archived, deleted"
+        case .unknownFilter(let names, let validFilters):
+            let unknownList = names.map { "'\($0)'" }.joined(separator: ", ")
+            let validList = validFilters.joined(separator: ", ")
+            if names.count == 1 {
+                return "Unknown filter \(unknownList). Valid filters: \(validList)"
+            } else {
+                return "Unknown filters \(unknownList). Valid filters: \(validList)"
+            }
         }
     }
 }

@@ -678,6 +678,8 @@ public final class MailDatabase: @unchecked Sendable {
         public var hasAttachments: Bool?
         public var freeText: String?
         public var mailboxStatus: MailboxStatus?
+        /// Unknown filter names found in the query (e.g., "badfilter" from "badfilter:value")
+        public var unknownFilters: [String] = []
 
         public init() {}
 
@@ -692,6 +694,14 @@ public final class MailDatabase: @unchecked Sendable {
         public var hasFreeText: Bool {
             freeText != nil && !freeText!.isEmpty
         }
+
+        /// Check if unknown filters were found
+        public var hasUnknownFilters: Bool {
+            !unknownFilters.isEmpty
+        }
+
+        /// List of valid filter names for error messages
+        public static let validFilterNames = ["from", "to", "subject", "mailbox", "is", "has", "after", "before", "date"]
     }
 
     /// Parse a structured query string into filters
@@ -727,7 +737,7 @@ public final class MailDatabase: @unchecked Sendable {
             // has: filters
             ("has:attachments?", { _, f in f.hasAttachments = true }),
 
-            // Date filters (YYYY-MM-DD format)
+            // Date filters (YYYY-MM-DD format or keywords: today, yesterday, week, month)
             ("after:(\\d{4}-\\d{2}-\\d{2})", { value, f in f.dateAfter = parseDate(value) }),
             ("before:(\\d{4}-\\d{2}-\\d{2})", { value, f in f.dateBefore = parseDate(value) }),
             ("date:(\\d{4}-\\d{2}-\\d{2})", { value, f in
@@ -738,6 +748,37 @@ public final class MailDatabase: @unchecked Sendable {
                     if let endOfDay = Calendar.current.date(byAdding: .day, value: 1, to: date) {
                         f.dateBefore = endOfDay
                     }
+                }
+            }),
+            // Date keywords: today, yesterday, week (last 7 days), month (last 30 days)
+            ("date:today", { _, f in
+                let today = Calendar.current.startOfDay(for: Date())
+                f.dateAfter = today
+                if let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today) {
+                    f.dateBefore = tomorrow
+                }
+            }),
+            ("date:yesterday", { _, f in
+                let today = Calendar.current.startOfDay(for: Date())
+                if let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: today) {
+                    f.dateAfter = yesterday
+                    f.dateBefore = today
+                }
+            }),
+            ("date:week", { _, f in
+                let today = Calendar.current.startOfDay(for: Date())
+                if let weekAgo = Calendar.current.date(byAdding: .day, value: -7, to: today),
+                   let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today) {
+                    f.dateAfter = weekAgo
+                    f.dateBefore = tomorrow
+                }
+            }),
+            ("date:month", { _, f in
+                let today = Calendar.current.startOfDay(for: Date())
+                if let monthAgo = Calendar.current.date(byAdding: .day, value: -30, to: today),
+                   let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today) {
+                    f.dateAfter = monthAgo
+                    f.dateBefore = tomorrow
                 }
             })
         ]
@@ -769,13 +810,31 @@ public final class MailDatabase: @unchecked Sendable {
             }
         }
 
-        // Clean up remaining query (free text for FTS)
-        let cleanedFreeText = remainingQuery
+        // Clean up remaining query and detect unknown filters
+        let tokens = remainingQuery
             .trimmingCharacters(in: .whitespaces)
             .components(separatedBy: .whitespaces)
             .filter { !$0.isEmpty }
-            .joined(separator: " ")
 
+        // Check for unknown filter patterns (word:value format)
+        // Valid filter prefixes: from, to, subject, mailbox, is, has, after, before, date
+        let unknownFilterRegex = try? NSRegularExpression(pattern: "^([a-zA-Z]+):", options: [])
+        var freeTextTokens: [String] = []
+
+        for token in tokens {
+            let range = NSRange(token.startIndex..., in: token)
+            if let match = unknownFilterRegex?.firstMatch(in: token, options: [], range: range),
+               let filterNameRange = Range(match.range(at: 1), in: token) {
+                let filterName = String(token[filterNameRange]).lowercased()
+                // Check if this is an unknown filter name
+                if !SearchFilter.validFilterNames.contains(filterName) {
+                    filter.unknownFilters.append(filterName)
+                }
+            }
+            freeTextTokens.append(token)
+        }
+
+        let cleanedFreeText = freeTextTokens.joined(separator: " ")
         if !cleanedFreeText.isEmpty {
             filter.freeText = cleanedFreeText
         }

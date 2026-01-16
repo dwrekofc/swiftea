@@ -282,6 +282,65 @@ final class MailDatabaseTests: XCTestCase {
         }
     }
 
+    func testSearchWithUnknownFilterName() throws {
+        try database.initialize()
+
+        let message = MailMessage(id: "filter-test", subject: "Test message for filter")
+        try database.upsertMessage(message)
+
+        // Unknown filter names (badfilter:value format) should not crash
+        // This tests the FTS5 column prefix syntax handling
+        XCTAssertNoThrow(try database.searchMessages(query: "badfilter:test"), "Search should not crash for unknown filter syntax")
+        XCTAssertNoThrow(try database.searchMessages(query: "unknown:value"), "Search should not crash for unknown filter syntax")
+        XCTAssertNoThrow(try database.searchMessages(query: "foo:bar baz:qux"), "Search should not crash for multiple unknown filters")
+    }
+
+    func testParseQueryDetectsUnknownFilters() throws {
+        try database.initialize()
+
+        // Single unknown filter
+        let filter1 = database.parseQuery("badfilter:test")
+        XCTAssertTrue(filter1.hasUnknownFilters)
+        XCTAssertEqual(filter1.unknownFilters, ["badfilter"])
+
+        // Multiple unknown filters
+        let filter2 = database.parseQuery("foo:bar baz:qux")
+        XCTAssertTrue(filter2.hasUnknownFilters)
+        XCTAssertEqual(filter2.unknownFilters, ["foo", "baz"])
+
+        // Unknown filter mixed with valid filter
+        let filter3 = database.parseQuery("from:alice@example.com badfilter:test")
+        XCTAssertTrue(filter3.hasUnknownFilters)
+        XCTAssertEqual(filter3.unknownFilters, ["badfilter"])
+        XCTAssertEqual(filter3.from, "alice@example.com")
+
+        // Valid filters only - no unknown filters
+        let filter4 = database.parseQuery("from:alice to:bob subject:hello")
+        XCTAssertFalse(filter4.hasUnknownFilters)
+        XCTAssertEqual(filter4.unknownFilters, [])
+
+        // Plain text search without filter syntax - no unknown filters
+        let filter5 = database.parseQuery("hello world")
+        XCTAssertFalse(filter5.hasUnknownFilters)
+        XCTAssertEqual(filter5.unknownFilters, [])
+
+        // is: and has: filters are valid
+        let filter6 = database.parseQuery("is:read has:attachments")
+        XCTAssertFalse(filter6.hasUnknownFilters)
+        XCTAssertEqual(filter6.isRead, true)
+        XCTAssertEqual(filter6.hasAttachments, true)
+
+        // Date filters are valid
+        let filter7 = database.parseQuery("after:2024-01-01 before:2024-12-31 date:2024-06-15")
+        XCTAssertFalse(filter7.hasUnknownFilters)
+    }
+
+    func testValidFilterNamesConstant() throws {
+        // Verify the list of valid filter names includes all expected filters
+        let expected = ["from", "to", "subject", "mailbox", "is", "has", "after", "before", "date"]
+        XCTAssertEqual(MailDatabase.SearchFilter.validFilterNames.sorted(), expected.sorted())
+    }
+
     func testSearchWithMixedSpecialCharacters() throws {
         try database.initialize()
 
