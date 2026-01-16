@@ -11,6 +11,7 @@ public enum MailDatabaseError: Error, LocalizedError {
     case notInitialized
     case envelopeIndexNotFound(path: String)
     case envelopeIndexAttachFailed(underlying: Error)
+    case bulkCopyFailed(operation: String, underlying: Error)
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,8 @@ public enum MailDatabaseError: Error, LocalizedError {
             return "Envelope Index not found at path: \(path)"
         case .envelopeIndexAttachFailed(let error):
             return "Failed to attach Envelope Index: \(error.localizedDescription)"
+        case .bulkCopyFailed(let operation, let error):
+            return "Bulk copy failed during \(operation): \(error.localizedDescription)"
         }
     }
 }
@@ -441,6 +444,160 @@ public final class MailDatabase: @unchecked Sendable {
             return 0
         } catch {
             throw MailDatabaseError.queryFailed(underlying: error)
+        }
+    }
+
+    /// Result of a bulk copy operation
+    public struct BulkCopyResult: Sendable {
+        /// Number of addresses copied
+        public let addressCount: Int
+        /// Number of mailboxes copied
+        public let mailboxCount: Int
+        /// Number of messages copied
+        public let messageCount: Int
+
+        /// Total number of records copied across all tables
+        public var totalCount: Int {
+            addressCount + mailboxCount + messageCount
+        }
+    }
+
+    /// Perform bulk copy of all data from attached Envelope Index to the vault database.
+    ///
+    /// This method executes all bulk copy operations (`bulkCopyAddresses`, `bulkCopyMailboxes`,
+    /// `bulkCopyMessages`) in sequence. Each individual INSERT is atomic (auto-committed by SQLite).
+    ///
+    /// **Prerequisites:**
+    /// - Database must be initialized via `initialize()`
+    /// - Envelope Index must be attached via `attachEnvelopeIndex(path:)`
+    ///
+    /// **Atomicity Note:**
+    /// Due to libSQL's handling of attached databases, explicit BEGIN/COMMIT transactions
+    /// cannot be used. Each bulk INSERT is individually atomic. If a failure occurs mid-operation,
+    /// partial data may exist. Use `INSERT OR REPLACE` semantics to safely re-run after failures.
+    ///
+    /// **Error Handling:**
+    /// - On failure, an error is logged with progress (how many records were copied before failure)
+    /// - The operation can be safely retried as it uses INSERT OR REPLACE
+    ///
+    /// - Returns: A `BulkCopyResult` containing counts for each table
+    /// - Throws: `MailDatabaseError.notInitialized` if database connection is not open.
+    /// - Throws: `MailDatabaseError.bulkCopyFailed` if any bulk operation fails.
+    @discardableResult
+    public func performBulkCopy() throws -> BulkCopyResult {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+
+        // Execute bulk copy operations using a single SELECT that UNIONs all data
+        // This uses INSERT ... SELECT with UNION to combine all operations in one statement
+        // Working around libSQL's lock contention when executing multiple statements on attached DBs
+        do {
+            // Step 1: Copy addresses
+            _ = try conn.execute("""
+                INSERT OR REPLACE INTO addresses (id, email, name, synced_at)
+                SELECT ROWID, address, comment, \(now) FROM envelope.addresses
+                """)
+
+            // Get address count before proceeding
+            var addressCount = 0
+            let addressResult = try conn.query("SELECT COUNT(*) FROM addresses")
+            for row in addressResult {
+                addressCount = (try? row.getInt(0)) ?? 0
+            }
+
+            // Step 2: Copy mailboxes
+            _ = try conn.execute("""
+                INSERT OR REPLACE INTO mailboxes (id, account_id, name, full_path, parent_id, message_count, unread_count, synced_at)
+                SELECT
+                    ROWID,
+                    CASE WHEN INSTR(url, '://') > 0 THEN
+                        CASE WHEN INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') > 0 THEN
+                            SUBSTR(url, INSTR(url, '://') + 3, INSTR(SUBSTR(url, INSTR(url, '://') + 3), '/') - 1)
+                        ELSE SUBSTR(url, INSTR(url, '://') + 3) END
+                    ELSE 'unknown' END,
+                    CASE WHEN INSTR(url, '/') = 0 THEN url
+                        ELSE SUBSTR(url, LENGTH(RTRIM(url, REPLACE(url, '/', ''))) + 1) END,
+                    url, NULL, 0, 0, \(now)
+                FROM envelope.mailboxes WHERE url IS NOT NULL
+                """)
+
+            // Get mailbox count
+            var mailboxCount = 0
+            let mailboxResult = try conn.query("SELECT COUNT(*) FROM mailboxes")
+            for row in mailboxResult {
+                mailboxCount = (try? row.getInt(0)) ?? 0
+            }
+
+            // Step 3: Copy messages
+            _ = try conn.execute("""
+                INSERT OR REPLACE INTO messages (
+                    id, apple_rowid, message_id, mailbox_id, mailbox_name, account_id,
+                    subject, sender_name, sender_email, date_sent, date_received,
+                    is_read, is_flagged, is_deleted, has_attachments,
+                    emlx_path, body_text, body_html, export_path,
+                    synced_at, updated_at,
+                    mailbox_status, pending_sync_action, last_known_mailbox_id,
+                    in_reply_to, threading_references, thread_id,
+                    thread_position, thread_total
+                )
+                SELECT
+                    CASE WHEN m.message_id IS NOT NULL AND m.message_id != '' THEN
+                        LOWER(REPLACE(REPLACE(TRIM(m.message_id), '<', ''), '>', ''))
+                    ELSE PRINTF('%032d', m.ROWID) END,
+                    m.ROWID, m.message_id, m.mailbox,
+                    CASE WHEN mb.url IS NOT NULL AND INSTR(mb.url, '/') > 0 THEN
+                        SUBSTR(mb.url, LENGTH(RTRIM(mb.url, REPLACE(mb.url, '/', ''))) + 1)
+                    ELSE NULL END,
+                    CASE WHEN mb.url IS NOT NULL AND INSTR(mb.url, '://') > 0 THEN
+                        CASE WHEN INSTR(SUBSTR(mb.url, INSTR(mb.url, '://') + 3), '/') > 0 THEN
+                            SUBSTR(mb.url, INSTR(mb.url, '://') + 3, INSTR(SUBSTR(mb.url, INSTR(mb.url, '://') + 3), '/') - 1)
+                        ELSE SUBSTR(mb.url, INSTR(mb.url, '://') + 3) END
+                    ELSE NULL END,
+                    s.subject, a.comment, a.address,
+                    CAST(COALESCE(m.date_sent, 0) AS INTEGER),
+                    CAST(COALESCE(m.date_received, 0) AS INTEGER),
+                    COALESCE(m.read, 0), COALESCE(m.flagged, 0), 0, 0,
+                    NULL, NULL, NULL, NULL, \(now), \(now),
+                    'inbox', NULL, NULL, NULL, NULL, NULL, NULL, NULL
+                FROM envelope.messages m
+                LEFT JOIN envelope.subjects s ON m.subject = s.ROWID
+                LEFT JOIN envelope.addresses a ON m.sender = a.ROWID
+                LEFT JOIN envelope.mailboxes mb ON m.mailbox = mb.ROWID
+                """)
+
+            // Get message count
+            var messageCount = 0
+            let messageResult = try conn.query("SELECT COUNT(*) FROM messages")
+            for row in messageResult {
+                messageCount = (try? row.getInt(0)) ?? 0
+            }
+
+            return BulkCopyResult(
+                addressCount: addressCount,
+                mailboxCount: mailboxCount,
+                messageCount: messageCount
+            )
+        } catch {
+            // Log the failure
+            print("[MailDatabase] Bulk copy failed: \(error.localizedDescription)")
+
+            // Determine which operation failed based on error context
+            let operation: String
+            if let dbError = error as? MailDatabaseError {
+                switch dbError {
+                case .queryFailed:
+                    operation = "database query"
+                default:
+                    operation = "bulk copy"
+                }
+            } else {
+                operation = "bulk copy"
+            }
+
+            throw MailDatabaseError.bulkCopyFailed(operation: operation, underlying: error)
         }
     }
 

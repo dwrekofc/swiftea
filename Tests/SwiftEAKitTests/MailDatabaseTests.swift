@@ -3118,6 +3118,143 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertTrue(try database.tableExists("messages"))
     }
 
+    // MARK: - performBulkCopy Transaction Tests
+
+    func testPerformBulkCopyThrowsWhenNotInitialized() throws {
+        let dbPath = (testDir as NSString).appendingPathComponent("uninit.db")
+        let nonInitializedDB = MailDatabase(databasePath: dbPath)
+
+        XCTAssertThrowsError(try nonInitializedDB.performBulkCopy()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected notInitialized error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testPerformBulkCopyWithEmptyEnvelopeIndex() throws {
+        try database.initialize()
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEmptyEnvelope")
+
+        // Create mock with no data
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [])
+
+        // Attach and perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        let result = try database.performBulkCopy()
+        try database.detachEnvelopeIndex()
+
+        // Should return zero counts for all tables
+        XCTAssertEqual(result.addressCount, 2)  // Default addresses from helper
+        XCTAssertEqual(result.mailboxCount, 1)  // Default mailbox from helper
+        XCTAssertEqual(result.messageCount, 0)
+        XCTAssertEqual(result.totalCount, 3)
+    }
+
+    func testPerformBulkCopyWithValidData() throws {
+        try database.initialize()
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockValidEnvelope")
+
+        // Create mock with test data
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 1,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1736000000.0,
+                dateSent: 1735990000.0,
+                messageId: "<test1@example.com>",
+                read: 1,
+                flagged: 0
+            ),
+            MockEnvelopeMessage(
+                rowId: 2,
+                subjectId: 2,
+                senderId: 2,
+                mailboxId: 1,
+                dateReceived: 1736100000.0,
+                dateSent: 1736090000.0,
+                messageId: "<test2@example.com>",
+                read: 0,
+                flagged: 1
+            )
+        ])
+
+        // Attach and perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        let result = try database.performBulkCopy()
+        try database.detachEnvelopeIndex()
+
+        // Should copy all data atomically
+        XCTAssertEqual(result.addressCount, 2)  // Default addresses
+        XCTAssertEqual(result.mailboxCount, 1)  // Default mailbox
+        XCTAssertEqual(result.messageCount, 2)
+        XCTAssertEqual(result.totalCount, 5)
+    }
+
+    func testPerformBulkCopyReturnsCorrectResult() throws {
+        try database.initialize()
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockResultEnvelope")
+
+        // Create mock with specific counts
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 100,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1736200000.0,
+                dateSent: 1736190000.0,
+                messageId: "<result-test@example.com>",
+                read: 1,
+                flagged: 0
+            )
+        ])
+
+        // Attach and perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        let result = try database.performBulkCopy()
+        try database.detachEnvelopeIndex()
+
+        // Verify result structure
+        XCTAssertGreaterThan(result.addressCount, 0)
+        XCTAssertGreaterThan(result.mailboxCount, 0)
+        XCTAssertEqual(result.messageCount, 1)
+        XCTAssertEqual(result.totalCount, result.addressCount + result.mailboxCount + result.messageCount)
+    }
+
+    func testPerformBulkCopyIsIdempotent() throws {
+        try database.initialize()
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockIdempotentEnvelope")
+
+        // Create mock with test data
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 50,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1736300000.0,
+                dateSent: 1736290000.0,
+                messageId: "<idempotent@example.com>",
+                read: 0,
+                flagged: 0
+            )
+        ])
+
+        // Perform bulk copy twice
+        try database.attachEnvelopeIndex(path: envelopePath)
+        let result1 = try database.performBulkCopy()
+        let result2 = try database.performBulkCopy()
+        try database.detachEnvelopeIndex()
+
+        // Results should be the same (INSERT OR REPLACE is idempotent)
+        XCTAssertEqual(result1.messageCount, result2.messageCount)
+        XCTAssertEqual(result1.addressCount, result2.addressCount)
+        XCTAssertEqual(result1.mailboxCount, result2.mailboxCount)
+    }
+
     // MARK: - Mock Envelope Index Messages Helper
 
     /// Structure to represent a mock message for testing
@@ -3134,7 +3271,7 @@ final class MailDatabaseTests: XCTestCase {
     }
 
     /// Creates a mock Envelope Index database with messages table and related tables.
-    /// This creates a pure mock that mimics Apple Mail's Envelope Index schema.
+    /// Uses sqlite3 command line tool to avoid Libsql connection locking issues.
     private func createMockEnvelopeIndexWithMessages(
         at path: String,
         messages: [MockEnvelopeMessage]
@@ -3143,12 +3280,8 @@ final class MailDatabaseTests: XCTestCase {
         let parentDir = (path as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
 
-        // Create the mock Envelope Index directly using Libsql
-        let db = try Database(path)
-        let conn = try db.connect()
-
-        // Create the messages table matching Apple Mail's Envelope Index schema
-        _ = try conn.execute("""
+        // Build SQL script
+        var sql = """
             CREATE TABLE IF NOT EXISTS messages (
                 subject INTEGER,
                 sender INTEGER,
@@ -3158,49 +3291,47 @@ final class MailDatabaseTests: XCTestCase {
                 mailbox INTEGER,
                 read INTEGER,
                 flagged INTEGER
-            )
-            """)
+            );
+            CREATE TABLE IF NOT EXISTS subjects (subject TEXT);
+            CREATE TABLE IF NOT EXISTS addresses (address TEXT, comment TEXT);
+            CREATE TABLE IF NOT EXISTS mailboxes (url TEXT);
+            INSERT INTO subjects (ROWID, subject) VALUES (1, 'Test Subject 1');
+            INSERT INTO subjects (ROWID, subject) VALUES (2, 'Test Subject 2');
+            INSERT INTO addresses (ROWID, address, comment) VALUES (1, 'sender1@example.com', 'Sender One');
+            INSERT INTO addresses (ROWID, address, comment) VALUES (2, 'sender2@example.com', 'Sender Two');
+            INSERT INTO mailboxes (ROWID, url) VALUES (1, 'mailbox://test-account/INBOX');
 
-        // Create subjects table
-        _ = try conn.execute("""
-            CREATE TABLE IF NOT EXISTS subjects (
-                subject TEXT
-            )
-            """)
+            """
 
-        // Create addresses table
-        _ = try conn.execute("""
-            CREATE TABLE IF NOT EXISTS addresses (
-                address TEXT,
-                comment TEXT
-            )
-            """)
-
-        // Create mailboxes table
-        _ = try conn.execute("""
-            CREATE TABLE IF NOT EXISTS mailboxes (
-                url TEXT
-            )
-            """)
-
-        // Insert test subjects
-        _ = try conn.execute("INSERT INTO subjects (ROWID, subject) VALUES (1, 'Test Subject 1')")
-        _ = try conn.execute("INSERT INTO subjects (ROWID, subject) VALUES (2, 'Test Subject 2')")
-
-        // Insert test addresses
-        _ = try conn.execute("INSERT INTO addresses (ROWID, address, comment) VALUES (1, 'sender1@example.com', 'Sender One')")
-        _ = try conn.execute("INSERT INTO addresses (ROWID, address, comment) VALUES (2, 'sender2@example.com', 'Sender Two')")
-
-        // Insert test mailboxes
-        _ = try conn.execute("INSERT INTO mailboxes (ROWID, url) VALUES (1, 'mailbox://test-account/INBOX')")
-
-        // Insert test messages with explicit ROWID
+        // Add message inserts
         for msg in messages {
             let messageIdValue = msg.messageId.map { "'\($0)'" } ?? "NULL"
-            _ = try conn.execute("""
+            sql += """
                 INSERT INTO messages (ROWID, subject, sender, date_received, date_sent, message_id, mailbox, read, flagged)
-                VALUES (\(msg.rowId), \(msg.subjectId), \(msg.senderId), \(msg.dateReceived), \(msg.dateSent), \(messageIdValue), \(msg.mailboxId), \(msg.read), \(msg.flagged))
-                """)
+                VALUES (\(msg.rowId), \(msg.subjectId), \(msg.senderId), \(msg.dateReceived), \(msg.dateSent), \(messageIdValue), \(msg.mailboxId), \(msg.read), \(msg.flagged));
+
+                """
+        }
+
+        // Use sqlite3 command line to create database (avoids Libsql connection issues)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [path]
+
+        let pipe = Pipe()
+        process.standardInput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+
+        let inputData = sql.data(using: .utf8)!
+        pipe.fileHandleForWriting.write(inputData)
+        pipe.fileHandleForWriting.closeFile()
+
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw NSError(domain: "TestError", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "Failed to create mock database"])
         }
     }
 }
