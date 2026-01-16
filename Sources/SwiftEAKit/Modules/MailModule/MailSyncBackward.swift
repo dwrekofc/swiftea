@@ -212,6 +212,38 @@ public final class MailSyncBackward: @unchecked Sendable {
 /// AppleScript templates for moving messages to Archive and Trash
 public struct MailSyncBackwardScripts {
 
+    /// Common script fragment to find a message by ID in common mailboxes
+    ///
+    /// Mail.app doesn't support global message searches - we must search within each mailbox.
+    /// This searches only Inbox, Sent Items, and Archive for performance reasons.
+    /// (Searching all mailboxes is prohibitively slow for Exchange accounts with many folders.)
+    private static func messageSearchScript(messageId: String) -> String {
+        """
+        set targetMsgId to "\(escapeAppleScript(messageId))"
+        set theMessage to missing value
+        set searchMailboxes to {"Inbox", "Sent Items", "Sent", "Archive"}
+
+        -- Search all accounts
+        repeat with acc in accounts
+            repeat with mboxName in searchMailboxes
+                try
+                    set targetMbox to mailbox mboxName of acc
+                    set foundMsgs to (every message of targetMbox whose message id is targetMsgId)
+                    if (count of foundMsgs) > 0 then
+                        set theMessage to item 1 of foundMsgs
+                        exit repeat
+                    end if
+                end try
+            end repeat
+            if theMessage is not missing value then exit repeat
+        end repeat
+
+        if theMessage is missing value then
+            error "Message not found in Inbox, Sent, or Archive" number -1728
+        end if
+        """
+    }
+
     /// Generate script to archive a message (move to Archive mailbox)
     ///
     /// Uses the account's Archive mailbox which Mail.app creates automatically.
@@ -219,11 +251,7 @@ public struct MailSyncBackwardScripts {
     /// - Returns: AppleScript to move the message to Archive
     public static func archiveMessage(byMessageId messageId: String) -> String {
         """
-        set targetMessages to (every message whose message id is "\(escapeAppleScript(messageId))")
-        if (count of targetMessages) = 0 then
-            error "Message not found" number -1728
-        end if
-        set theMessage to item 1 of targetMessages
+        \(messageSearchScript(messageId: messageId))
         set theAccount to account of mailbox of theMessage
         set archiveMailbox to mailbox "Archive" of theAccount
         move theMessage to archiveMailbox
@@ -238,19 +266,29 @@ public struct MailSyncBackwardScripts {
     /// - Returns: AppleScript to move the message to Trash
     public static func deleteMessage(byMessageId messageId: String) -> String {
         """
-        set targetMessages to (every message whose message id is "\(escapeAppleScript(messageId))")
-        if (count of targetMessages) = 0 then
-            error "Message not found" number -1728
-        end if
-        set theMessage to item 1 of targetMessages
-        delete theMessage
+        \(messageSearchScript(messageId: messageId))
+        set theAccount to account of mailbox of theMessage
+        set trashMailbox to mailbox "Trash" of theAccount
+        move theMessage to trashMailbox
         return "deleted"
         """
     }
 
+    /// Strip RFC822 angle brackets from message ID for Mail.app AppleScript lookup
+    ///
+    /// Mail.app's AppleScript interface expects message IDs without angle brackets,
+    /// but RFC822 Message-ID headers include them (e.g., `<foo@bar.com>`).
+    private static func stripAngleBrackets(_ messageId: String) -> String {
+        var result = messageId
+        if result.hasPrefix("<") { result.removeFirst() }
+        if result.hasSuffix(">") { result.removeLast() }
+        return result
+    }
+
     /// Escape a string for safe use in AppleScript
     private static func escapeAppleScript(_ string: String) -> String {
-        string
+        // First strip angle brackets for message IDs, then escape special characters
+        stripAngleBrackets(string)
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")

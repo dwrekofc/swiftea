@@ -228,7 +228,8 @@ final class MailSyncBackwardTests: XCTestCase {
         try backwardSync.archiveMessage(id: "archive-script-test")
 
         XCTAssertEqual(mockAppleScript.executeMailScriptCalls.count, 1)
-        XCTAssertTrue(mockAppleScript.executeMailScriptCalls.first?.contains("<archive-script@example.com>") ?? false)
+        // Note: angle brackets are stripped for Mail.app AppleScript lookup
+        XCTAssertTrue(mockAppleScript.executeMailScriptCalls.first?.contains("archive-script@example.com") ?? false)
         XCTAssertTrue(mockAppleScript.executeMailScriptCalls.first?.contains("Archive") ?? false)
     }
 
@@ -381,7 +382,8 @@ final class MailSyncBackwardTests: XCTestCase {
         try backwardSync.deleteMessage(id: "delete-script-test")
 
         XCTAssertEqual(mockAppleScript.executeMailScriptCalls.count, 1)
-        XCTAssertTrue(mockAppleScript.executeMailScriptCalls.first?.contains("<delete-script@example.com>") ?? false)
+        // Note: angle brackets are stripped for Mail.app AppleScript lookup
+        XCTAssertTrue(mockAppleScript.executeMailScriptCalls.first?.contains("delete-script@example.com") ?? false)
         XCTAssertTrue(mockAppleScript.executeMailScriptCalls.first?.contains("delete") ?? false)
     }
 
@@ -607,7 +609,9 @@ final class MailSyncBackwardTests: XCTestCase {
     func testArchiveMessageScriptContainsMessageId() {
         let script = MailSyncBackwardScripts.archiveMessage(byMessageId: "<test@example.com>")
 
-        XCTAssertTrue(script.contains("<test@example.com>"))
+        // Note: angle brackets are stripped for Mail.app AppleScript lookup
+        XCTAssertTrue(script.contains("test@example.com"))
+        XCTAssertFalse(script.contains("<test@example.com>"), "Angle brackets should be stripped")
         XCTAssertTrue(script.contains("Archive"))
         XCTAssertTrue(script.contains("move"))
     }
@@ -615,8 +619,12 @@ final class MailSyncBackwardTests: XCTestCase {
     func testDeleteMessageScriptContainsMessageId() {
         let script = MailSyncBackwardScripts.deleteMessage(byMessageId: "<delete@example.com>")
 
-        XCTAssertTrue(script.contains("<delete@example.com>"))
-        XCTAssertTrue(script.contains("delete"))
+        // Note: angle brackets are stripped for Mail.app AppleScript lookup
+        XCTAssertTrue(script.contains("delete@example.com"))
+        XCTAssertFalse(script.contains("<delete@example.com>"), "Angle brackets should be stripped")
+        // Now uses Trash mailbox like archive does
+        XCTAssertTrue(script.contains("Trash"))
+        XCTAssertTrue(script.contains("move"))
     }
 
     func testScriptsEscapeSpecialCharacters() {
