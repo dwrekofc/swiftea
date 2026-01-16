@@ -163,6 +163,14 @@ public struct SyncResult: Sendable {
 }
 
 /// Synchronizes Apple Mail data to the libSQL mirror database
+/// Cached mailbox metadata to avoid redundant queries
+private struct MailboxInfo {
+    let id: Int
+    let name: String?
+    let url: String
+    let path: String?
+}
+
 public final class MailSync: @unchecked Sendable {
     private let mailDatabase: MailDatabase
     private let discovery: EnvelopeIndexDiscovery
@@ -172,6 +180,11 @@ public final class MailSync: @unchecked Sendable {
 
     private var sourceDb: OpaquePointer?
     private var envelopeInfo: EnvelopeIndexInfo?
+
+    /// Cache of mailbox metadata to eliminate redundant queries
+    private var mailboxCache: [Int: MailboxInfo] = [:]
+    private var mailboxCacheHits: Int = 0
+    private var mailboxCacheMisses: Int = 0
 
     /// Sync options (including parallel workers)
     public var options: MailSyncOptions
@@ -269,6 +282,9 @@ public final class MailSync: @unchecked Sendable {
         let mailboxCount = try syncMailboxes()
         mailboxesProcessed = mailboxCount
 
+        // Populate mailbox cache to eliminate redundant queries during message processing
+        try populateMailboxCache(mailBasePath: info.mailBasePath)
+
         if useIncremental, let syncTime = lastSyncTime {
             // Incremental sync: new messages + status changes + deletions
             let result = try performIncrementalSync(
@@ -336,6 +352,14 @@ public final class MailSync: @unchecked Sendable {
         }
 
         reportProgress(.complete, messagesProcessed, messagesProcessed, "Sync complete")
+
+        // Log mailbox cache efficiency
+        let totalCacheLookups = mailboxCacheHits + mailboxCacheMisses
+        if totalCacheLookups > 0 {
+            let hitRate = Double(mailboxCacheHits) / Double(totalCacheLookups) * 100
+            let logMessage = "Mailbox cache: \(mailboxCacheHits) hits, \(mailboxCacheMisses) misses (\(String(format: "%.1f", hitRate))% hit rate)"
+            reportProgress(.complete, messagesProcessed, messagesProcessed, logMessage)
+        }
 
         let result = SyncResult(
             messagesProcessed: messagesProcessed,
@@ -752,6 +776,41 @@ public final class MailSync: @unchecked Sendable {
         return url
     }
 
+    /// Populate the mailbox cache from the database to eliminate redundant queries during message processing.
+    /// Caches mailbox ID -> (name, url, path) mappings for all mailboxes.
+    private func populateMailboxCache(mailBasePath: String) throws {
+        mailboxCache.removeAll()
+        mailboxCacheHits = 0
+        mailboxCacheMisses = 0
+
+        let sql = """
+            SELECT ROWID, url
+            FROM mailboxes
+            WHERE url IS NOT NULL
+            """
+
+        let rows = try executeQuery(sql)
+
+        for row in rows {
+            guard let rowId = row["ROWID"] as? Int64,
+                  let url = row["url"] as? String else {
+                continue
+            }
+
+            let name = extractMailboxName(from: url)
+            let path = convertMailboxUrlToPath(url, mailBasePath: mailBasePath)
+
+            let info = MailboxInfo(
+                id: Int(rowId),
+                name: name,
+                url: url,
+                path: path
+            )
+
+            mailboxCache[Int(rowId)] = info
+        }
+    }
+
     // MARK: - Message Sync
 
     /// Raw message data from Apple Mail database
@@ -945,14 +1004,24 @@ public final class MailSync: @unchecked Sendable {
             senderEmail = parsed.email
         }
 
-        // Get mailbox info
+        // Get mailbox info from cache
         var mailboxName: String? = nil
+        var mailboxPath: String? = nil
         if let mailboxId = row.mailboxId {
-            let mailboxSql = "SELECT url FROM mailboxes WHERE ROWID = \(mailboxId)"
-            if let mailboxRows = try? executeQuery(mailboxSql),
-               let first = mailboxRows.first,
-               let url = first["url"] as? String {
-                mailboxName = extractMailboxName(from: url)
+            if let cached = mailboxCache[Int(mailboxId)] {
+                mailboxName = cached.name
+                mailboxPath = cached.path
+                mailboxCacheHits += 1
+            } else {
+                // Cache miss - fallback to database query
+                let mailboxSql = "SELECT url FROM mailboxes WHERE ROWID = \(mailboxId)"
+                if let mailboxRows = try? executeQuery(mailboxSql),
+                   let first = mailboxRows.first,
+                   let url = first["url"] as? String {
+                    mailboxName = extractMailboxName(from: url)
+                    mailboxPath = convertMailboxUrlToPath(url, mailBasePath: mailBasePath)
+                    mailboxCacheMisses += 1
+                }
             }
         }
 
@@ -964,29 +1033,22 @@ public final class MailSync: @unchecked Sendable {
         var references: [String] = []
         var messageId: String? = row.messageId  // Initialize with DB value as fallback
 
-        if let mailboxId = row.mailboxId {
-            // Find mailbox path
-            let mailboxPathSql = "SELECT url FROM mailboxes WHERE ROWID = \(mailboxId)"
-            if let mailboxRows = try? executeQuery(mailboxPathSql),
-               let first = mailboxRows.first,
-               let url = first["url"] as? String {
-                // Convert mailbox URL to file path
-                let mailboxPath = convertMailboxUrlToPath(url, mailBasePath: mailBasePath)
-                emlxPath = discovery.emlxPath(forMessageId: Int(row.rowId), mailboxPath: mailboxPath, mailBasePath: mailBasePath)
+        if let path = mailboxPath {
+            // Use cached mailbox path to locate .emlx file
+            emlxPath = discovery.emlxPath(forMessageId: Int(row.rowId), mailboxPath: path, mailBasePath: mailBasePath)
 
-                // Try to parse .emlx
-                if let path = emlxPath {
-                    do {
-                        let parsed = try emlxParser.parse(path: path)
-                        bodyText = parsed.bodyText
-                        bodyHtml = parsed.bodyHtml
-                        // Extract threading headers and RFC822 Message-ID
-                        inReplyTo = parsed.inReplyTo
-                        references = parsed.references
-                        messageId = parsed.messageId ?? messageId  // Prefer parsed value from .emlx
-                    } catch {
-                        // Log but don't fail - body content is optional
-                    }
+            // Try to parse .emlx
+            if let path = emlxPath {
+                do {
+                    let parsed = try emlxParser.parse(path: path)
+                    bodyText = parsed.bodyText
+                    bodyHtml = parsed.bodyHtml
+                    // Extract threading headers and RFC822 Message-ID
+                    inReplyTo = parsed.inReplyTo
+                    references = parsed.references
+                    messageId = parsed.messageId ?? messageId  // Prefer parsed value from .emlx
+                } catch {
+                    // Log but don't fail - body content is optional
                 }
             }
         }
