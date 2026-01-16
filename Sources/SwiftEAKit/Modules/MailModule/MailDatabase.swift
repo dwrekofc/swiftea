@@ -75,8 +75,28 @@ public final class MailDatabase: @unchecked Sendable {
 
     /// Close the database connection
     public func close() {
+        // Checkpoint the WAL before closing to ensure all changes are flushed to the main DB file
+        // This prevents "database is locked" errors when the next process tries to access it
+        if let conn = connection {
+            do {
+                // PRAGMA wal_checkpoint(RESTART) forces all committed transactions to be flushed
+                // This empties the WAL file and can be safely called even if no transactions are pending
+                _ = try conn.query("PRAGMA wal_checkpoint(RESTART)")
+            } catch {
+                // Silently ignore checkpoint errors during cleanup
+                // The connection will still be released even if checkpoint fails
+            }
+        }
+
+        // Release all references
+        // libSQL connections are released when the connection object is deallocated
         connection = nil
         database = nil
+    }
+
+    deinit {
+        // Ensure cleanup even if close() wasn't explicitly called
+        close()
     }
 
     // MARK: - Schema Definition
