@@ -2834,6 +2834,7 @@ struct MailExportThreadsCommand: ParsableCommand {
 public enum MailValidationError: Error, LocalizedError, Equatable {
     case invalidLimit
     case emptyRecipient
+    case invalidEmailFormat(email: String)
     case watchAndStopMutuallyExclusive
     case invalidInterval(minimum: Int)
     case invalidStatus(value: String)
@@ -2845,6 +2846,8 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
             return "--limit must be a positive integer"
         case .emptyRecipient:
             return "--to requires a non-empty email address"
+        case .invalidEmailFormat(let email):
+            return "Invalid email format: '\(email)'. Email must contain '@' and a domain (e.g., user@example.com)"
         case .watchAndStopMutuallyExclusive:
             return "--watch and --stop cannot be used together"
         case .invalidInterval(let minimum):
@@ -2860,6 +2863,27 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
                 return "Unknown filters \(unknownList). Valid filters: \(validList)"
             }
         }
+    }
+
+    /// Validates that an email has a basic valid format (contains @ and domain)
+    /// Returns nil if valid, or the invalid email string if invalid
+    static func validateEmailFormat(_ email: String) -> String? {
+        let trimmed = email.trimmingCharacters(in: .whitespaces)
+        // Basic validation: must contain @, have content before @, and have domain after @
+        let parts = trimmed.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              !parts[0].isEmpty,
+              !parts[1].isEmpty,
+              parts[1].contains(".") else {
+            return trimmed
+        }
+        // Check domain has content before and after the dot
+        let domainParts = parts[1].split(separator: ".", omittingEmptySubsequences: false)
+        guard domainParts.count >= 2,
+              domainParts.allSatisfy({ !$0.isEmpty }) else {
+            return trimmed
+        }
+        return nil
     }
 }
 
@@ -3354,8 +3378,29 @@ struct MailComposeCommand: ParsableCommand {
 
     func validate() throws {
         // --to requires a non-empty email address
-        if to.trimmingCharacters(in: .whitespaces).isEmpty {
+        let trimmedTo = to.trimmingCharacters(in: .whitespaces)
+        if trimmedTo.isEmpty {
             throw MailValidationError.emptyRecipient
+        }
+        // Validate email format
+        if let invalidEmail = MailValidationError.validateEmailFormat(trimmedTo) {
+            throw MailValidationError.invalidEmailFormat(email: invalidEmail)
+        }
+        // Validate CC emails if provided
+        if let ccEmails = cc {
+            for email in ccEmails.split(separator: ",").map({ String($0) }) {
+                if let invalidEmail = MailValidationError.validateEmailFormat(email) {
+                    throw MailValidationError.invalidEmailFormat(email: invalidEmail)
+                }
+            }
+        }
+        // Validate BCC emails if provided
+        if let bccEmails = bcc {
+            for email in bccEmails.split(separator: ",").map({ String($0) }) {
+                if let invalidEmail = MailValidationError.validateEmailFormat(email) {
+                    throw MailValidationError.invalidEmailFormat(email: invalidEmail)
+                }
+            }
         }
     }
 

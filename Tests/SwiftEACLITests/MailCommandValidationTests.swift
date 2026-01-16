@@ -22,6 +22,15 @@ final class MailCommandValidationTests: XCTestCase {
         if errorString.contains("MailValidationError.watchAndStopMutuallyExclusive") {
             return .watchAndStopMutuallyExclusive
         }
+        if errorString.contains("MailValidationError.invalidEmailFormat") {
+            // Extract email from error string pattern
+            if let range = errorString.range(of: "invalidEmailFormat(email: \""),
+               let endRange = errorString.range(of: "\")", range: range.upperBound..<errorString.endIndex) {
+                let email = String(errorString[range.upperBound..<endRange.lowerBound])
+                return .invalidEmailFormat(email: email)
+            }
+            return .invalidEmailFormat(email: "unknown")
+        }
         return nil
     }
 
@@ -187,6 +196,195 @@ final class MailCommandValidationTests: XCTestCase {
             "--to", "test@example.com",
             "--subject", "Test Subject"
         ]))
+    }
+
+    // MARK: - Email Format Validation Tests
+
+    func testComposeCommandInvalidEmailNoAtSign() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "invalid",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat(let email) = validationError {
+                XCTAssertEqual(email, "invalid")
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testComposeCommandInvalidEmailNoDomain() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "user@",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat = validationError {
+                // Success - email validation failed as expected
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testComposeCommandInvalidEmailNoUsername() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "@example.com",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat = validationError {
+                // Success - email validation failed as expected
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testComposeCommandInvalidEmailDomainNoDot() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "user@domain",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat = validationError {
+                // Success - email validation failed as expected
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testComposeCommandInvalidEmailDomainEmptyTLD() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "user@domain.",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat = validationError {
+                // Success - email validation failed as expected
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testComposeCommandValidEmailWithSubdomain() throws {
+        XCTAssertNoThrow(try MailComposeCommand.parseAsRoot([
+            "--to", "user@mail.example.com",
+            "--subject", "Test"
+        ]))
+    }
+
+    func testComposeCommandValidEmailWithPlusSign() throws {
+        XCTAssertNoThrow(try MailComposeCommand.parseAsRoot([
+            "--to", "user+tag@example.com",
+            "--subject", "Test"
+        ]))
+    }
+
+    func testComposeCommandInvalidCCEmail() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "valid@example.com",
+            "--cc", "invalid-email",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat = validationError {
+                // Success - email validation failed as expected
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testComposeCommandInvalidBCCEmail() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "valid@example.com",
+            "--bcc", "also-invalid",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat = validationError {
+                // Success - email validation failed as expected
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testComposeCommandValidMultipleCCEmails() throws {
+        XCTAssertNoThrow(try MailComposeCommand.parseAsRoot([
+            "--to", "valid@example.com",
+            "--cc", "user1@example.com,user2@test.org",
+            "--subject", "Test"
+        ]))
+    }
+
+    func testComposeCommandInvalidSecondCCEmail() throws {
+        XCTAssertThrowsError(try MailComposeCommand.parseAsRoot([
+            "--to", "valid@example.com",
+            "--cc", "user1@example.com,invalid-second",
+            "--subject", "Test"
+        ])) { error in
+            guard let validationError = extractValidationError(from: error) else {
+                XCTFail("Expected MailValidationError.invalidEmailFormat, got \(error)")
+                return
+            }
+            if case .invalidEmailFormat = validationError {
+                // Success - email validation failed as expected
+            } else {
+                XCTFail("Expected invalidEmailFormat error, got \(validationError)")
+            }
+        }
+    }
+
+    func testEmailValidationErrorDescription() {
+        let error = MailValidationError.invalidEmailFormat(email: "bad-email")
+        XCTAssertEqual(
+            error.errorDescription,
+            "Invalid email format: 'bad-email'. Email must contain '@' and a domain (e.g., user@example.com)"
+        )
+    }
+
+    // MARK: - Email Validation Helper Tests
+
+    func testValidateEmailFormatWithValidEmail() {
+        XCTAssertNil(MailValidationError.validateEmailFormat("user@example.com"))
+        XCTAssertNil(MailValidationError.validateEmailFormat("user.name@example.com"))
+        XCTAssertNil(MailValidationError.validateEmailFormat("user+tag@example.com"))
+        XCTAssertNil(MailValidationError.validateEmailFormat("user@sub.domain.com"))
+    }
+
+    func testValidateEmailFormatWithInvalidEmail() {
+        XCTAssertNotNil(MailValidationError.validateEmailFormat("invalid"))
+        XCTAssertNotNil(MailValidationError.validateEmailFormat("user@"))
+        XCTAssertNotNil(MailValidationError.validateEmailFormat("@example.com"))
+        XCTAssertNotNil(MailValidationError.validateEmailFormat("user@domain"))
+        XCTAssertNotNil(MailValidationError.validateEmailFormat("user@.com"))
+        XCTAssertNotNil(MailValidationError.validateEmailFormat("user@domain."))
     }
 
     // MARK: - Error Description Tests
