@@ -157,11 +157,31 @@ public final class MessageResolver: @unchecked Sendable {
 
     /// Verify that a resolved message exists in Mail.app
     ///
+    /// Mail.app doesn't support global message searches - we must search within each mailbox.
+    /// This searches only Inbox, Sent Items, and Archive for performance reasons.
+    /// (Searching all mailboxes is prohibitively slow for Exchange accounts with many folders.)
+    ///
     /// - Parameter resolved: The resolved message to verify
     /// - Throws: `MessageResolutionError` if verification fails
     public func verifyInMailApp(_ resolved: ResolvedMessage) throws {
+        // Search within common mailboxes since global search doesn't work in Mail.app
         let script = """
-            set matchCount to count of (every message whose message id is "\(escapeAppleScript(resolved.messageId))")
+            set targetMsgId to "\(escapeAppleScript(resolved.messageId))"
+            set matchCount to 0
+            set searchMailboxes to {"Inbox", "Sent Items", "Sent", "Archive"}
+
+            repeat with acc in accounts
+                repeat with mboxName in searchMailboxes
+                    try
+                        set targetMbox to mailbox mboxName of acc
+                        set foundMsgs to (every message of targetMbox whose message id is targetMsgId)
+                        set matchCount to matchCount + (count of foundMsgs)
+                        if matchCount > 0 then exit repeat
+                    end try
+                end repeat
+                if matchCount > 0 then exit repeat
+            end repeat
+
             return matchCount
             """
 
@@ -232,9 +252,23 @@ public final class MessageResolver: @unchecked Sendable {
 
     // MARK: - Helpers
 
-    /// Escape a string for safe use in AppleScript
+    /// Strip RFC822 angle brackets from message ID for Mail.app AppleScript lookup
+    ///
+    /// Mail.app's AppleScript interface expects message IDs without angle brackets,
+    /// but RFC822 Message-ID headers include them (e.g., `<foo@bar.com>`).
+    private func stripAngleBrackets(_ messageId: String) -> String {
+        var result = messageId
+        if result.hasPrefix("<") { result.removeFirst() }
+        if result.hasSuffix(">") { result.removeLast() }
+        return result
+    }
+
+    /// Escape a message ID for safe use in AppleScript
+    ///
+    /// This function strips angle brackets (required for Mail.app lookup) and escapes special characters.
     private func escapeAppleScript(_ string: String) -> String {
-        string
+        // First strip angle brackets for message IDs, then escape special characters
+        stripAngleBrackets(string)
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
     }

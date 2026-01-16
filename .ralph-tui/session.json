@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "sessionId": "b701ccde-f613-4191-b2f7-1c16f831995a",
+  "status": "running",
+  "startedAt": "2026-01-16T12:50:47.905Z",
+  "updatedAt": "2026-01-16T13:14:31.700Z",
+  "currentIteration": 3,
+  "maxIterations": 10,
+  "tasksCompleted": 3,
+  "isPaused": false,
+  "agentPlugin": "claude",
+  "trackerState": {
+    "plugin": "beads",
+    "epicId": "swiftea-ykk",
+    "totalTasks": 5,
+    "tasks": [
+      {
+        "id": "swiftea-ykk.2",
+        "title": "US-002: Fix archive AppleScript for localized mailbox names",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "swiftea-ykk.1",
+        "title": "US-001: Fix delete AppleScript to move to Trash",
+        "status": "completed",
+        "completedInSession": false
+      },
+      {
+        "id": "swiftea-ykk.5",
+        "title": "US-005: Keep pending action on AppleScript failure for retry",
+        "status": "completed",
+        "completedInSession": true
+      },
+      {
+        "id": "swiftea-ykk.4",
+        "title": "US-004: Delete exported .md files on archive/delete",
+        "status": "completed",
+        "completedInSession": true
+      },
+      {
+        "id": "swiftea-ykk.3",
+        "title": "US-003: Expand mailbox search to include more folders",
+        "status": "open",
+        "completedInSession": false
+      }
+    ]
+  },
+  "iterations": [
+    {
+      "iteration": 1,
+      "status": "completed",
+      "taskId": "swiftea-ykk.5",
+      "taskTitle": "US-005: Keep pending action on AppleScript failure for retry",
+      "taskCompleted": true,
+      "durationMs": 488164,
+      "startedAt": "2026-01-16T12:50:51.637Z",
+      "endedAt": "2026-01-16T12:58:59.801Z"
+    },
+    {
+      "iteration": 2,
+      "status": "completed",
+      "taskId": "swiftea-ykk.4",
+      "taskTitle": "US-004: Delete exported .md files on archive/delete",
+      "taskCompleted": true,
+      "durationMs": 572328,
+      "startedAt": "2026-01-16T12:59:01.122Z",
+      "endedAt": "2026-01-16T13:08:33.450Z"
+    }
+  ],
+  "skippedTaskIds": [],
+  "cwd": "/Users/I852000/Library/Mobile Documents/com~apple~CloudDocs/swiftea",
+  "activeTaskIds": [],
+  "subagentPanelVisible": false
+}

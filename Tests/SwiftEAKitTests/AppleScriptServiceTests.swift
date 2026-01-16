@@ -112,8 +112,10 @@ final class AppleScriptServiceTests: XCTestCase {
     /// Tests that the message resolution helper generates correct AppleScript fragment.
     /// The helper is private but we can verify its output through the public methods.
     func testMessageResolutionHelperGeneratesCorrectScript() {
-        // All action scripts should contain the same resolution pattern
+        // All action scripts should contain the same mailbox-search resolution pattern
+        // Note: Mail.app doesn't support global message searches, so we search within mailboxes
         let testMessageId = "<test-resolution@example.com>"
+        let strippedMessageId = "test-resolution@example.com"  // Angle brackets are stripped
 
         let deleteScript = MailActionScripts.deleteMessage(byMessageId: testMessageId)
         let moveScript = MailActionScripts.moveMessage(byMessageId: testMessageId, toMailbox: "Archive")
@@ -121,39 +123,35 @@ final class AppleScriptServiceTests: XCTestCase {
         let readScript = MailActionScripts.setReadStatus(byMessageId: testMessageId, read: true)
         let replyScript = MailActionScripts.createReply(byMessageId: testMessageId, replyToAll: false, body: nil, send: false)
 
-        // All scripts should have the same message resolution pattern
+        // All scripts should have the new mailbox-search resolution pattern
         let expectedResolutionComponents = [
-            "set targetMessages to (every message whose message id is \"\(testMessageId)\")",
-            "if (count of targetMessages) = 0 then",
-            "error \"Message not found: \(testMessageId)\" number -1728",
-            "if (count of targetMessages) > 1 then",
-            "error \"Multiple messages found with Message-ID\" number -1",
-            "set theMessage to item 1 of targetMessages"
+            "set targetMsgId to \"\(strippedMessageId)\"",
+            "set theMessage to missing value",
+            "set searchMailboxes to {\"Inbox\", \"Sent Items\", \"Sent\", \"Archive\"}",
+            "repeat with acc in accounts",
+            "repeat with mboxName in searchMailboxes",
+            "every message of targetMbox whose message id is targetMsgId",
+            "if (count of foundMsgs) > 0",
+            "set theMessage to item 1 of foundMsgs",
+            "if theMessage is missing value",
+            "error \"Message not found:"
         ]
 
-        // Verify delete script contains resolution pattern
-        for component in expectedResolutionComponents {
-            XCTAssertTrue(deleteScript.contains(component), "deleteMessage should contain: \(component)")
-        }
+        let scripts = [
+            ("deleteMessage", deleteScript),
+            ("moveMessage", moveScript),
+            ("setFlag", flagScript),
+            ("setReadStatus", readScript),
+            ("createReply", replyScript)
+        ]
 
-        // Verify move script contains resolution pattern
-        for component in expectedResolutionComponents {
-            XCTAssertTrue(moveScript.contains(component), "moveMessage should contain: \(component)")
-        }
-
-        // Verify flag script contains resolution pattern
-        for component in expectedResolutionComponents {
-            XCTAssertTrue(flagScript.contains(component), "setFlag should contain: \(component)")
-        }
-
-        // Verify read status script contains resolution pattern
-        for component in expectedResolutionComponents {
-            XCTAssertTrue(readScript.contains(component), "setReadStatus should contain: \(component)")
-        }
-
-        // Verify reply script contains resolution pattern
-        for component in expectedResolutionComponents {
-            XCTAssertTrue(replyScript.contains(component), "createReply should contain: \(component)")
+        // Verify all scripts contain the new resolution pattern
+        for (name, script) in scripts {
+            for component in expectedResolutionComponents {
+                XCTAssertTrue(script.contains(component), "\(name) should contain: \(component)")
+            }
+            // Verify angle brackets are stripped
+            XCTAssertFalse(script.contains("<test-resolution@example.com>"), "\(name) should not contain angle brackets in message ID")
         }
     }
 
@@ -184,14 +182,18 @@ final class AppleScriptServiceTests: XCTestCase {
 
     func testDeleteMessageScript() {
         let script = MailActionScripts.deleteMessage(byMessageId: "<test@example.com>")
-        XCTAssertTrue(script.contains("<test@example.com>"))
+        // Note: angle brackets are stripped for Mail.app AppleScript lookup
+        XCTAssertTrue(script.contains("test@example.com"))
+        XCTAssertFalse(script.contains("<test@example.com>"), "Angle brackets should be stripped")
         XCTAssertTrue(script.contains("delete"))
         XCTAssertTrue(script.contains("message id"))
     }
 
     func testMoveMessageScript() {
         let script = MailActionScripts.moveMessage(byMessageId: "<test@example.com>", toMailbox: "Archive")
-        XCTAssertTrue(script.contains("<test@example.com>"))
+        // Note: angle brackets are stripped for Mail.app AppleScript lookup
+        XCTAssertTrue(script.contains("test@example.com"))
+        XCTAssertFalse(script.contains("<test@example.com>"), "Angle brackets should be stripped")
         XCTAssertTrue(script.contains("move"))
         XCTAssertTrue(script.contains("Archive"))
     }
@@ -202,7 +204,9 @@ final class AppleScriptServiceTests: XCTestCase {
             toMailbox: "Archive",
             inAccount: "Work"
         )
-        XCTAssertTrue(script.contains("<test@example.com>"))
+        // Note: angle brackets are stripped for Mail.app AppleScript lookup
+        XCTAssertTrue(script.contains("test@example.com"))
+        XCTAssertFalse(script.contains("<test@example.com>"), "Angle brackets should be stripped")
         XCTAssertTrue(script.contains("move"))
         XCTAssertTrue(script.contains("Archive"))
         XCTAssertTrue(script.contains("Work"))
@@ -377,21 +381,22 @@ final class AppleScriptServiceTests: XCTestCase {
         // Generate script and verify it has required components (but don't execute against Mail.app)
         let script = MailActionScripts.deleteMessage(byMessageId: "<test123@example.com>")
 
-        // Verify the script has required components
+        // Verify the script has required components (new mailbox-search pattern)
         XCTAssertTrue(script.contains("message id"))
         XCTAssertTrue(script.contains("delete"))
-        XCTAssertTrue(script.contains("targetMessages"))
+        XCTAssertTrue(script.contains("foundMsgs"), "Should use foundMsgs variable in new mailbox-search pattern")
+        XCTAssertTrue(script.contains("searchMailboxes"), "Should search within specific mailboxes")
         XCTAssertTrue(script.contains("error") && script.contains("number -1728"), "Should include error handling for message not found")
     }
 
     func testMoveMessageScriptContainsRequiredComponents() throws {
         let script = MailActionScripts.moveMessage(byMessageId: "<move-test@example.com>", toMailbox: "INBOX")
 
-        // Verify script structure
+        // Verify script structure (new mailbox-search pattern)
         XCTAssertTrue(script.contains("message id"))
         XCTAssertTrue(script.contains("move"))
         XCTAssertTrue(script.contains("mailbox \"INBOX\""))
-        XCTAssertTrue(script.contains("targetMessages"))
+        XCTAssertTrue(script.contains("foundMsgs"), "Should use foundMsgs variable in new mailbox-search pattern")
     }
 
     func testSetFlagScriptContainsRequiredComponents() throws {

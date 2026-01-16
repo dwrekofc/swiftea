@@ -350,34 +350,37 @@ public struct MailActionScripts {
 
     /// Generate the AppleScript fragment for resolving a message by its Message-ID.
     ///
-    /// This helper consolidates the common boilerplate for finding a message and
-    /// validating that exactly one match exists. It sets `theMessage` variable to
-    /// the resolved message.
+    /// Mail.app doesn't support global message searches - we must search within each mailbox.
+    /// This searches only Inbox, Sent Items, and Archive for performance reasons.
+    /// (Searching all mailboxes is prohibitively slow for Exchange accounts with many folders.)
+    /// Sets `theMessage` variable to the resolved message.
     ///
     /// - Parameter messageId: The RFC822 Message-ID to search for
     /// - Returns: AppleScript fragment that sets `theMessage` to the found message
-    ///
-    /// Generated script pattern:
-    /// ```applescript
-    /// set targetMessages to (every message whose message id is "<messageId>")
-    /// if (count of targetMessages) = 0 then
-    ///     error "Message not found: <messageId>" number -1728
-    /// end if
-    /// if (count of targetMessages) > 1 then
-    ///     error "Multiple messages found with Message-ID" number -1
-    /// end if
-    /// set theMessage to item 1 of targetMessages
-    /// ```
     private static func messageResolutionScript(messageId: String) -> String {
         """
-        set targetMessages to (every message whose message id is "\(escapeAppleScriptString(messageId))")
-        if (count of targetMessages) = 0 then
+        set targetMsgId to "\(escapeAppleScriptString(messageId))"
+        set theMessage to missing value
+        set searchMailboxes to {"Inbox", "Sent Items", "Sent", "Archive"}
+
+        -- Search all accounts
+        repeat with acc in accounts
+            repeat with mboxName in searchMailboxes
+                try
+                    set targetMbox to mailbox mboxName of acc
+                    set foundMsgs to (every message of targetMbox whose message id is targetMsgId)
+                    if (count of foundMsgs) > 0 then
+                        set theMessage to item 1 of foundMsgs
+                        exit repeat
+                    end if
+                end try
+            end repeat
+            if theMessage is not missing value then exit repeat
+        end repeat
+
+        if theMessage is missing value then
             error "Message not found: \(escapeAppleScriptString(messageId))" number -1728
         end if
-        if (count of targetMessages) > 1 then
-            error "Multiple messages found with Message-ID" number -1
-        end if
-        set theMessage to item 1 of targetMessages
         """
     }
 
@@ -491,9 +494,23 @@ public struct MailActionScripts {
         """
     }
 
-    /// Escape a string for safe use in AppleScript
+    /// Strip RFC822 angle brackets from message ID for Mail.app AppleScript lookup
+    ///
+    /// Mail.app's AppleScript interface expects message IDs without angle brackets,
+    /// but RFC822 Message-ID headers include them (e.g., `<foo@bar.com>`).
+    private static func stripAngleBrackets(_ messageId: String) -> String {
+        var result = messageId
+        if result.hasPrefix("<") { result.removeFirst() }
+        if result.hasSuffix(">") { result.removeLast() }
+        return result
+    }
+
+    /// Escape a message ID for safe use in AppleScript
+    ///
+    /// This function strips angle brackets (required for Mail.app lookup) and escapes special characters.
     private static func escapeAppleScriptString(_ string: String) -> String {
-        string
+        // First strip angle brackets for message IDs, then escape special characters
+        stripAngleBrackets(string)
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\n", with: "\\n")
