@@ -573,6 +573,85 @@ Body text
         XCTAssertTrue(parsed.subject?.contains("continues") == true)
     }
 
+    // MARK: - Character Encoding
+
+    func testParseEmailWithSmartQuotesAndSpecialChars() throws {
+        // Email with Windows-1252 encoded smart quotes that need conversion to UTF-8
+        // Smart quotes: ' (0x92), ' (0x91), " (0x93), " (0x94) in Windows-1252
+        // Em dash: — (0x97) in Windows-1252
+        // Ellipsis: … (0x85) in Windows-1252
+        let messageContent = """
+Message-ID: <smartquotes@test.com>
+From: test@example.com
+Subject: Smart Quotes Test
+Content-Type: text/plain; charset=windows-1252
+
+I hope you're doing well. She said "Hello!" and he replied "Good morning."
+The contract — which was signed yesterday — includes the following...
+"""
+        let byteCount = messageContent.utf8.count
+        let emlxContent = "\(byteCount)\n\(messageContent)"
+
+        let data = emlxContent.data(using: .utf8)!
+        let parsed = try parser.parse(data: data)
+
+        XCTAssertEqual(parsed.messageId, "<smartquotes@test.com>")
+        XCTAssertNotNil(parsed.bodyText)
+        // The body should contain readable text without encoding artifacts like "youâre"
+        XCTAssertFalse(parsed.bodyText?.contains("youâ") ?? false)
+    }
+
+    func testParseBase64BodyWithCharset() throws {
+        // Base64 encoded body - the base64 encoding is handled by the parser
+        let plainText = "I hope you're doing well."
+        let base64Body = plainText.data(using: .utf8)!.base64EncodedString()
+
+        // Create message with proper line ending for base64
+        let messageLines = [
+            "Message-ID: <base64@test.com>",
+            "From: test@example.com",
+            "Subject: Base64 Test",
+            "Content-Type: text/plain; charset=utf-8",
+            "Content-Transfer-Encoding: base64",
+            "",
+            base64Body
+        ]
+        let messageContent = messageLines.joined(separator: "\n")
+        let byteCount = messageContent.utf8.count
+        let emlxContent = "\(byteCount)\n\(messageContent)"
+
+        let data = emlxContent.data(using: .utf8)!
+        let parsed = try parser.parse(data: data)
+
+        XCTAssertEqual(parsed.messageId, "<base64@test.com>")
+        XCTAssertEqual(parsed.bodyText, plainText)
+    }
+
+    func testParseQuotedPrintableBodyWithCharset() throws {
+        // Quoted-printable with charset declaration
+        let plainText = "Special chars: é, ü, ñ"
+        let quotedPrintable = "Special chars: =C3=A9, =C3=BC, =C3=B1"
+
+        let messageLines = [
+            "Message-ID: <qp@test.com>",
+            "From: test@example.com",
+            "Subject: Quoted-Printable Test",
+            "Content-Type: text/plain; charset=utf-8",
+            "Content-Transfer-Encoding: quoted-printable",
+            "",
+            quotedPrintable
+        ]
+        let messageContent = messageLines.joined(separator: "\n")
+        let byteCount = messageContent.utf8.count
+        let emlxContent = "\(byteCount)\n\(messageContent)"
+
+        let data = emlxContent.data(using: .utf8)!
+        let parsed = try parser.parse(data: data)
+
+        XCTAssertEqual(parsed.messageId, "<qp@test.com>")
+        XCTAssertEqual(parsed.bodyText, plainText)
+    }
+
     // MARK: - AttachmentInfo Properties
 
     func testAttachmentInfoProperties() {

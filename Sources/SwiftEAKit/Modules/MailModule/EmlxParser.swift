@@ -219,7 +219,7 @@ public final class EmlxParser: Sendable {
         let date = parseDateHeader(headers["date"])
 
         // Parse body - extract text and HTML parts
-        let (bodyText, bodyHtml, attachments) = parseBody(body, contentType: headers["content-type"])
+        let (bodyText, bodyHtml, attachments) = parseBody(body, contentType: headers["content-type"], headers: headers)
 
         // Try to extract Apple plist from end of file
         var applePlist: [String: Any]? = nil
@@ -373,7 +373,7 @@ public final class EmlxParser: Sendable {
     }
 
     private func decodeQuotedPrintable(_ text: String, charset: String) -> String? {
-        var result = text.replacingOccurrences(of: "_", with: " ")
+        let result = text.replacingOccurrences(of: "_", with: " ")
         var data = Data()
 
         var index = result.startIndex
@@ -530,7 +530,7 @@ public final class EmlxParser: Sendable {
     }
 
     /// Parse email body - extract text, HTML, and attachments
-    private func parseBody(_ body: String, contentType: String?) -> (String?, String?, [AttachmentInfo]) {
+    private func parseBody(_ body: String, contentType: String?, headers: [String: String] = [:]) -> (String?, String?, [AttachmentInfo]) {
         var plainText: String? = nil
         var htmlText: String? = nil
         var attachments: [AttachmentInfo] = []
@@ -559,7 +559,7 @@ public final class EmlxParser: Sendable {
                         htmlText = decodeBodyPart(partBody, headers: partHeaders)
                     } else if partContentType.contains("multipart/") {
                         // Recursively handle nested multipart
-                        let (nestedText, nestedHtml, nestedAttachments) = parseBody(partBody, contentType: partContentType)
+                        let (nestedText, nestedHtml, nestedAttachments) = parseBody(partBody, contentType: partContentType, headers: partHeaders)
                         if plainText == nil { plainText = nestedText }
                         if htmlText == nil { htmlText = nestedHtml }
                         attachments.append(contentsOf: nestedAttachments)
@@ -572,9 +572,9 @@ public final class EmlxParser: Sendable {
             // Single part message
             let ct = contentType.lowercased()
             if ct.contains("text/plain") {
-                plainText = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                plainText = decodeBodyPart(body, headers: headers)
             } else if ct.contains("text/html") {
-                htmlText = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                htmlText = decodeBodyPart(body, headers: headers)
             }
         } else {
             // No content type, assume plain text
@@ -606,22 +606,53 @@ public final class EmlxParser: Sendable {
         // Handle transfer encoding
         let encoding = headers["content-transfer-encoding"]?.lowercased() ?? ""
 
+        // Extract charset from Content-Type header
+        let charset = extractCharset(from: headers["content-type"] ?? "")
+
         if encoding == "quoted-printable" {
-            result = decodeQuotedPrintableBody(result)
+            result = decodeQuotedPrintableBody(result, charset: charset)
         } else if encoding == "base64" {
             if let data = Data(base64Encoded: result.replacingOccurrences(of: "\n", with: "")
-                                                    .replacingOccurrences(of: "\r", with: "")),
-               let decoded = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
-                result = decoded
+                                                    .replacingOccurrences(of: "\r", with: "")) {
+                result = decodeWithCharset(data, charset: charset) ?? ""
+            }
+        } else {
+            // No transfer encoding - the body may still be in a different charset
+            if !charset.isEmpty && charset.lowercased() != "utf-8" && charset.lowercased() != "utf8" {
+                if let reencoded = convertCharsetToUtf8(result, fromCharset: charset) {
+                    result = reencoded
+                }
             }
         }
 
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func decodeQuotedPrintableBody(_ text: String) -> String {
-        var result = ""
-        var lines = text.components(separatedBy: "\n")
+    /// Extract charset from Content-Type header
+    private func extractCharset(from contentType: String) -> String {
+        let pattern = #"charset\s*=\s*"?([^";\s]+)"?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return "utf-8"
+        }
+
+        let range = NSRange(contentType.startIndex..., in: contentType)
+        if let match = regex.firstMatch(in: contentType, range: range),
+           let charsetRange = Range(match.range(at: 1), in: contentType) {
+            return String(contentType[charsetRange])
+        }
+
+        return "utf-8"
+    }
+
+    /// Convert string from one charset to UTF-8
+    private func convertCharsetToUtf8(_ text: String, fromCharset: String) -> String? {
+        guard let data = text.data(using: .isoLatin1) else { return nil }
+        return decodeWithCharset(data, charset: fromCharset)
+    }
+
+    private func decodeQuotedPrintableBody(_ text: String, charset: String = "utf-8") -> String {
+        var bytes: [UInt8] = []
+        let lines = text.components(separatedBy: "\n")
 
         for i in 0..<lines.count {
             var line = lines[i]
@@ -633,7 +664,7 @@ public final class EmlxParser: Sendable {
                 break
             }
 
-            // Decode =XX sequences
+            // Decode =XX sequences into bytes
             var index = line.startIndex
             while index < line.endIndex {
                 if line[index] == "=" {
@@ -642,20 +673,23 @@ public final class EmlxParser: Sendable {
                         if let endIndex = line.index(nextIndex, offsetBy: 2, limitedBy: line.endIndex) {
                             let hex = String(line[nextIndex..<endIndex])
                             if let byte = UInt8(hex, radix: 16) {
-                                result.append(Character(UnicodeScalar(byte)))
+                                bytes.append(byte)
                                 index = endIndex
                                 continue
                             }
                         }
                     }
                 }
-                result.append(line[index])
+                if let byte = String(line[index]).data(using: .utf8)?.first {
+                    bytes.append(byte)
+                }
                 index = line.index(after: index)
             }
-            result.append("\n")
+            bytes.append(contentsOf: "\n".data(using: .utf8)!)
         }
 
-        return result
+        let data = Data(bytes)
+        return decodeWithCharset(data, charset: charset) ?? text
     }
 
     private func parseAttachment(_ headers: [String: String], body: String) -> AttachmentInfo? {
@@ -869,7 +903,7 @@ public final class EmlxParser: Sendable {
 
     private func decodeQuotedPrintableData(_ text: String) -> Data? {
         var bytes: [UInt8] = []
-        var lines = text.components(separatedBy: "\n")
+        let lines = text.components(separatedBy: "\n")
 
         var fullText = ""
         for i in 0..<lines.count {
