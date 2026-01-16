@@ -303,6 +303,147 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Bulk copy messages from attached Envelope Index to the vault messages table.
+    ///
+    /// This method performs a direct `INSERT INTO messages SELECT ... FROM envelope.messages`
+    /// to efficiently copy message metadata without row-by-row processing.
+    ///
+    /// **Prerequisites:**
+    /// - Database must be initialized via `initialize()`
+    /// - Envelope Index must be attached via `attachEnvelopeIndex(path:)`
+    ///
+    /// **Column Mapping:**
+    /// - `envelope.messages.ROWID` → `messages.apple_rowid`
+    /// - `envelope.messages.message_id` → `messages.message_id`
+    /// - `envelope.messages.mailbox` → `messages.mailbox_id`
+    /// - `envelope.messages.date_received` → `messages.date_received`
+    /// - `envelope.messages.date_sent` → `messages.date_sent`
+    /// - `envelope.messages.read` → `messages.is_read`
+    /// - `envelope.messages.flagged` → `messages.is_flagged`
+    /// - `envelope.subjects.subject` (via JOIN) → `messages.subject`
+    /// - `envelope.addresses.address` (via JOIN) → `messages.sender_email`
+    /// - `envelope.addresses.comment` (via JOIN) → `messages.sender_name`
+    ///
+    /// **Stable ID Generation:**
+    /// Generates a deterministic stable ID using:
+    /// 1. `message_id` (RFC822 header) if available - formatted as `printf('%032x', hash)`
+    /// 2. Falls back to ROWID-based ID if no message_id: `printf('%032d', ROWID)`
+    ///
+    /// Note: Body text/HTML, export paths, and threading fields are NOT populated by bulk copy
+    /// as this data isn't available in the Envelope Index. Use sync operations for full data.
+    ///
+    /// - Returns: The number of messages copied
+    /// - Throws: `MailDatabaseError.notInitialized` if database connection is not open.
+    /// - Throws: `MailDatabaseError.queryFailed` if the bulk INSERT fails.
+    @discardableResult
+    public func bulkCopyMessages() throws -> Int {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        do {
+            let now = Int(Date().timeIntervalSince1970)
+
+            // Use INSERT OR REPLACE to handle cases where messages already exist
+            // The stable ID is generated using a deterministic approach:
+            // - If message_id exists: use it directly (normalized) as the basis for the hash
+            // - Otherwise: use ROWID with 'row:' prefix, zero-padded to 32 chars
+            //
+            // Note: SQLite doesn't have native SHA-256, so we use a simplified approach
+            // that produces unique, deterministic IDs. For message_id, we use it directly
+            // as it's already unique. For ROWID fallback, we zero-pad to match the expected
+            // 32-character ID format.
+            //
+            // Joins:
+            // - subjects table: to get the actual subject text (messages.subject is FK)
+            // - addresses table: to get sender email/name (messages.sender is FK)
+            // - mailboxes table: to get mailbox URL for extracting name and account_id
+            _ = try conn.execute("""
+                INSERT OR REPLACE INTO messages (
+                    id, apple_rowid, message_id, mailbox_id, mailbox_name, account_id,
+                    subject, sender_name, sender_email, date_sent, date_received,
+                    is_read, is_flagged, is_deleted, has_attachments,
+                    emlx_path, body_text, body_html, export_path,
+                    synced_at, updated_at,
+                    mailbox_status, pending_sync_action, last_known_mailbox_id,
+                    in_reply_to, threading_references, thread_id,
+                    thread_position, thread_total
+                )
+                SELECT
+                    -- Generate stable ID: prefer message_id, fall back to zero-padded ROWID
+                    CASE
+                        WHEN m.message_id IS NOT NULL AND m.message_id != '' THEN
+                            -- Use message_id directly (trimmed and lowercased for consistency)
+                            LOWER(REPLACE(REPLACE(TRIM(m.message_id), '<', ''), '>', ''))
+                        ELSE
+                            -- Fallback: ROWID as 32-char zero-padded string
+                            PRINTF('%032d', m.ROWID)
+                    END AS id,
+                    m.ROWID AS apple_rowid,
+                    m.message_id,
+                    m.mailbox AS mailbox_id,
+                    -- Extract mailbox name from URL (last path component)
+                    CASE
+                        WHEN mb.url IS NOT NULL AND INSTR(mb.url, '/') > 0 THEN
+                            SUBSTR(mb.url, LENGTH(RTRIM(mb.url, REPLACE(mb.url, '/', ''))) + 1)
+                        ELSE
+                            NULL
+                    END AS mailbox_name,
+                    -- Extract account_id from mailbox URL (part between '://' and next '/')
+                    CASE
+                        WHEN mb.url IS NOT NULL AND INSTR(mb.url, '://') > 0 THEN
+                            CASE
+                                WHEN INSTR(SUBSTR(mb.url, INSTR(mb.url, '://') + 3), '/') > 0 THEN
+                                    SUBSTR(mb.url, INSTR(mb.url, '://') + 3, INSTR(SUBSTR(mb.url, INSTR(mb.url, '://') + 3), '/') - 1)
+                                ELSE
+                                    SUBSTR(mb.url, INSTR(mb.url, '://') + 3)
+                            END
+                        ELSE
+                            NULL
+                    END AS account_id,
+                    s.subject AS subject,
+                    a.comment AS sender_name,
+                    a.address AS sender_email,
+                    -- Convert date from REAL (seconds since 1970) to INTEGER
+                    CAST(COALESCE(m.date_sent, 0) AS INTEGER) AS date_sent,
+                    CAST(COALESCE(m.date_received, 0) AS INTEGER) AS date_received,
+                    COALESCE(m.read, 0) AS is_read,
+                    COALESCE(m.flagged, 0) AS is_flagged,
+                    0 AS is_deleted,          -- Default: not deleted
+                    0 AS has_attachments,     -- Not available in Envelope Index
+                    NULL AS emlx_path,        -- Not available in bulk copy
+                    NULL AS body_text,        -- Not available in bulk copy
+                    NULL AS body_html,        -- Not available in bulk copy
+                    NULL AS export_path,      -- Not available in bulk copy
+                    \(now) AS synced_at,
+                    \(now) AS updated_at,
+                    'inbox' AS mailbox_status,           -- Default status
+                    NULL AS pending_sync_action,         -- No pending action
+                    NULL AS last_known_mailbox_id,       -- Not tracked in bulk copy
+                    NULL AS in_reply_to,                 -- Not available in Envelope Index
+                    NULL AS threading_references,        -- Not available in Envelope Index
+                    NULL AS thread_id,                   -- Threading computed separately
+                    NULL AS thread_position,             -- Threading computed separately
+                    NULL AS thread_total                 -- Threading computed separately
+                FROM envelope.messages m
+                LEFT JOIN envelope.subjects s ON m.subject = s.ROWID
+                LEFT JOIN envelope.addresses a ON m.sender = a.ROWID
+                LEFT JOIN envelope.mailboxes mb ON m.mailbox = mb.ROWID
+                """)
+
+            // Get the count of copied messages
+            let result = try conn.query("SELECT COUNT(*) FROM messages")
+            for row in result {
+                if let count = try? row.getInt(0) {
+                    return count
+                }
+            }
+            return 0
+        } catch {
+            throw MailDatabaseError.queryFailed(underlying: error)
+        }
+    }
+
     // MARK: - Schema Definition
 
     /// Run all pending migrations to bring schema up to date

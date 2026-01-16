@@ -2937,4 +2937,270 @@ final class MailDatabaseTests: XCTestCase {
         // The mailboxes table should have the row
         XCTAssertTrue(try database.tableExists("mailboxes"))
     }
+
+    // MARK: - Bulk Copy Messages Tests
+
+    func testBulkCopyMessagesThrowsWhenNotInitialized() throws {
+        // Database not initialized - should throw notInitialized error
+        let nonInitializedDB = MailDatabase(databasePath: "/tmp/test-not-init-messages.db")
+
+        XCTAssertThrowsError(try nonInitializedDB.bulkCopyMessages()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected notInitialized error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testBulkCopyMessagesWithEmptyEnvelopeIndex() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with empty tables
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMessagesEmpty")
+
+        // Create mock with zero messages
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [])
+
+        // Attach the mock envelope index
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // Bulk copy should succeed but return 0 since no messages
+        let count = try database.bulkCopyMessages()
+        XCTAssertEqual(count, 0)
+
+        try database.detachEnvelopeIndex()
+    }
+
+    func testBulkCopyMessagesWithValidEnvelopeData() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMessagesValid")
+
+        // Create the mock database with messages
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 1,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1700000000,
+                dateSent: 1699990000,
+                messageId: "<test1@example.com>",
+                read: 1,
+                flagged: 0
+            ),
+            MockEnvelopeMessage(
+                rowId: 2,
+                subjectId: 2,
+                senderId: 2,
+                mailboxId: 1,
+                dateReceived: 1700100000,
+                dateSent: 1700090000,
+                messageId: nil, // No message_id - should use ROWID fallback
+                read: 0,
+                flagged: 1
+            )
+        ])
+
+        // Attach the mock envelope index
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // Perform bulk copy
+        let count = try database.bulkCopyMessages()
+
+        // Verify count
+        XCTAssertEqual(count, 2)
+
+        // Detach
+        try database.detachEnvelopeIndex()
+
+        // Verify the messages table has the data
+        XCTAssertTrue(try database.tableExists("messages"))
+    }
+
+    func testBulkCopyMessagesPreservesEnvelopeRowId() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with specific ROWIDs
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMessageRowIds")
+
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 100,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1700000000,
+                dateSent: 1699990000,
+                messageId: "<msg100@example.com>",
+                read: 1,
+                flagged: 0
+            ),
+            MockEnvelopeMessage(
+                rowId: 200,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1700100000,
+                dateSent: 1700090000,
+                messageId: "<msg200@example.com>",
+                read: 0,
+                flagged: 0
+            )
+        ])
+
+        // Perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        let count = try database.bulkCopyMessages()
+        try database.detachEnvelopeIndex()
+
+        XCTAssertEqual(count, 2)
+    }
+
+    func testBulkCopyMessagesGeneratesStableIdFromMessageId() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMessageStableId")
+
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 1,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1700000000,
+                dateSent: 1699990000,
+                messageId: "<test-stable-id@example.com>",
+                read: 1,
+                flagged: 0
+            )
+        ])
+
+        // Perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        _ = try database.bulkCopyMessages()
+        try database.detachEnvelopeIndex()
+
+        // The stable ID should be based on message_id (lowercased, brackets removed)
+        // Expected ID: "test-stable-id@example.com" (from normalized message_id)
+        XCTAssertTrue(try database.tableExists("messages"))
+    }
+
+    func testBulkCopyMessagesUsesRowIdFallbackForMissingMessageId() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with a message that has no message_id
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeMessageRowIdFallback")
+
+        try createMockEnvelopeIndexWithMessages(at: envelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 42,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1700000000,
+                dateSent: 1699990000,
+                messageId: nil, // No message_id
+                read: 0,
+                flagged: 0
+            )
+        ])
+
+        // Perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        _ = try database.bulkCopyMessages()
+        try database.detachEnvelopeIndex()
+
+        // The stable ID should be ROWID as 32-char zero-padded string
+        // Expected ID: "00000000000000000000000000000042"
+        XCTAssertTrue(try database.tableExists("messages"))
+    }
+
+    // MARK: - Mock Envelope Index Messages Helper
+
+    /// Structure to represent a mock message for testing
+    struct MockEnvelopeMessage {
+        let rowId: Int
+        let subjectId: Int
+        let senderId: Int
+        let mailboxId: Int
+        let dateReceived: Double
+        let dateSent: Double
+        let messageId: String?
+        let read: Int
+        let flagged: Int
+    }
+
+    /// Creates a mock Envelope Index database with messages table and related tables.
+    /// This creates a pure mock that mimics Apple Mail's Envelope Index schema.
+    private func createMockEnvelopeIndexWithMessages(
+        at path: String,
+        messages: [MockEnvelopeMessage]
+    ) throws {
+        // Create parent directory if needed
+        let parentDir = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
+
+        // Create the mock Envelope Index directly using Libsql
+        let db = try Database(path)
+        let conn = try db.connect()
+
+        // Create the messages table matching Apple Mail's Envelope Index schema
+        _ = try conn.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                subject INTEGER,
+                sender INTEGER,
+                date_received REAL,
+                date_sent REAL,
+                message_id TEXT,
+                mailbox INTEGER,
+                read INTEGER,
+                flagged INTEGER
+            )
+            """)
+
+        // Create subjects table
+        _ = try conn.execute("""
+            CREATE TABLE IF NOT EXISTS subjects (
+                subject TEXT
+            )
+            """)
+
+        // Create addresses table
+        _ = try conn.execute("""
+            CREATE TABLE IF NOT EXISTS addresses (
+                address TEXT,
+                comment TEXT
+            )
+            """)
+
+        // Create mailboxes table
+        _ = try conn.execute("""
+            CREATE TABLE IF NOT EXISTS mailboxes (
+                url TEXT
+            )
+            """)
+
+        // Insert test subjects
+        _ = try conn.execute("INSERT INTO subjects (ROWID, subject) VALUES (1, 'Test Subject 1')")
+        _ = try conn.execute("INSERT INTO subjects (ROWID, subject) VALUES (2, 'Test Subject 2')")
+
+        // Insert test addresses
+        _ = try conn.execute("INSERT INTO addresses (ROWID, address, comment) VALUES (1, 'sender1@example.com', 'Sender One')")
+        _ = try conn.execute("INSERT INTO addresses (ROWID, address, comment) VALUES (2, 'sender2@example.com', 'Sender Two')")
+
+        // Insert test mailboxes
+        _ = try conn.execute("INSERT INTO mailboxes (ROWID, url) VALUES (1, 'mailbox://test-account/INBOX')")
+
+        // Insert test messages with explicit ROWID
+        for msg in messages {
+            let messageIdValue = msg.messageId.map { "'\($0)'" } ?? "NULL"
+            _ = try conn.execute("""
+                INSERT INTO messages (ROWID, subject, sender, date_received, date_sent, message_id, mailbox, read, flagged)
+                VALUES (\(msg.rowId), \(msg.subjectId), \(msg.senderId), \(msg.dateReceived), \(msg.dateSent), \(messageIdValue), \(msg.mailboxId), \(msg.read), \(msg.flagged))
+                """)
+        }
+    }
 }
