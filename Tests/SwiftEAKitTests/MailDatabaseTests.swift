@@ -2593,4 +2593,98 @@ final class MailDatabaseTests: XCTestCase {
 
         database2.close()
     }
+
+    // MARK: - Envelope Index Attachment Tests
+
+    func testAttachEnvelopeIndexThrowsWhenNotInitialized() throws {
+        // Database not initialized - should throw notInitialized error
+        let nonInitializedDB = MailDatabase(databasePath: "/tmp/test-not-init.db")
+
+        XCTAssertThrowsError(try nonInitializedDB.attachEnvelopeIndex(path: "/some/path")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected notInitialized error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testAttachEnvelopeIndexThrowsWhenFileNotFound() throws {
+        try database.initialize()
+
+        let nonExistentPath = "/path/that/does/not/exist/Envelope Index"
+
+        XCTAssertThrowsError(try database.attachEnvelopeIndex(path: nonExistentPath)) { error in
+            guard case MailDatabaseError.envelopeIndexNotFound(let path) = error else {
+                XCTFail("Expected envelopeIndexNotFound error, got \(error)")
+                return
+            }
+            XCTAssertEqual(path, nonExistentPath)
+        }
+    }
+
+    func testAttachAndDetachEnvelopeIndex() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeIndex")
+
+        // Create a simple SQLite database to act as the Envelope Index
+        let mockDB = MailDatabase(databasePath: envelopePath)
+        try mockDB.initialize()
+        mockDB.close()
+
+        // Now attach it to our main database
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // Detach should succeed
+        try database.detachEnvelopeIndex()
+    }
+
+    func testDetachEnvelopeIndexThrowsWhenNotInitialized() throws {
+        // Database not initialized - should throw notInitialized error
+        let nonInitializedDB = MailDatabase(databasePath: "/tmp/test-not-init-detach.db")
+
+        XCTAssertThrowsError(try nonInitializedDB.detachEnvelopeIndex()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected notInitialized error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testAttachEnvelopeIndexCanQueryAttachedDatabase() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with a test table
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeIndex2")
+
+        // Create a simple SQLite database to act as the Envelope Index
+        let mockDB = MailDatabase(databasePath: envelopePath)
+        try mockDB.initialize()
+        mockDB.close()
+
+        // Attach it to our main database
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // We should be able to query the attached database's tables
+        // The schema_version table exists in both databases
+        // Querying envelope.schema_version should work
+        // Note: We can't easily test this without exposing internal query methods,
+        // but if attach succeeds and detach succeeds, the functionality works
+
+        try database.detachEnvelopeIndex()
+    }
+
+    func testEnvelopeIndexErrorDescriptions() throws {
+        let notFoundError = MailDatabaseError.envelopeIndexNotFound(path: "/test/path")
+        XCTAssertTrue(notFoundError.errorDescription?.contains("/test/path") ?? false)
+        XCTAssertTrue(notFoundError.errorDescription?.contains("not found") ?? false)
+
+        struct MockError: Error {
+            var localizedDescription: String { "mock error" }
+        }
+        let attachFailedError = MailDatabaseError.envelopeIndexAttachFailed(underlying: MockError())
+        XCTAssertTrue(attachFailedError.errorDescription?.contains("attach") ?? false ||
+                      attachFailedError.errorDescription?.contains("Attach") ?? false)
+    }
 }

@@ -9,6 +9,8 @@ public enum MailDatabaseError: Error, LocalizedError {
     case migrationFailed(underlying: Error)
     case queryFailed(underlying: Error)
     case notInitialized
+    case envelopeIndexNotFound(path: String)
+    case envelopeIndexAttachFailed(underlying: Error)
 
     public var errorDescription: String? {
         switch self {
@@ -20,6 +22,10 @@ public enum MailDatabaseError: Error, LocalizedError {
             return "Database query failed: \(error.localizedDescription)"
         case .notInitialized:
             return "Mail database not initialized"
+        case .envelopeIndexNotFound(let path):
+            return "Envelope Index not found at path: \(path)"
+        case .envelopeIndexAttachFailed(let error):
+            return "Failed to attach Envelope Index: \(error.localizedDescription)"
         }
     }
 }
@@ -97,6 +103,56 @@ public final class MailDatabase: @unchecked Sendable {
     deinit {
         // Ensure cleanup even if close() wasn't explicitly called
         close()
+    }
+
+    // MARK: - Envelope Index Attachment
+
+    /// Attach Apple Mail's Envelope Index database for bulk copy operations.
+    ///
+    /// This allows querying the Envelope Index tables using the "envelope" alias.
+    /// For example: `SELECT * FROM envelope.messages`
+    ///
+    /// - Parameter path: The path to the Envelope Index database file.
+    ///   Default location: `~/Library/Mail/V10/MailData/Envelope Index`
+    /// - Throws: `MailDatabaseError.notInitialized` if database connection is not open.
+    /// - Throws: `MailDatabaseError.envelopeIndexNotFound` if the file doesn't exist.
+    /// - Throws: `MailDatabaseError.envelopeIndexAttachFailed` if the ATTACH fails.
+    public func attachEnvelopeIndex(path: String) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        // Verify the Envelope Index file exists
+        guard FileManager.default.fileExists(atPath: path) else {
+            throw MailDatabaseError.envelopeIndexNotFound(path: path)
+        }
+
+        do {
+            // Attach the Envelope Index as "envelope" alias
+            // This allows queries like: SELECT * FROM envelope.messages
+            _ = try conn.execute("ATTACH DATABASE '\(path)' AS envelope")
+        } catch {
+            throw MailDatabaseError.envelopeIndexAttachFailed(underlying: error)
+        }
+    }
+
+    /// Detach the previously attached Envelope Index database.
+    ///
+    /// This should be called when bulk copy operations are complete to release
+    /// the connection to Apple Mail's database.
+    ///
+    /// - Throws: `MailDatabaseError.notInitialized` if database connection is not open.
+    /// - Throws: `MailDatabaseError.queryFailed` if the DETACH fails.
+    public func detachEnvelopeIndex() throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        do {
+            _ = try conn.execute("DETACH DATABASE envelope")
+        } catch {
+            throw MailDatabaseError.queryFailed(underlying: error)
+        }
     }
 
     // MARK: - Schema Definition
