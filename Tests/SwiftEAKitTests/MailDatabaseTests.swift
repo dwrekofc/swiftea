@@ -2182,4 +2182,210 @@ final class MailDatabaseTests: XCTestCase {
             "Thread detail query should use an index. Plan: \(planString)"
         )
     }
+
+    // MARK: - US-005: Database Migration Script Tests
+
+    func testGetSchemaVersionReturnsCurrentVersion() throws {
+        try database.initialize()
+
+        let version = try database.getSchemaVersion()
+        XCTAssertEqual(version, MailDatabase.currentSchemaVersion,
+                       "Schema version should be \(MailDatabase.currentSchemaVersion) after initialization")
+    }
+
+    func testGetSchemaVersionBeforeInitializationThrows() {
+        // Database not initialized
+        XCTAssertThrowsError(try database.getSchemaVersion()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected notInitialized error, got: \(error)")
+                return
+            }
+        }
+    }
+
+    func testMigrationHistoryContainsAllVersions() throws {
+        try database.initialize()
+
+        let history = try database.getMigrationHistory()
+
+        // Should have all migrations from V1 to current
+        XCTAssertEqual(history.count, MailDatabase.currentSchemaVersion,
+                       "Migration history should have \(MailDatabase.currentSchemaVersion) entries")
+
+        // Verify each version is present
+        for version in 1...MailDatabase.currentSchemaVersion {
+            XCTAssertTrue(history.contains { $0.version == version },
+                          "Migration history should contain version \(version)")
+        }
+
+        // Verify timestamps are present
+        for (_, appliedAt) in history {
+            XCTAssertFalse(appliedAt.isEmpty, "Applied timestamp should not be empty")
+        }
+    }
+
+    func testTableExistsForCoreThreadingTables() throws {
+        try database.initialize()
+
+        // Core tables that should exist after migration
+        XCTAssertTrue(try database.tableExists("messages"), "messages table should exist")
+        XCTAssertTrue(try database.tableExists("threads"), "threads table should exist")
+        XCTAssertTrue(try database.tableExists("thread_messages"), "thread_messages table should exist")
+        XCTAssertTrue(try database.tableExists("recipients"), "recipients table should exist")
+        XCTAssertTrue(try database.tableExists("attachments"), "attachments table should exist")
+        XCTAssertTrue(try database.tableExists("mailboxes"), "mailboxes table should exist")
+        XCTAssertTrue(try database.tableExists("schema_version"), "schema_version table should exist")
+    }
+
+    func testTableExistsReturnsFalseForNonExistentTable() throws {
+        try database.initialize()
+
+        XCTAssertFalse(try database.tableExists("nonexistent_table"),
+                       "tableExists should return false for non-existent table")
+    }
+
+    func testGetTableColumnsForMessages() throws {
+        try database.initialize()
+
+        let columns = try database.getTableColumns("messages")
+
+        // Check core columns from V1
+        XCTAssertTrue(columns.contains("id"), "messages should have id column")
+        XCTAssertTrue(columns.contains("apple_rowid"), "messages should have apple_rowid column")
+        XCTAssertTrue(columns.contains("message_id"), "messages should have message_id column")
+        XCTAssertTrue(columns.contains("subject"), "messages should have subject column")
+
+        // Check V3 threading columns
+        XCTAssertTrue(columns.contains("in_reply_to"), "messages should have in_reply_to column (V3)")
+        XCTAssertTrue(columns.contains("threading_references"), "messages should have threading_references column (V3)")
+
+        // Check V4 thread_id column
+        XCTAssertTrue(columns.contains("thread_id"), "messages should have thread_id column (V4)")
+
+        // Check V6 thread position columns
+        XCTAssertTrue(columns.contains("thread_position"), "messages should have thread_position column (V6)")
+        XCTAssertTrue(columns.contains("thread_total"), "messages should have thread_total column (V6)")
+    }
+
+    func testGetTableColumnsForThreads() throws {
+        try database.initialize()
+
+        let columns = try database.getTableColumns("threads")
+
+        // Check all expected columns in threads table (V4)
+        XCTAssertTrue(columns.contains("id"), "threads should have id column")
+        XCTAssertTrue(columns.contains("subject"), "threads should have subject column")
+        XCTAssertTrue(columns.contains("participant_count"), "threads should have participant_count column")
+        XCTAssertTrue(columns.contains("message_count"), "threads should have message_count column")
+        XCTAssertTrue(columns.contains("first_date"), "threads should have first_date column")
+        XCTAssertTrue(columns.contains("last_date"), "threads should have last_date column")
+        XCTAssertTrue(columns.contains("created_at"), "threads should have created_at column")
+        XCTAssertTrue(columns.contains("updated_at"), "threads should have updated_at column")
+    }
+
+    func testGetTableColumnsForThreadMessages() throws {
+        try database.initialize()
+
+        let columns = try database.getTableColumns("thread_messages")
+
+        // Check all expected columns in thread_messages junction table (V5)
+        XCTAssertTrue(columns.contains("thread_id"), "thread_messages should have thread_id column")
+        XCTAssertTrue(columns.contains("message_id"), "thread_messages should have message_id column")
+        XCTAssertTrue(columns.contains("added_at"), "thread_messages should have added_at column")
+    }
+
+    func testMigrationIsIdempotent() throws {
+        // Run migrations once
+        try database.initialize()
+        let firstVersion = try database.getSchemaVersion()
+        database.close()
+
+        // Create new database instance pointing to same file
+        let dbPath = (testDir as NSString).appendingPathComponent("mail.db")
+        let database2 = MailDatabase(databasePath: dbPath)
+
+        // Run migrations again - should be safe
+        try database2.initialize()
+        let secondVersion = try database2.getSchemaVersion()
+        database2.close()
+
+        XCTAssertEqual(firstVersion, secondVersion,
+                       "Schema version should be the same after re-running migrations")
+        XCTAssertEqual(secondVersion, MailDatabase.currentSchemaVersion,
+                       "Schema version should be at latest after initialization")
+    }
+
+    func testMigrationHandlesEmptyDatabase() throws {
+        // Start with no database file
+        let dbPath = (testDir as NSString).appendingPathComponent("fresh.db")
+        let freshDatabase = MailDatabase(databasePath: dbPath)
+
+        // Initialize should create all tables
+        try freshDatabase.initialize()
+
+        // Verify all migrations were applied
+        let version = try freshDatabase.getSchemaVersion()
+        XCTAssertEqual(version, MailDatabase.currentSchemaVersion,
+                       "Fresh database should be at latest schema version")
+
+        // Verify core tables exist
+        XCTAssertTrue(try freshDatabase.tableExists("messages"))
+        XCTAssertTrue(try freshDatabase.tableExists("threads"))
+        XCTAssertTrue(try freshDatabase.tableExists("thread_messages"))
+
+        freshDatabase.close()
+    }
+
+    func testMigrationDescriptionsExistForAllVersions() {
+        // Verify all migrations have descriptions
+        for version in 1...MailDatabase.currentSchemaVersion {
+            XCTAssertNotNil(MailDatabase.migrationDescriptions[version],
+                           "Migration V\(version) should have a description")
+            XCTAssertFalse(MailDatabase.migrationDescriptions[version]!.isEmpty,
+                          "Migration V\(version) description should not be empty")
+        }
+    }
+
+    func testMigrationPreservesExistingData() throws {
+        try database.initialize()
+
+        // Insert test data
+        let message = MailMessage(
+            id: "migration-test-msg",
+            appleRowId: 54321,
+            messageId: "<migration-test@example.com>",
+            mailboxId: 1,
+            mailboxName: "INBOX",
+            subject: "Migration Test Message",
+            senderName: "Test Sender",
+            senderEmail: "test@example.com"
+        )
+        try database.upsertMessage(message)
+
+        let thread = Thread(
+            id: "migration-test-thread",
+            subject: "Migration Test Thread",
+            participantCount: 2,
+            messageCount: 1
+        )
+        try database.upsertThread(thread)
+
+        // Close and reopen database (triggers migration check)
+        database.close()
+
+        let dbPath = (testDir as NSString).appendingPathComponent("mail.db")
+        let database2 = MailDatabase(databasePath: dbPath)
+        try database2.initialize()
+
+        // Verify data is preserved
+        let retrievedMessage = try database2.getMessage(id: "migration-test-msg")
+        XCTAssertNotNil(retrievedMessage, "Message should be preserved after migration")
+        XCTAssertEqual(retrievedMessage?.subject, "Migration Test Message")
+
+        let retrievedThread = try database2.getThread(id: "migration-test-thread")
+        XCTAssertNotNil(retrievedThread, "Thread should be preserved after migration")
+        XCTAssertEqual(retrievedThread?.subject, "Migration Test Thread")
+
+        database2.close()
+    }
 }

@@ -423,6 +423,121 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    // MARK: - Schema Version API
+
+    /// The current schema version number (latest migration version)
+    public static let currentSchemaVersion = 7
+
+    /// Description of each schema migration
+    public static let migrationDescriptions: [Int: String] = [
+        1: "Initial schema with messages, recipients, attachments, mailboxes, sync_status tables and FTS5",
+        2: "Bidirectional sync columns (mailbox_status, pending_sync_action, last_known_mailbox_id)",
+        3: "Threading headers (in_reply_to, threading_references)",
+        4: "Threads table and thread_id column on messages",
+        5: "Thread-messages junction table for many-to-many relationships",
+        6: "Thread position metadata (thread_position, thread_total)",
+        7: "Large inbox query optimization indexes"
+    ]
+
+    /// Get the current schema version from the database
+    /// Returns 0 if database has no schema_version table (empty/new database)
+    public func getSchemaVersion() throws -> Int {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        // Check if schema_version table exists
+        let tableCheck = try conn.query("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='schema_version'
+            """)
+
+        var tableExists = false
+        for _ in tableCheck {
+            tableExists = true
+            break
+        }
+
+        if !tableExists {
+            return 0
+        }
+
+        // Get current version
+        let result = try conn.query("SELECT MAX(version) as v FROM schema_version")
+        for row in result {
+            if let v = try? row.getInt(0) {
+                return v
+            }
+        }
+        return 0
+    }
+
+    /// Get the migration history with timestamps
+    public func getMigrationHistory() throws -> [(version: Int, appliedAt: String)] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        // Check if schema_version table exists
+        let tableCheck = try conn.query("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='schema_version'
+            """)
+
+        var tableExists = false
+        for _ in tableCheck {
+            tableExists = true
+            break
+        }
+
+        if !tableExists {
+            return []
+        }
+
+        var history: [(version: Int, appliedAt: String)] = []
+        let result = try conn.query("SELECT version, applied_at FROM schema_version ORDER BY version ASC")
+        for row in result {
+            if let version = try? row.getInt(0),
+               let appliedAt = try? row.getString(1) {
+                history.append((version: version, appliedAt: appliedAt))
+            }
+        }
+        return history
+    }
+
+    /// Check if a specific table exists in the database
+    public func tableExists(_ tableName: String) throws -> Bool {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='\(escapeSql(tableName))'
+            """)
+
+        for _ in result {
+            return true
+        }
+        return false
+    }
+
+    /// Get the columns for a specific table
+    public func getTableColumns(_ tableName: String) throws -> [String] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var columns: [String] = []
+        let result = try conn.query("PRAGMA table_info('\(escapeSql(tableName))')")
+        for row in result {
+            if let name = try? row.getString(1) {
+                columns.append(name)
+            }
+        }
+        return columns
+    }
+
     // MARK: - Message Operations
 
     /// Insert or update a message in the mirror database

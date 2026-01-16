@@ -116,7 +116,9 @@ public struct Mail: ParsableCommand {
             MailFlagCommand.self,
             MailMarkCommand.self,
             MailReplyCommand.self,
-            MailComposeCommand.self
+            MailComposeCommand.self,
+            // Database maintenance
+            MailMigrateCommand.self
         ]
     )
 
@@ -3352,6 +3354,251 @@ struct MailComposeCommand: ParsableCommand {
                 print("Created draft in Mail.app")
             }
             print("  Subject: \(subject)")
+        }
+    }
+}
+
+// MARK: - Database Migration Command
+
+struct MailMigrateCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "migrate",
+        abstract: "Run database migrations to upgrade schema",
+        discussion: """
+            Upgrades the mail database schema to the latest version. This command
+            is idempotent and safe to run multiple times - it only applies migrations
+            that haven't been applied yet.
+
+            The migration system handles:
+            - Adding new columns to existing tables (thread support)
+            - Creating new tables (threads, thread_messages)
+            - Adding indexes for query optimization
+            - Empty databases (creates all tables from scratch)
+
+            THREADING MIGRATIONS
+            Migrations V3-V7 add email threading support:
+              V3: Threading headers (in_reply_to, references)
+              V4: Threads table and thread_id reference
+              V5: Thread-messages junction table
+              V6: Thread position metadata (position, total)
+              V7: Large inbox optimization indexes
+
+            EXAMPLES
+              swea mail migrate              # Apply pending migrations
+              swea mail migrate --status     # Show migration status
+              swea mail migrate --verbose    # Show detailed migration info
+            """
+    )
+
+    @Flag(name: .long, help: "Show current schema version and migration history")
+    var status: Bool = false
+
+    @Flag(name: .long, help: "Show detailed information about each migration")
+    var verbose: Bool = false
+
+    @Flag(name: .long, help: "Output as JSON")
+    var json: Bool = false
+
+    @Option(name: .long, help: "Path to database file (defaults to vault's mail.db)")
+    var database: String?
+
+    func run() throws {
+        let dbPath: String
+
+        if let customPath = database {
+            dbPath = customPath
+        } else {
+            let vault = try VaultContext.require()
+            dbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        }
+
+        // Check if database file exists (before migration)
+        let fileManager = FileManager.default
+        let dbExists = fileManager.fileExists(atPath: dbPath)
+
+        // Create database instance without initializing (to check pre-migration state)
+        let mailDatabase = MailDatabase(databasePath: dbPath)
+
+        if status {
+            try showStatus(mailDatabase: mailDatabase, dbPath: dbPath, dbExists: dbExists)
+            return
+        }
+
+        // Run migrations
+        try runMigrations(mailDatabase: mailDatabase, dbPath: dbPath, dbExists: dbExists)
+    }
+
+    private func showStatus(mailDatabase: MailDatabase, dbPath: String, dbExists: Bool) throws {
+        // Initialize database to run migrations and get status
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        let currentVersion = try mailDatabase.getSchemaVersion()
+        let latestVersion = MailDatabase.currentSchemaVersion
+        let history = try mailDatabase.getMigrationHistory()
+
+        if json {
+            var result: [String: Any] = [
+                "database_path": dbPath,
+                "current_version": currentVersion,
+                "latest_version": latestVersion,
+                "up_to_date": currentVersion >= latestVersion,
+                "pending_migrations": max(0, latestVersion - currentVersion)
+            ]
+
+            var migrations: [[String: Any]] = []
+            for (version, appliedAt) in history {
+                var migration: [String: Any] = [
+                    "version": version,
+                    "applied_at": appliedAt
+                ]
+                if let description = MailDatabase.migrationDescriptions[version] {
+                    migration["description"] = description
+                }
+                migrations.append(migration)
+            }
+            result["migrations"] = migrations
+
+            if let jsonData = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                print(jsonString)
+            }
+        } else {
+            print("Mail Database Schema Status")
+            print("===========================")
+            print("Database: \(dbPath)")
+            print("Current version: V\(currentVersion)")
+            print("Latest version:  V\(latestVersion)")
+
+            if currentVersion >= latestVersion {
+                print("\n✓ Database is up to date")
+            } else {
+                let pending = latestVersion - currentVersion
+                print("\n⚠ \(pending) migration(s) pending")
+            }
+
+            if verbose || !history.isEmpty {
+                print("\nMigration History:")
+                if history.isEmpty {
+                    print("  No migrations applied yet")
+                } else {
+                    for (version, appliedAt) in history {
+                        let description = MailDatabase.migrationDescriptions[version] ?? "Unknown"
+                        print("  V\(version): \(appliedAt)")
+                        if verbose {
+                            print("       \(description)")
+                        }
+                    }
+                }
+            }
+
+            if verbose {
+                print("\nAll Migrations:")
+                for version in 1...latestVersion {
+                    let description = MailDatabase.migrationDescriptions[version] ?? "Unknown"
+                    let applied = history.contains { $0.version == version }
+                    let status = applied ? "✓" : "○"
+                    print("  \(status) V\(version): \(description)")
+                }
+            }
+
+            // Show table status
+            print("\nTable Status:")
+            let tables = ["messages", "threads", "thread_messages", "recipients", "attachments", "mailboxes"]
+            for table in tables {
+                let exists = try mailDatabase.tableExists(table)
+                let status = exists ? "✓" : "○"
+                print("  \(status) \(table)")
+                if verbose && exists {
+                    let columns = try mailDatabase.getTableColumns(table)
+                    print("       Columns: \(columns.count)")
+                }
+            }
+        }
+    }
+
+    private func runMigrations(mailDatabase: MailDatabase, dbPath: String, dbExists: Bool) throws {
+        // Get pre-migration version if database exists
+        var preMigrationVersion = 0
+        if dbExists {
+            // Temporarily initialize just to check version, then close
+            let tempDb = MailDatabase(databasePath: dbPath)
+            try tempDb.initialize()
+            preMigrationVersion = try tempDb.getSchemaVersion()
+            tempDb.close()
+        }
+
+        if verbose {
+            print("Database: \(dbPath)")
+            if dbExists {
+                print("Pre-migration version: V\(preMigrationVersion)")
+            } else {
+                print("Creating new database...")
+            }
+        }
+
+        // Initialize database (this runs migrations)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        let postMigrationVersion = try mailDatabase.getSchemaVersion()
+        let migrationsApplied = postMigrationVersion - preMigrationVersion
+
+        if json {
+            let result: [String: Any] = [
+                "database_path": dbPath,
+                "was_new_database": !dbExists,
+                "pre_migration_version": preMigrationVersion,
+                "post_migration_version": postMigrationVersion,
+                "migrations_applied": migrationsApplied,
+                "success": true
+            ]
+
+            if let jsonData = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                print(jsonString)
+            }
+        } else {
+            if migrationsApplied == 0 {
+                print("✓ Database already at latest version (V\(postMigrationVersion))")
+            } else if !dbExists {
+                print("✓ Created new database at V\(postMigrationVersion)")
+                if verbose {
+                    print("  Applied \(migrationsApplied) migration(s)")
+                }
+            } else {
+                print("✓ Migrated from V\(preMigrationVersion) to V\(postMigrationVersion)")
+                print("  Applied \(migrationsApplied) migration(s):")
+                for version in (preMigrationVersion + 1)...postMigrationVersion {
+                    if let description = MailDatabase.migrationDescriptions[version] {
+                        print("    V\(version): \(description)")
+                    }
+                }
+            }
+
+            // Show threading table status
+            let threadsExist = try mailDatabase.tableExists("threads")
+            let junctionExist = try mailDatabase.tableExists("thread_messages")
+
+            if verbose {
+                print("\nThreading Support:")
+                print("  threads table: \(threadsExist ? "✓" : "○")")
+                print("  thread_messages table: \(junctionExist ? "✓" : "○")")
+
+                // Check for thread columns in messages table
+                let messageColumns = try mailDatabase.getTableColumns("messages")
+                let hasThreadId = messageColumns.contains("thread_id")
+                let hasThreadPosition = messageColumns.contains("thread_position")
+                let hasThreadTotal = messageColumns.contains("thread_total")
+                let hasInReplyTo = messageColumns.contains("in_reply_to")
+                let hasReferences = messageColumns.contains("threading_references")
+
+                print("  messages.thread_id: \(hasThreadId ? "✓" : "○")")
+                print("  messages.thread_position: \(hasThreadPosition ? "✓" : "○")")
+                print("  messages.thread_total: \(hasThreadTotal ? "✓" : "○")")
+                print("  messages.in_reply_to: \(hasInReplyTo ? "✓" : "○")")
+                print("  messages.threading_references: \(hasReferences ? "✓" : "○")")
+            }
         }
     }
 }
