@@ -50,7 +50,7 @@ final class VaultContextTests: XCTestCase {
         } catch let error as NoVaultContextError {
             let message = error.localizedDescription
             XCTAssertTrue(message.contains("No vault context found"), "Error should explain the problem")
-            XCTAssertTrue(message.contains("swiftea vault init"), "Error should suggest solution")
+            XCTAssertTrue(message.contains("swea init"), "Error should suggest solution")
             XCTAssertTrue(message.contains(nonVaultPath), "Error should include the path")
         } catch {
             XCTFail("Wrong error type: \(error)")

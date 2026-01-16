@@ -73,21 +73,39 @@ final class EnvelopeIndexDiscoveryTests: XCTestCase {
     // MARK: - Emlx Path Generation
 
     func testEmlxPathGeneration() {
-        let mailboxPath = "/Users/test/Library/Mail/V10/Mailboxes/INBOX.mbox"
-        let mailBasePath = "/Users/test/Library/Mail/V10"
+        // Create legacy path structure (no UUID subdirectory)
+        let mailboxPath = (testDir as NSString).appendingPathComponent("Mailboxes/INBOX.mbox")
+        let messagesDir = (mailboxPath as NSString).appendingPathComponent("Messages")
+        try? FileManager.default.createDirectory(atPath: messagesDir, withIntermediateDirectories: true)
+
+        // Create the actual .emlx file
+        let expectedPath = (messagesDir as NSString).appendingPathComponent("12345.emlx")
+        FileManager.default.createFile(atPath: expectedPath, contents: Data())
+
+        let mailBasePath = (testDir as NSString).appendingPathComponent("Mail/V10")
 
         let emlxPath = discovery.emlxPath(forMessageId: 12345, mailboxPath: mailboxPath, mailBasePath: mailBasePath)
 
-        XCTAssertEqual(emlxPath, "/Users/test/Library/Mail/V10/Mailboxes/INBOX.mbox/Messages/12345.emlx")
+        XCTAssertNotNil(emlxPath)
+        XCTAssertEqual(emlxPath, expectedPath)
     }
 
     func testEmlxPathWithDifferentMailbox() {
-        let mailboxPath = "/Users/test/Library/Mail/V10/Mailboxes/Work/Projects.mbox"
-        let mailBasePath = "/Users/test/Library/Mail/V10"
+        // Create legacy path structure for a different mailbox
+        let mailboxPath = (testDir as NSString).appendingPathComponent("Mailboxes/Work/Projects.mbox")
+        let messagesDir = (mailboxPath as NSString).appendingPathComponent("Messages")
+        try? FileManager.default.createDirectory(atPath: messagesDir, withIntermediateDirectories: true)
+
+        // Create the actual .emlx file
+        let expectedPath = (messagesDir as NSString).appendingPathComponent("99999.emlx")
+        FileManager.default.createFile(atPath: expectedPath, contents: Data())
+
+        let mailBasePath = (testDir as NSString).appendingPathComponent("Mail/V10")
 
         let emlxPath = discovery.emlxPath(forMessageId: 99999, mailboxPath: mailboxPath, mailBasePath: mailBasePath)
 
-        XCTAssertEqual(emlxPath, "/Users/test/Library/Mail/V10/Mailboxes/Work/Projects.mbox/Messages/99999.emlx")
+        XCTAssertNotNil(emlxPath)
+        XCTAssertEqual(emlxPath, expectedPath)
     }
 
     // MARK: - EnvelopeIndexInfo Properties
