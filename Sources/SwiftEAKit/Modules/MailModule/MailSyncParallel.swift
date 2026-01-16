@@ -340,6 +340,7 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
         var parseError: String? = nil
         var inReplyTo: String? = nil
         var references: [String] = []
+        var messageId: String? = row.messageId  // Initialize with DB value as fallback
 
         if let url = row.mailboxUrl {
             let mailboxPath = convertMailboxUrlToPath(url, mailBasePath: mailBasePath)
@@ -362,9 +363,10 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
                     let parsed = try emlxParser.parse(path: path)
                     bodyText = parsed.bodyText
                     bodyHtml = parsed.bodyHtml
-                    // Extract threading headers
+                    // Extract threading headers and RFC822 Message-ID
                     inReplyTo = parsed.inReplyTo
                     references = parsed.references
+                    messageId = parsed.messageId ?? messageId  // Prefer parsed value from .emlx
                 } catch {
                     // Record error but don't fail - body content is optional
                     parseError = "Warning: Could not parse body for message \(row.rowId): \(error.localizedDescription)"
@@ -375,7 +377,7 @@ public final class ParallelMailSyncEngine: @unchecked Sendable {
         let message = MailMessage(
             id: stableId,
             appleRowId: Int(row.rowId),
-            messageId: row.messageId,
+            messageId: messageId,
             mailboxId: row.mailboxId.map { Int($0) },
             mailboxName: row.mailboxName,
             accountId: nil,
