@@ -2509,11 +2509,13 @@ struct MailExportCommand: ParsableCommand {
         }
 
         // Build thread export structure
+        // Use threadTotal (actual messages.count) instead of thread.messageCount
+        // to ensure message_count matches the actual messages array length
         let threadExport: [String: Any] = [
             "thread_id": threadId,
             "subject": thread.subject ?? "",
             "participant_count": thread.participantCount,
-            "message_count": thread.messageCount,
+            "message_count": threadTotal,
             "first_date": thread.firstDate?.iso8601String ?? "",
             "last_date": thread.lastDate?.iso8601String ?? "",
             "messages": messagesArray

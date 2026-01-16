@@ -181,11 +181,13 @@ public final class MailExporter {
         let threadTotal = messages.count
 
         // YAML frontmatter with thread metadata
+        // Use threadTotal (actual messages.count) instead of thread.messageCount
+        // to ensure message_count matches the actual messages array length
         lines.append("---")
         lines.append("thread_id: \"\(escapeYaml(thread.id))\"")
         lines.append("subject: \"\(escapeYaml(thread.subject ?? ""))\"")
         lines.append("participant_count: \(thread.participantCount)")
-        lines.append("message_count: \(thread.messageCount)")
+        lines.append("message_count: \(threadTotal)")
         if let firstDate = thread.firstDate {
             lines.append("first_date: \(iso8601String(from: firstDate))")
         }
