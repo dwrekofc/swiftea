@@ -1873,4 +1873,108 @@ final class MailDatabaseTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - US-004: Thread Index Tests
+
+    func testThreadIdIndexExistsOnMessagesTable() throws {
+        try database.initialize()
+
+        let indexes = try database.getIndexes(on: "messages")
+
+        XCTAssertTrue(indexes.contains("idx_messages_thread_id"),
+                      "Index idx_messages_thread_id should exist on messages table. Found: \(indexes)")
+    }
+
+    func testThreadsTableHasPrimaryKeyIndex() throws {
+        try database.initialize()
+
+        // SQLite automatically creates an index for the PRIMARY KEY
+        // We can verify this by checking the table info
+        let indexes = try database.getIndexes(on: "threads")
+
+        // The threads table should have an index on last_date
+        XCTAssertTrue(indexes.contains("idx_threads_last_date"),
+                      "Index idx_threads_last_date should exist on threads table. Found: \(indexes)")
+    }
+
+    func testThreadMessagesIndexesExist() throws {
+        try database.initialize()
+
+        let indexes = try database.getIndexes(on: "thread_messages")
+
+        XCTAssertTrue(indexes.contains("idx_thread_messages_thread_id"),
+                      "Index idx_thread_messages_thread_id should exist on thread_messages table. Found: \(indexes)")
+        XCTAssertTrue(indexes.contains("idx_thread_messages_message_id"),
+                      "Index idx_thread_messages_message_id should exist on thread_messages table. Found: \(indexes)")
+    }
+
+    func testExplainQueryPlanUsesThreadIdIndex() throws {
+        try database.initialize()
+
+        // Create thread first (required for foreign key constraint)
+        let thread = Thread(id: "test-thread-id", subject: "Test Thread")
+        try database.upsertThread(thread)
+
+        // Insert some test data to ensure table has data
+        let message = MailMessage(id: "plan-test-msg", subject: "Plan Test", threadId: "test-thread-id")
+        try database.upsertMessage(message)
+
+        // Query plan for looking up messages by thread_id
+        let plan = try database.explainQueryPlan(
+            "SELECT * FROM messages WHERE thread_id = 'test-thread-id'"
+        )
+
+        // The plan should show usage of the index
+        // SQLite's EXPLAIN QUERY PLAN typically shows "SEARCH" with index usage
+        let planString = plan.joined(separator: " ")
+        XCTAssertTrue(
+            planString.contains("idx_messages_thread_id") || planString.contains("USING INDEX"),
+            "Query should use idx_messages_thread_id index. Plan: \(planString)"
+        )
+    }
+
+    func testExplainQueryPlanUsesThreadMessagesIndex() throws {
+        try database.initialize()
+
+        // Insert test data
+        let thread = Thread(id: "plan-thread", subject: "Plan Thread")
+        try database.upsertThread(thread)
+        let message = MailMessage(id: "plan-msg", subject: "Plan Message")
+        try database.upsertMessage(message)
+        try database.addMessageToThread(messageId: "plan-msg", threadId: "plan-thread")
+
+        // Query plan for looking up messages in a thread via junction table
+        let plan = try database.explainQueryPlan(
+            "SELECT message_id FROM thread_messages WHERE thread_id = 'plan-thread'"
+        )
+
+        // The plan should show usage of an index (could be explicit index or autoindex for primary key)
+        // SQLite may use sqlite_autoindex_thread_messages_1 which is the covering index for the composite primary key
+        let planString = plan.joined(separator: " ")
+        XCTAssertTrue(
+            planString.contains("idx_thread_messages_thread_id") ||
+            planString.contains("USING INDEX") ||
+            planString.contains("USING COVERING INDEX") ||
+            planString.contains("sqlite_autoindex"),
+            "Query should use an index. Plan: \(planString)"
+        )
+    }
+
+    func testIndexVerificationMethodsBeforeInitializeThrow() throws {
+        // Don't call initialize()
+
+        XCTAssertThrowsError(try database.getIndexes(on: "messages")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+
+        XCTAssertThrowsError(try database.explainQueryPlan("SELECT 1")) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected MailDatabaseError.notInitialized")
+                return
+            }
+        }
+    }
 }

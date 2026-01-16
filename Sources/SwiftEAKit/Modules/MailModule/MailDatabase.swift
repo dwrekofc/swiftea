@@ -2162,6 +2162,44 @@ extension MailDatabase {
             updatedAt: getIntValue(row, 7).map { Date(timeIntervalSince1970: Double($0)) }
         )
     }
+
+    // MARK: - Index Verification (for testing)
+
+    /// Get list of indexes on a table
+    /// - Parameter tableName: The table to query indexes for
+    /// - Returns: Array of index names
+    public func getIndexes(on tableName: String) throws -> [String] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("PRAGMA index_list('\(escapeSql(tableName))')")
+        var indexes: [String] = []
+        for row in result {
+            if let name = getStringValue(row, 1) {
+                indexes.append(name)
+            }
+        }
+        return indexes
+    }
+
+    /// Run EXPLAIN QUERY PLAN and return the plan details
+    /// - Parameter query: The SQL query to explain
+    /// - Returns: Array of plan detail strings
+    public func explainQueryPlan(_ query: String) throws -> [String] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("EXPLAIN QUERY PLAN \(query)")
+        var planDetails: [String] = []
+        for row in result {
+            if let detail = getStringValue(row, 3) {
+                planDetails.append(detail)
+            }
+        }
+        return planDetails
+    }
 }
 
 // MARK: - Data Models
