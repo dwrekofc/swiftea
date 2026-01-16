@@ -252,10 +252,10 @@ final class MailSyncBackwardTests: XCTestCase {
             }
         }
 
-        // Verify rollback occurred
+        // Verify rollback occurred but pending action retained for retry
         let retrieved = try mailDatabase.getMessage(id: "archive-fail")
         XCTAssertEqual(retrieved?.mailboxStatus, .inbox, "Status should be rolled back to original")
-        XCTAssertNil(retrieved?.pendingSyncAction, "Pending action should be cleared")
+        XCTAssertEqual(retrieved?.pendingSyncAction, .archive, "Pending action should be retained for retry")
     }
 
     func testArchiveMessageFailurePreservesOriginalStatus() throws {
@@ -407,7 +407,7 @@ final class MailSyncBackwardTests: XCTestCase {
 
         let retrieved = try mailDatabase.getMessage(id: "delete-fail")
         XCTAssertEqual(retrieved?.mailboxStatus, .inbox, "Status should be rolled back to original")
-        XCTAssertNil(retrieved?.pendingSyncAction)
+        XCTAssertEqual(retrieved?.pendingSyncAction, .delete, "Pending action should be retained for retry")
     }
 
     func testDeleteMessageFromArchivedRollsBackToArchived() throws {
@@ -425,6 +425,74 @@ final class MailSyncBackwardTests: XCTestCase {
 
         let retrieved = try mailDatabase.getMessage(id: "delete-from-archived")
         XCTAssertEqual(retrieved?.mailboxStatus, .archived, "Should rollback to archived status")
+    }
+
+    // MARK: - Pending Action Retention Tests
+
+    func testArchiveMessageFailureRetainsPendingActionForRetry() throws {
+        // This test verifies that when archiveMessage fails due to AppleScript,
+        // the pending_sync_action is retained so processPendingActions() can retry
+        let message = MailMessage(
+            id: "retry-archive",
+            messageId: "<retry-archive@example.com>",
+            subject: "Retry Archive",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+
+        // First attempt fails
+        mockAppleScript.shouldFail = true
+        XCTAssertThrowsError(try backwardSync.archiveMessage(id: "retry-archive"))
+
+        // Verify status rolled back but pending action retained
+        var retrieved = try mailDatabase.getMessage(id: "retry-archive")
+        XCTAssertEqual(retrieved?.mailboxStatus, .inbox, "Status should be rolled back")
+        XCTAssertEqual(retrieved?.pendingSyncAction, .archive, "Pending action should be retained for retry")
+
+        // Second attempt succeeds via processPendingActions
+        mockAppleScript.shouldFail = false
+        // Update status back to archived (as it would be before retry)
+        try mailDatabase.updateMailboxStatus(id: "retry-archive", status: .archived)
+
+        let result = try backwardSync.processPendingActions()
+        XCTAssertEqual(result.archived, 1, "Should successfully archive on retry")
+
+        // Verify pending action is now cleared
+        retrieved = try mailDatabase.getMessage(id: "retry-archive")
+        XCTAssertNil(retrieved?.pendingSyncAction, "Pending action should be cleared after successful retry")
+    }
+
+    func testDeleteMessageFailureRetainsPendingActionForRetry() throws {
+        // This test verifies that when deleteMessage fails due to AppleScript,
+        // the pending_sync_action is retained so processPendingActions() can retry
+        let message = MailMessage(
+            id: "retry-delete",
+            messageId: "<retry-delete@example.com>",
+            subject: "Retry Delete",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+
+        // First attempt fails
+        mockAppleScript.shouldFail = true
+        XCTAssertThrowsError(try backwardSync.deleteMessage(id: "retry-delete"))
+
+        // Verify status rolled back but pending action retained
+        var retrieved = try mailDatabase.getMessage(id: "retry-delete")
+        XCTAssertEqual(retrieved?.mailboxStatus, .inbox, "Status should be rolled back")
+        XCTAssertEqual(retrieved?.pendingSyncAction, .delete, "Pending action should be retained for retry")
+
+        // Second attempt succeeds via processPendingActions
+        mockAppleScript.shouldFail = false
+        // Update status back to deleted (as it would be before retry)
+        try mailDatabase.updateMailboxStatus(id: "retry-delete", status: .deleted)
+
+        let result = try backwardSync.processPendingActions()
+        XCTAssertEqual(result.deleted, 1, "Should successfully delete on retry")
+
+        // Verify pending action is now cleared
+        retrieved = try mailDatabase.getMessage(id: "retry-delete")
+        XCTAssertNil(retrieved?.pendingSyncAction, "Pending action should be cleared after successful retry")
     }
 
     // MARK: - processPendingActions Tests

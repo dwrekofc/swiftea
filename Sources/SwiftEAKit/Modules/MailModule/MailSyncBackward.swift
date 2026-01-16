@@ -70,7 +70,7 @@ public final class MailSyncBackward: @unchecked Sendable {
     /// 1. Set mailbox_status = 'archived' and pending_sync_action = 'archive'
     /// 2. Execute AppleScript to move message to Archive
     /// 3. On success: clear pending_sync_action
-    /// 4. On failure: rollback to original status
+    /// 4. On failure: rollback status but keep pending action for retry via processPendingActions()
     ///
     /// - Parameter id: The SwiftEA message ID to archive
     /// - Throws: BackwardSyncError if the operation fails
@@ -98,12 +98,11 @@ public final class MailSyncBackward: @unchecked Sendable {
             // Step 4a: Success - clear pending action
             try mailDatabase.clearPendingSyncAction(id: id)
         } catch {
-            // Step 4b: Failure - rollback to original status
+            // Step 4b: Failure - rollback status but keep pending action for retry
+            // The pending_sync_action is retained so processPendingActions() can retry
             do {
                 try mailDatabase.updateMailboxStatus(id: id, status: originalStatus)
-                try mailDatabase.clearPendingSyncAction(id: id)
             } catch let rollbackError {
-                // Log but don't throw rollback error - the original error is more important
                 throw BackwardSyncError.rollbackFailed(id: id, underlying: rollbackError)
             }
             throw BackwardSyncError.appleScriptFailed(id: id, underlying: error)
@@ -116,7 +115,7 @@ public final class MailSyncBackward: @unchecked Sendable {
     /// 1. Set mailbox_status = 'deleted' and pending_sync_action = 'delete'
     /// 2. Execute AppleScript to move message to Trash
     /// 3. On success: clear pending_sync_action
-    /// 4. On failure: rollback to original status
+    /// 4. On failure: rollback status but keep pending action for retry via processPendingActions()
     ///
     /// - Parameter id: The SwiftEA message ID to delete
     /// - Throws: BackwardSyncError if the operation fails
@@ -144,10 +143,10 @@ public final class MailSyncBackward: @unchecked Sendable {
             // Step 4a: Success - clear pending action
             try mailDatabase.clearPendingSyncAction(id: id)
         } catch {
-            // Step 4b: Failure - rollback to original status
+            // Step 4b: Failure - rollback status but keep pending action for retry
+            // The pending_sync_action is retained so processPendingActions() can retry
             do {
                 try mailDatabase.updateMailboxStatus(id: id, status: originalStatus)
-                try mailDatabase.clearPendingSyncAction(id: id)
             } catch let rollbackError {
                 throw BackwardSyncError.rollbackFailed(id: id, underlying: rollbackError)
             }
