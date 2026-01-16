@@ -120,6 +120,9 @@ public final class MailDatabase: @unchecked Sendable {
         if currentVersion < 5 {
             try applyMigrationV5(conn)
         }
+        if currentVersion < 6 {
+            try applyMigrationV6(conn)
+        }
     }
 
     /// Migration v1: Initial schema with all mail tables
@@ -372,6 +375,23 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Migration v6: Add thread_position and thread_total columns to messages table
+    private func applyMigrationV6(_ conn: Connection) throws {
+        do {
+            // Add thread_position column (nullable - position of message within its thread)
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN thread_position INTEGER")
+
+            // Add thread_total column (nullable - total messages in the thread)
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN thread_total INTEGER")
+
+            // Record migration version
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (6)")
+
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
     // MARK: - Message Operations
 
     /// Insert or update a message in the mirror database
@@ -392,7 +412,8 @@ public final class MailDatabase: @unchecked Sendable {
                 is_read, is_flagged, is_deleted, has_attachments, emlx_path,
                 body_text, body_html, synced_at, updated_at,
                 mailbox_status, pending_sync_action, last_known_mailbox_id,
-                in_reply_to, threading_references, thread_id
+                in_reply_to, threading_references, thread_id,
+                thread_position, thread_total
             ) VALUES (
                 '\(message.id)', \(message.appleRowId ?? 0), \(message.messageId.map { "'\($0)'" } ?? "NULL"),
                 \(message.mailboxId ?? 0), \(message.mailboxName.map { "'\($0)'" } ?? "NULL"),
@@ -411,7 +432,9 @@ public final class MailDatabase: @unchecked Sendable {
                 \(message.lastKnownMailboxId.map { String($0) } ?? "NULL"),
                 \(message.inReplyTo.map { "'\(escapeSql($0))'" } ?? "NULL"),
                 \(referencesJson.map { "'\(escapeSql($0))'" } ?? "NULL"),
-                \(message.threadId.map { "'\(escapeSql($0))'" } ?? "NULL")
+                \(message.threadId.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                \(message.threadPosition.map { String($0) } ?? "NULL"),
+                \(message.threadTotal.map { String($0) } ?? "NULL")
             )
             ON CONFLICT(id) DO UPDATE SET
                 apple_rowid = excluded.apple_rowid,
@@ -437,7 +460,9 @@ public final class MailDatabase: @unchecked Sendable {
                 last_known_mailbox_id = excluded.last_known_mailbox_id,
                 in_reply_to = excluded.in_reply_to,
                 threading_references = excluded.threading_references,
-                thread_id = excluded.thread_id
+                thread_id = excluded.thread_id,
+                thread_position = excluded.thread_position,
+                thread_total = excluded.thread_total
             """)
     }
 
@@ -1240,7 +1265,8 @@ public final class MailDatabase: @unchecked Sendable {
                         is_read, is_flagged, is_deleted, has_attachments, emlx_path,
                         body_text, body_html, synced_at, updated_at,
                         mailbox_status, pending_sync_action, last_known_mailbox_id,
-                        in_reply_to, threading_references, thread_id
+                        in_reply_to, threading_references, thread_id,
+                        thread_position, thread_total
                     ) VALUES (
                         '\(escapeSql(message.id))', \(message.appleRowId ?? 0), \(message.messageId.map { "'\(escapeSql($0))'" } ?? "NULL"),
                         \(message.mailboxId ?? 0), \(message.mailboxName.map { "'\(escapeSql($0))'" } ?? "NULL"),
@@ -1259,7 +1285,9 @@ public final class MailDatabase: @unchecked Sendable {
                         \(message.lastKnownMailboxId.map { String($0) } ?? "NULL"),
                         \(message.inReplyTo.map { "'\(escapeSql($0))'" } ?? "NULL"),
                         \(referencesJson.map { "'\(escapeSql($0))'" } ?? "NULL"),
-                        \(message.threadId.map { "'\(escapeSql($0))'" } ?? "NULL")
+                        \(message.threadId.map { "'\(escapeSql($0))'" } ?? "NULL"),
+                        \(message.threadPosition.map { String($0) } ?? "NULL"),
+                        \(message.threadTotal.map { String($0) } ?? "NULL")
                     )
                     ON CONFLICT(id) DO UPDATE SET
                         apple_rowid = excluded.apple_rowid,
@@ -1285,7 +1313,9 @@ public final class MailDatabase: @unchecked Sendable {
                         last_known_mailbox_id = excluded.last_known_mailbox_id,
                         in_reply_to = excluded.in_reply_to,
                         threading_references = excluded.threading_references,
-                        thread_id = excluded.thread_id
+                        thread_id = excluded.thread_id,
+                        thread_position = excluded.thread_position,
+                        thread_total = excluded.thread_total
                     """)
 
                 if exists {
@@ -1781,6 +1811,40 @@ public final class MailDatabase: @unchecked Sendable {
             """)
     }
 
+    /// Update the thread position metadata for a message
+    /// - Parameters:
+    ///   - messageId: The message ID to update
+    ///   - threadPosition: Position of the message within its thread (1-based)
+    ///   - threadTotal: Total number of messages in the thread
+    public func updateMessageThreadPosition(messageId: String, threadPosition: Int, threadTotal: Int) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let now = Int(Date().timeIntervalSince1970)
+        _ = try conn.execute("""
+            UPDATE messages SET thread_position = \(threadPosition), thread_total = \(threadTotal), updated_at = \(now)
+            WHERE id = '\(escapeSql(messageId))'
+            """)
+    }
+
+    /// Update thread position metadata for all messages in a thread
+    /// - Parameter threadId: The thread ID whose messages should be updated
+    public func updateThreadPositions(threadId: String) throws {
+        guard connection != nil else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        // Get all messages in the thread ordered by date
+        let messages = try getMessagesInThreadViaJunction(threadId: threadId, limit: 10000, offset: 0)
+        let total = messages.count
+
+        // Update each message with its position
+        for (index, message) in messages.enumerated() {
+            try updateMessageThreadPosition(messageId: message.id, threadPosition: index + 1, threadTotal: total)
+        }
+    }
+
     /// Get the count of threads
     public func getThreadCount() throws -> Int {
         guard let conn = connection else {
@@ -2039,6 +2103,10 @@ extension MailDatabase {
         // Parse thread_id (column 26) - added in migration V4
         let threadId = getStringValue(row, 26)
 
+        // Parse thread_position (column 27) and thread_total (column 28) - added in migration V6
+        let threadPosition = getIntValue(row, 27)
+        let threadTotal = getIntValue(row, 28)
+
         return MailMessage(
             id: getStringValue(row, 0) ?? "",
             appleRowId: getIntValue(row, 1),
@@ -2064,7 +2132,9 @@ extension MailDatabase {
             lastKnownMailboxId: getIntValue(row, 23),
             inReplyTo: inReplyTo,
             references: references,
-            threadId: threadId
+            threadId: threadId,
+            threadPosition: threadPosition,
+            threadTotal: threadTotal
         )
     }
 
@@ -2139,6 +2209,9 @@ public struct MailMessage: Sendable {
     public let references: [String]
     // Thread ID reference (added in migration V4)
     public let threadId: String?
+    // Thread position metadata (added in migration V6)
+    public let threadPosition: Int?
+    public let threadTotal: Int?
 
     public init(
         id: String,
@@ -2165,7 +2238,9 @@ public struct MailMessage: Sendable {
         lastKnownMailboxId: Int? = nil,
         inReplyTo: String? = nil,
         references: [String] = [],
-        threadId: String? = nil
+        threadId: String? = nil,
+        threadPosition: Int? = nil,
+        threadTotal: Int? = nil
     ) {
         self.id = id
         self.appleRowId = appleRowId
@@ -2192,6 +2267,8 @@ public struct MailMessage: Sendable {
         self.inReplyTo = inReplyTo
         self.references = references
         self.threadId = threadId
+        self.threadPosition = threadPosition
+        self.threadTotal = threadTotal
     }
 }
 
