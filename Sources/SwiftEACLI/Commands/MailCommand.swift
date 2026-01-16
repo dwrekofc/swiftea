@@ -1305,6 +1305,13 @@ struct MailSearchCommand: ParsableCommand {
             )
         }
 
+        // Warn about conflicting filters
+        if filter.hasConflictingFilters {
+            for conflict in filter.conflictingFilters {
+                printError("Warning: Conflicting filters detected: \(conflict.filter1) and \(conflict.filter2). Only \(conflict.applied) will be applied.")
+            }
+        }
+
         // Apply --status option if provided
         if let statusValue = status {
             filter.mailboxStatus = MailboxStatus(rawValue: statusValue.lowercased())

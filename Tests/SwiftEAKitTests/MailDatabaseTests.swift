@@ -341,6 +341,60 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertEqual(MailDatabase.SearchFilter.validFilterNames.sorted(), expected.sorted())
     }
 
+    func testParseQueryDetectsConflictingFilters() throws {
+        try database.initialize()
+
+        // Conflicting is:read and is:unread filters
+        let filter1 = database.parseQuery("is:read is:unread")
+        XCTAssertTrue(filter1.hasConflictingFilters)
+        XCTAssertEqual(filter1.conflictingFilters.count, 1)
+        XCTAssertEqual(filter1.conflictingFilters[0].filter1, "is:read")
+        XCTAssertEqual(filter1.conflictingFilters[0].filter2, "is:unread")
+        XCTAssertEqual(filter1.conflictingFilters[0].applied, "is:unread")
+        XCTAssertEqual(filter1.isRead, false) // Last one wins (is:unread)
+
+        // Conflicting is:unread and is:read filters (reverse order in query, but pattern order determines winner)
+        let filter2 = database.parseQuery("is:unread is:read")
+        XCTAssertTrue(filter2.hasConflictingFilters)
+        XCTAssertEqual(filter2.conflictingFilters.count, 1)
+        XCTAssertEqual(filter2.conflictingFilters[0].applied, "is:unread") // Pattern processed second wins
+        XCTAssertEqual(filter2.isRead, false) // is:unread pattern is processed after is:read in pattern array
+
+        // Conflicting is:flagged and is:unflagged filters
+        let filter3 = database.parseQuery("is:flagged is:unflagged")
+        XCTAssertTrue(filter3.hasConflictingFilters)
+        XCTAssertEqual(filter3.conflictingFilters.count, 1)
+        XCTAssertEqual(filter3.conflictingFilters[0].filter1, "is:flagged")
+        XCTAssertEqual(filter3.conflictingFilters[0].filter2, "is:unflagged")
+        XCTAssertEqual(filter3.conflictingFilters[0].applied, "is:unflagged")
+        XCTAssertEqual(filter3.isFlagged, false) // Last one wins (is:unflagged)
+
+        // Conflicting is:unflagged and is:flagged filters (reverse order in query, but pattern order determines winner)
+        let filter4 = database.parseQuery("is:unflagged is:flagged")
+        XCTAssertTrue(filter4.hasConflictingFilters)
+        XCTAssertEqual(filter4.conflictingFilters.count, 1)
+        XCTAssertEqual(filter4.conflictingFilters[0].applied, "is:unflagged") // Pattern processed second wins
+        XCTAssertEqual(filter4.isFlagged, false) // is:unflagged pattern is processed after is:flagged in pattern array
+
+        // Multiple conflicts (both read/unread and flagged/unflagged)
+        let filter5 = database.parseQuery("is:read is:unread is:flagged is:unflagged")
+        XCTAssertTrue(filter5.hasConflictingFilters)
+        XCTAssertEqual(filter5.conflictingFilters.count, 2)
+
+        // No conflicts when only one of each type
+        let filter6 = database.parseQuery("is:read is:flagged")
+        XCTAssertFalse(filter6.hasConflictingFilters)
+        XCTAssertEqual(filter6.conflictingFilters.count, 0)
+        XCTAssertEqual(filter6.isRead, true)
+        XCTAssertEqual(filter6.isFlagged, true)
+
+        // No conflicts with other filters mixed in
+        let filter7 = database.parseQuery("from:alice is:unread")
+        XCTAssertFalse(filter7.hasConflictingFilters)
+        XCTAssertEqual(filter7.from, "alice")
+        XCTAssertEqual(filter7.isRead, false)
+    }
+
     func testSearchWithMixedSpecialCharacters() throws {
         try database.initialize()
 

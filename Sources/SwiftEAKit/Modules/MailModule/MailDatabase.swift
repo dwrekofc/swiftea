@@ -700,6 +700,8 @@ public final class MailDatabase: @unchecked Sendable {
         public var mailboxStatus: MailboxStatus?
         /// Unknown filter names found in the query (e.g., "badfilter" from "badfilter:value")
         public var unknownFilters: [String] = []
+        /// Conflicting filters detected during parsing (e.g., "is:read and is:unread" both specified)
+        public var conflictingFilters: [(filter1: String, filter2: String, applied: String)] = []
 
         public init() {}
 
@@ -718,6 +720,11 @@ public final class MailDatabase: @unchecked Sendable {
         /// Check if unknown filters were found
         public var hasUnknownFilters: Bool {
             !unknownFilters.isEmpty
+        }
+
+        /// Check if conflicting filters were found
+        public var hasConflictingFilters: Bool {
+            !conflictingFilters.isEmpty
         }
 
         /// List of valid filter names for error messages
@@ -748,11 +755,31 @@ public final class MailDatabase: @unchecked Sendable {
             ("mailbox:\"([^\"]+)\"", { value, f in f.mailbox = value }),
             ("mailbox:(\\S+)", { value, f in f.mailbox = value }),
 
-            // is: status filters
-            ("is:read", { _, f in f.isRead = true }),
-            ("is:unread", { _, f in f.isRead = false }),
-            ("is:flagged", { _, f in f.isFlagged = true }),
-            ("is:unflagged", { _, f in f.isFlagged = false }),
+            // is: status filters (with conflict detection)
+            ("is:read", { _, f in
+                if f.isRead == false {
+                    f.conflictingFilters.append((filter1: "is:read", filter2: "is:unread", applied: "is:read"))
+                }
+                f.isRead = true
+            }),
+            ("is:unread", { _, f in
+                if f.isRead == true {
+                    f.conflictingFilters.append((filter1: "is:read", filter2: "is:unread", applied: "is:unread"))
+                }
+                f.isRead = false
+            }),
+            ("is:flagged", { _, f in
+                if f.isFlagged == false {
+                    f.conflictingFilters.append((filter1: "is:flagged", filter2: "is:unflagged", applied: "is:flagged"))
+                }
+                f.isFlagged = true
+            }),
+            ("is:unflagged", { _, f in
+                if f.isFlagged == true {
+                    f.conflictingFilters.append((filter1: "is:flagged", filter2: "is:unflagged", applied: "is:unflagged"))
+                }
+                f.isFlagged = false
+            }),
 
             // has: filters
             ("has:attachments?", { _, f in f.hasAttachments = true }),
