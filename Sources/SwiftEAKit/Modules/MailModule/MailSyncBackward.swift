@@ -243,20 +243,26 @@ public final class MailSyncBackward: @unchecked Sendable {
 /// AppleScript templates for moving messages to Archive and Trash
 public struct MailSyncBackwardScripts {
 
-    /// Common script fragment to find a message by ID in common mailboxes
+    /// Common script fragment to find a message by ID using two-stage search
     ///
     /// Mail.app doesn't support global message searches - we must search within each mailbox.
-    /// This searches only Inbox, Sent Items, and Archive for performance reasons.
-    /// (Searching all mailboxes is prohibitively slow for Exchange accounts with many folders.)
+    /// Uses a two-stage approach for performance:
+    /// 1. First searches common mailboxes (Inbox, Sent, Archive, Drafts, Junk, Trash)
+    /// 2. If not found, falls back to searching ALL mailboxes in each account
+    ///
+    /// This balances performance (fast search of common folders) with completeness
+    /// (fallback finds messages in custom folders).
     private static func messageSearchScript(messageId: String) -> String {
         """
         set targetMsgId to "\(escapeAppleScript(messageId))"
         set theMessage to missing value
-        set searchMailboxes to {"Inbox", "Sent Items", "Sent", "Archive"}
 
-        -- Search all accounts
+        -- Stage 1: Search common mailboxes first (fast path)
+        set commonMailboxes to {"Inbox", "Sent Items", "Sent", "Archive", "Drafts", "Junk", "Spam", "Trash", "Deleted Items"}
+        set searchedFolders to {}
+
         repeat with acc in accounts
-            repeat with mboxName in searchMailboxes
+            repeat with mboxName in commonMailboxes
                 try
                     set targetMbox to mailbox mboxName of acc
                     set foundMsgs to (every message of targetMbox whose message id is targetMsgId)
@@ -264,13 +270,36 @@ public struct MailSyncBackwardScripts {
                         set theMessage to item 1 of foundMsgs
                         exit repeat
                     end if
+                    -- Track which folders we actually searched (mailbox exists)
+                    if mboxName is not in searchedFolders then
+                        set end of searchedFolders to mboxName
+                    end if
                 end try
             end repeat
             if theMessage is not missing value then exit repeat
         end repeat
 
+        -- Stage 2: If not found, search ALL mailboxes as fallback
         if theMessage is missing value then
-            error "Message not found in Inbox, Sent, or Archive" number -1728
+            repeat with acc in accounts
+                try
+                    set allMailboxes to every mailbox of acc
+                    repeat with mbox in allMailboxes
+                        try
+                            set foundMsgs to (every message of mbox whose message id is targetMsgId)
+                            if (count of foundMsgs) > 0 then
+                                set theMessage to item 1 of foundMsgs
+                                exit repeat
+                            end if
+                        end try
+                    end repeat
+                end try
+                if theMessage is not missing value then exit repeat
+            end repeat
+        end if
+
+        if theMessage is missing value then
+            error "Message not found. Searched common folders: " & (searchedFolders as text) & " plus all account mailboxes" number -1728
         end if
         """
     }
