@@ -175,6 +175,9 @@ struct MailSyncCommand: ParsableCommand {
     @Option(name: .long, help: "Sync interval in seconds for watch mode (default: 300, minimum: 30)")
     var interval: Int?
 
+    @Option(name: .long, help: "Explicit vault path (for daemon mode when CWD is unreliable)")
+    var vaultPath: String?
+
     // MARK: - Retry Configuration (for daemon mode)
 
     /// Maximum number of retry attempts for transient errors
@@ -254,6 +257,9 @@ struct MailSyncCommand: ParsableCommand {
         if isDaemonMode {
             log("mail sync started (daemon mode, pid=\(ProcessInfo.processInfo.processIdentifier))")
             log("working directory: \(FileManager.default.currentDirectoryPath)")
+            if let explicitPath = vaultPath {
+                log("vault path (explicit): \(explicitPath)")
+            }
         }
 
         // In daemon mode, use retry with exponential backoff for transient errors
@@ -315,7 +321,13 @@ struct MailSyncCommand: ParsableCommand {
     }
 
     private func executeSync() throws {
-        let vault = try VaultContext.require()
+        // Use explicit vault path if provided (for daemon mode), otherwise use CWD
+        let vault: VaultContext
+        if let explicitPath = vaultPath {
+            vault = try VaultContext.require(at: explicitPath)
+        } else {
+            vault = try VaultContext.require()
+        }
 
         // Create mail database in vault's data folder
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
@@ -670,6 +682,8 @@ struct MailSyncCommand: ParsableCommand {
         // Generate plist content
         // Uses --daemon mode for a persistent process with sleep/wake detection.
         // KeepAlive ensures the daemon is restarted if it exits.
+        // Uses --vault-path to explicitly pass the vault location since launchd's
+        // WorkingDirectory is unreliable (CWD may be empty when daemon starts).
         let syncInterval = effectiveSyncInterval
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -686,6 +700,8 @@ struct MailSyncCommand: ParsableCommand {
                     <string>--daemon</string>
                     <string>--interval</string>
                     <string>\(syncInterval)</string>
+                    <string>--vault-path</string>
+                    <string>\(vault.rootPath)</string>
                 </array>
                 <key>RunAtLoad</key>
                 <true/>
