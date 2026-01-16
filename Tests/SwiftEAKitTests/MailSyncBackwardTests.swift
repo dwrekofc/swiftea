@@ -645,6 +645,34 @@ final class MailSyncBackwardTests: XCTestCase {
         XCTAssertTrue(script.contains("error"))
     }
 
+    func testArchiveScriptSupportsLocalizedMailboxNames() {
+        let script = MailSyncBackwardScripts.archiveMessage(byMessageId: "<test@example.com>")
+
+        // Should try multiple archive mailbox names for different locales
+        XCTAssertTrue(script.contains("Archive"))
+        XCTAssertTrue(script.contains("All Mail"))
+        XCTAssertTrue(script.contains("Archives"))  // French
+        XCTAssertTrue(script.contains("Archivo"))   // Spanish
+        XCTAssertTrue(script.contains("Archiv"))    // German
+        // Should have error if none of the names work
+        XCTAssertTrue(script.contains("-1729"))
+        XCTAssertTrue(script.contains("Archive mailbox not found"))
+    }
+
+    func testDeleteScriptSupportsLocalizedMailboxNames() {
+        let script = MailSyncBackwardScripts.deleteMessage(byMessageId: "<test@example.com>")
+
+        // Should try multiple trash mailbox names for different locales
+        XCTAssertTrue(script.contains("Trash"))
+        XCTAssertTrue(script.contains("Deleted Items"))
+        XCTAssertTrue(script.contains("Papelera"))   // Spanish
+        XCTAssertTrue(script.contains("Corbeille"))  // French
+        XCTAssertTrue(script.contains("Papierkorb")) // German
+        // Should have error if none of the names work
+        XCTAssertTrue(script.contains("-1730"))
+        XCTAssertTrue(script.contains("Trash mailbox not found"))
+    }
+
     // MARK: - Integration Tests
 
     func testFullArchiveWorkflow() throws {

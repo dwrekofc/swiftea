@@ -247,31 +247,99 @@ public struct MailSyncBackwardScripts {
     /// Generate script to archive a message (move to Archive mailbox)
     ///
     /// Uses the account's Archive mailbox which Mail.app creates automatically.
+    /// Supports localized folder names by trying multiple common names.
     /// - Parameter messageId: The RFC822 Message-ID to search for
     /// - Returns: AppleScript to move the message to Archive
     public static func archiveMessage(byMessageId messageId: String) -> String {
-        """
-        \(messageSearchScript(messageId: messageId))
+        // Try multiple archive mailbox names for different locales
+        // English: Archive, All Mail
+        // Spanish: Archivo
+        // French: Archives
+        // German: Archiv
+        let archiveNames = ["Archive", "All Mail", "Archives", "Archivo", "Archiv"]
+
+        var script = messageSearchScript(messageId: messageId)
+        script += """
         set theAccount to account of mailbox of theMessage
-        set archiveMailbox to mailbox "Archive" of theAccount
+        set archiveMailbox to missing value
+
+        """
+
+        // Try each archive name
+        for (index, name) in archiveNames.enumerated() {
+            if index > 0 {
+                script += "if archiveMailbox is missing value then\n"
+            }
+            script += """
+            try
+                set archiveMailbox to mailbox "\(name)" of theAccount
+            end try
+            """
+            if index < archiveNames.count - 1 {
+                script += "\nend if\n"
+            }
+        }
+
+        script += """
+
+        if archiveMailbox is missing value then
+            error "Archive mailbox not found. Checked: \(archiveNames.joined(separator: ", "))" number -1729
+        end if
+
         move theMessage to archiveMailbox
         return "archived"
         """
+
+        return script
     }
 
     /// Generate script to delete a message (move to Trash mailbox)
     ///
     /// Uses the account's Trash mailbox.
+    /// Supports localized folder names by trying multiple common names.
     /// - Parameter messageId: The RFC822 Message-ID to search for
     /// - Returns: AppleScript to move the message to Trash
     public static func deleteMessage(byMessageId messageId: String) -> String {
-        """
-        \(messageSearchScript(messageId: messageId))
+        // Try multiple trash mailbox names for different locales
+        // English: Trash, Deleted Items
+        // Spanish: Papelera
+        // French: Corbeille
+        // German: Papierkorb
+        let trashNames = ["Trash", "Deleted Items", "Papelera", "Corbeille", "Papierkorb"]
+
+        var script = messageSearchScript(messageId: messageId)
+        script += """
         set theAccount to account of mailbox of theMessage
-        set trashMailbox to mailbox "Trash" of theAccount
+        set trashMailbox to missing value
+
+        """
+
+        // Try each trash name
+        for (index, name) in trashNames.enumerated() {
+            if index > 0 {
+                script += "if trashMailbox is missing value then\n"
+            }
+            script += """
+            try
+                set trashMailbox to mailbox "\(name)" of theAccount
+            end try
+            """
+            if index < trashNames.count - 1 {
+                script += "\nend if\n"
+            }
+        }
+
+        script += """
+
+        if trashMailbox is missing value then
+            error "Trash mailbox not found. Checked: \(trashNames.joined(separator: ", "))" number -1730
+        end if
+
         move theMessage to trashMailbox
         return "deleted"
         """
+
+        return script
     }
 
     /// Strip RFC822 angle brackets from message ID for Mail.app AppleScript lookup
