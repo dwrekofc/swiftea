@@ -551,15 +551,17 @@ public final class EmlxParser: Sendable {
 
                     // Parse part (trim leading newlines that follow the boundary)
                     let (partHeaders, partBody) = parseRfc822(trimmedPart)
-                    let partContentType = partHeaders["content-type"]?.lowercased() ?? ""
+                    let partContentTypeOriginal = partHeaders["content-type"] ?? ""
+                    let partContentTypeLower = partContentTypeOriginal.lowercased()
 
-                    if partContentType.contains("text/plain") {
+                    if partContentTypeLower.contains("text/plain") {
                         plainText = decodeBodyPart(partBody, headers: partHeaders)
-                    } else if partContentType.contains("text/html") {
+                    } else if partContentTypeLower.contains("text/html") {
                         htmlText = decodeBodyPart(partBody, headers: partHeaders)
-                    } else if partContentType.contains("multipart/") {
+                    } else if partContentTypeLower.contains("multipart/") {
                         // Recursively handle nested multipart
-                        let (nestedText, nestedHtml, nestedAttachments) = parseBody(partBody, contentType: partContentType, headers: partHeaders)
+                        // Use original case for boundary extraction since boundaries are case-sensitive
+                        let (nestedText, nestedHtml, nestedAttachments) = parseBody(partBody, contentType: partContentTypeOriginal, headers: partHeaders)
                         if plainText == nil { plainText = nestedText }
                         if htmlText == nil { htmlText = nestedHtml }
                         attachments.append(contentsOf: nestedAttachments)
