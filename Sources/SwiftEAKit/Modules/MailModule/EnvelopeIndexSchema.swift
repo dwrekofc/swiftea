@@ -268,6 +268,37 @@ public enum VaultMailboxes {
     public static let syncedAt = "synced_at"     // INTEGER NOT NULL
 }
 
+/// Schema definition for our vault database `addresses` table.
+///
+/// This table stores unique email addresses copied from Envelope Index
+/// for use in sender lookups and contact deduplication.
+///
+/// ## Column Mapping from Envelope Index:
+/// | Envelope Index Column | Vault Column | Notes                                |
+/// |-----------------------|--------------|--------------------------------------|
+/// | ROWID                 | id           | Primary key (preserved from source)  |
+/// | address               | email        | Email address                        |
+/// | comment               | name         | Display name (may be NULL)           |
+///
+public enum VaultAddresses {
+    /// Table name in the vault database
+    public static let tableName = "addresses"
+
+    // MARK: Column Names
+
+    /// Primary key (matches Envelope Index ROWID for foreign key compatibility)
+    public static let id = "id"
+
+    /// Email address (TEXT, e.g., "user@example.com")
+    public static let email = "email"
+
+    /// Display name (TEXT, may be NULL)
+    public static let name = "name"
+
+    /// Timestamp when this address was synced (INTEGER - Unix timestamp)
+    public static let syncedAt = "synced_at"
+}
+
 // MARK: - Schema Mapping Utilities
 
 /// Utilities for mapping between Envelope Index and vault database schemas.

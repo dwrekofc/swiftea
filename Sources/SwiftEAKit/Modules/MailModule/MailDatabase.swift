@@ -155,6 +155,59 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    // MARK: - Bulk Copy Operations
+
+    /// Bulk copy addresses from attached Envelope Index to the vault addresses table.
+    ///
+    /// This method performs a direct `INSERT INTO addresses SELECT ... FROM envelope.addresses`
+    /// to efficiently copy sender/recipient metadata without row-by-row processing.
+    ///
+    /// **Prerequisites:**
+    /// - Database must be initialized via `initialize()`
+    /// - Envelope Index must be attached via `attachEnvelopeIndex(path:)`
+    ///
+    /// **Column Mapping:**
+    /// - `envelope.addresses.ROWID` → `addresses.id`
+    /// - `envelope.addresses.address` → `addresses.email`
+    /// - `envelope.addresses.comment` → `addresses.name`
+    ///
+    /// - Returns: The number of addresses copied
+    /// - Throws: `MailDatabaseError.notInitialized` if database connection is not open.
+    /// - Throws: `MailDatabaseError.queryFailed` if the bulk INSERT fails.
+    @discardableResult
+    public func bulkCopyAddresses() throws -> Int {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        do {
+            let now = Int(Date().timeIntervalSince1970)
+
+            // Use INSERT OR REPLACE to handle cases where addresses already exist
+            // The id column preserves the ROWID from Envelope Index for foreign key compatibility
+            _ = try conn.execute("""
+                INSERT OR REPLACE INTO addresses (id, email, name, synced_at)
+                SELECT
+                    ROWID,
+                    address,
+                    comment,
+                    \(now)
+                FROM envelope.addresses
+                """)
+
+            // Get the count of copied addresses
+            let result = try conn.query("SELECT COUNT(*) FROM addresses")
+            for row in result {
+                if let count = try? row.getInt(0) {
+                    return count
+                }
+            }
+            return 0
+        } catch {
+            throw MailDatabaseError.queryFailed(underlying: error)
+        }
+    }
+
     // MARK: - Schema Definition
 
     /// Run all pending migrations to bring schema up to date
@@ -201,6 +254,9 @@ public final class MailDatabase: @unchecked Sendable {
         }
         if currentVersion < 7 {
             try applyMigrationV7(conn)
+        }
+        if currentVersion < 8 {
+            try applyMigrationV8(conn)
         }
     }
 
@@ -499,10 +555,35 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Migration v8: Add addresses table for bulk copy from Envelope Index
+    /// This table stores unique email addresses for sender lookups and contact deduplication.
+    private func applyMigrationV8(_ conn: Connection) throws {
+        do {
+            // Create addresses table - stores unique email/name pairs from Envelope Index
+            _ = try conn.execute("""
+                CREATE TABLE IF NOT EXISTS addresses (
+                    id INTEGER PRIMARY KEY,
+                    email TEXT,
+                    name TEXT,
+                    synced_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+                )
+                """)
+
+            // Create index on email for fast lookups
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_addresses_email ON addresses(email)")
+
+            // Record migration version
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (8)")
+
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
     // MARK: - Schema Version API
 
     /// The current schema version number (latest migration version)
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 8
 
     /// Description of each schema migration
     public static let migrationDescriptions: [Int: String] = [
@@ -512,7 +593,8 @@ public final class MailDatabase: @unchecked Sendable {
         4: "Threads table and thread_id column on messages",
         5: "Thread-messages junction table for many-to-many relationships",
         6: "Thread position metadata (thread_position, thread_total)",
-        7: "Large inbox query optimization indexes"
+        7: "Large inbox query optimization indexes",
+        8: "Addresses table for bulk copy from Envelope Index"
     ]
 
     /// Get the current schema version from the database

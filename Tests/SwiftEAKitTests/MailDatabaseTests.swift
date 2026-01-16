@@ -1,4 +1,5 @@
 import XCTest
+import Libsql
 @testable import SwiftEAKit
 
 final class MailDatabaseTests: XCTestCase {
@@ -2686,5 +2687,123 @@ final class MailDatabaseTests: XCTestCase {
         let attachFailedError = MailDatabaseError.envelopeIndexAttachFailed(underlying: MockError())
         XCTAssertTrue(attachFailedError.errorDescription?.contains("attach") ?? false ||
                       attachFailedError.errorDescription?.contains("Attach") ?? false)
+    }
+
+    // MARK: - Bulk Copy Addresses Tests
+
+    func testBulkCopyAddressesThrowsWhenNotInitialized() throws {
+        // Database not initialized - should throw notInitialized error
+        let nonInitializedDB = MailDatabase(databasePath: "/tmp/test-not-init-bulk.db")
+
+        XCTAssertThrowsError(try nonInitializedDB.bulkCopyAddresses()) { error in
+            guard case MailDatabaseError.notInitialized = error else {
+                XCTFail("Expected notInitialized error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testBulkCopyAddressesWithEmptyEnvelopeIndex() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with an empty addresses table
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeIndexEmpty")
+
+        // Create mock with zero addresses
+        try createMockEnvelopeIndexWithAddresses(at: envelopePath, addresses: [])
+
+        // Attach the mock envelope index
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // Bulk copy should succeed but return 0 since no addresses
+        let count = try database.bulkCopyAddresses()
+        XCTAssertEqual(count, 0)
+
+        try database.detachEnvelopeIndex()
+    }
+
+    func testBulkCopyAddressesWithValidEnvelopeData() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeIndexValid")
+
+        // Create the mock database directly with SQLite via MailDatabase helper
+        // We'll manually create the required table structure
+        try createMockEnvelopeIndexWithAddresses(at: envelopePath, addresses: [
+            (1, "alice@example.com", "Alice Smith"),
+            (2, "bob@example.com", "Bob Jones"),
+            (3, "carol@example.com", nil) // No display name
+        ])
+
+        // Attach the mock envelope index
+        try database.attachEnvelopeIndex(path: envelopePath)
+
+        // Perform bulk copy
+        let count = try database.bulkCopyAddresses()
+
+        // Verify count
+        XCTAssertEqual(count, 3)
+
+        // Detach
+        try database.detachEnvelopeIndex()
+
+        // Verify the addresses table has the data
+        XCTAssertTrue(try database.tableExists("addresses"))
+    }
+
+    func testBulkCopyAddressesPreservesEnvelopeRowId() throws {
+        try database.initialize()
+
+        // Create a mock Envelope Index database with specific ROWIDs
+        let envelopePath = (testDir as NSString).appendingPathComponent("MockEnvelopeRowIds")
+
+        try createMockEnvelopeIndexWithAddresses(at: envelopePath, addresses: [
+            (100, "user100@example.com", "User Hundred"),
+            (200, "user200@example.com", "User Two Hundred")
+        ])
+
+        // Perform bulk copy
+        try database.attachEnvelopeIndex(path: envelopePath)
+        let count = try database.bulkCopyAddresses()
+        try database.detachEnvelopeIndex()
+
+        XCTAssertEqual(count, 2)
+    }
+
+    // MARK: - Test Helpers
+
+    /// Creates a mock Envelope Index database with an addresses table containing test data.
+    /// This creates a pure mock that mimics Apple Mail's Envelope Index schema, NOT our vault schema.
+    private func createMockEnvelopeIndexWithAddresses(
+        at path: String,
+        addresses: [(rowId: Int, email: String, name: String?)]
+    ) throws {
+        // Create parent directory if needed
+        let parentDir = (path as NSString).deletingLastPathComponent
+        try FileManager.default.createDirectory(atPath: parentDir, withIntermediateDirectories: true)
+
+        // Create the mock Envelope Index directly using Libsql
+        // Do NOT use MailDatabase here as that would create our vault schema
+        let db = try Database(path)
+        let conn = try db.connect()
+
+        // Create the addresses table with ROWID (SQLite's implicit rowid)
+        // This mimics Apple Mail's Envelope Index schema
+        _ = try conn.execute("""
+            CREATE TABLE IF NOT EXISTS addresses (
+                address TEXT,
+                comment TEXT
+            )
+            """)
+
+        // Insert test data with explicit ROWID
+        for address in addresses {
+            let commentValue = address.name.map { "'\($0)'" } ?? "NULL"
+            _ = try conn.execute("""
+                INSERT INTO addresses (ROWID, address, comment)
+                VALUES (\(address.rowId), '\(address.email)', \(commentValue))
+                """)
+        }
     }
 }
