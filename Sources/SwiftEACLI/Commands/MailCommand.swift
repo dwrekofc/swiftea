@@ -3054,7 +3054,7 @@ struct MailMoveCommand: ParsableCommand {
     @Option(name: .long, help: "Message ID to move (required)")
     var id: String
 
-    @Option(name: .long, help: "Target mailbox name (required)")
+    @Option(name: [.customLong("mailbox"), .customLong("to")], help: "Target mailbox name (required). --to is an alias for --mailbox.")
     var mailbox: String?
 
     @Flag(name: .long, help: "Confirm the destructive action")
