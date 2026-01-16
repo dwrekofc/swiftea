@@ -808,4 +808,152 @@ final class MailSyncBackwardTests: XCTestCase {
         let retrieved = try mailDatabase.getMessage(id: "retry-test")
         XCTAssertNil(retrieved?.pendingSyncAction)
     }
+
+    // MARK: - Export File Cleanup Tests
+
+    func testArchiveMessageDeletesExportedFile() throws {
+        // Create an actual .md file to test deletion
+        let exportFilePath = (testDir as NSString).appendingPathComponent("test-archive-export.md")
+        try "# Test Email\n\nTest content".write(toFile: exportFilePath, atomically: true, encoding: .utf8)
+
+        // Verify file exists before archive
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exportFilePath))
+
+        // Insert message first (upsertMessage doesn't handle exportPath)
+        let message = MailMessage(
+            id: "archive-export-test",
+            messageId: "<archive-export@example.com>",
+            subject: "Archive Export Test",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+        // Then set the export path via the dedicated method
+        try mailDatabase.updateExportPath(id: "archive-export-test", path: exportFilePath)
+
+        // Archive the message
+        try backwardSync.archiveMessage(id: "archive-export-test")
+
+        // Verify the exported file was deleted
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportFilePath), "Exported .md file should be deleted after archive")
+
+        // Verify message status is correct
+        let retrieved = try mailDatabase.getMessage(id: "archive-export-test")
+        XCTAssertEqual(retrieved?.mailboxStatus, .archived)
+    }
+
+    func testDeleteMessageDeletesExportedFile() throws {
+        // Create an actual .md file to test deletion
+        let exportFilePath = (testDir as NSString).appendingPathComponent("test-delete-export.md")
+        try "# Test Email\n\nTest content".write(toFile: exportFilePath, atomically: true, encoding: .utf8)
+
+        // Verify file exists before delete
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exportFilePath))
+
+        // Insert message first (upsertMessage doesn't handle exportPath)
+        let message = MailMessage(
+            id: "delete-export-test",
+            messageId: "<delete-export@example.com>",
+            subject: "Delete Export Test",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+        // Then set the export path via the dedicated method
+        try mailDatabase.updateExportPath(id: "delete-export-test", path: exportFilePath)
+
+        // Delete the message
+        try backwardSync.deleteMessage(id: "delete-export-test")
+
+        // Verify the exported file was deleted
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportFilePath), "Exported .md file should be deleted after delete")
+
+        // Verify message status is correct
+        let retrieved = try mailDatabase.getMessage(id: "delete-export-test")
+        XCTAssertEqual(retrieved?.mailboxStatus, .deleted)
+    }
+
+    func testArchiveMessageWithNoExportPathDoesNotFail() throws {
+        // Insert message without exportPath (default - upsertMessage doesn't set exportPath)
+        let message = MailMessage(
+            id: "archive-no-export",
+            messageId: "<archive-no-export@example.com>",
+            subject: "Archive No Export",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+
+        // Should not throw when exportPath is nil
+        XCTAssertNoThrow(try backwardSync.archiveMessage(id: "archive-no-export"))
+
+        let retrieved = try mailDatabase.getMessage(id: "archive-no-export")
+        XCTAssertEqual(retrieved?.mailboxStatus, .archived)
+    }
+
+    func testDeleteMessageWithMissingExportFileDoesNotFail() throws {
+        // Use a path that doesn't exist
+        let nonExistentPath = (testDir as NSString).appendingPathComponent("nonexistent.md")
+
+        let message = MailMessage(
+            id: "delete-missing-export",
+            messageId: "<delete-missing@example.com>",
+            subject: "Delete Missing Export",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+        // Set export path to a non-existent file
+        try mailDatabase.updateExportPath(id: "delete-missing-export", path: nonExistentPath)
+
+        // Should not throw even if file doesn't exist
+        XCTAssertNoThrow(try backwardSync.deleteMessage(id: "delete-missing-export"))
+
+        let retrieved = try mailDatabase.getMessage(id: "delete-missing-export")
+        XCTAssertEqual(retrieved?.mailboxStatus, .deleted)
+    }
+
+    func testArchiveMessageFailureDoesNotDeleteExportFile() throws {
+        // Create an actual .md file
+        let exportFilePath = (testDir as NSString).appendingPathComponent("test-failed-archive.md")
+        try "# Test Email\n\nTest content".write(toFile: exportFilePath, atomically: true, encoding: .utf8)
+
+        let message = MailMessage(
+            id: "failed-archive-export",
+            messageId: "<failed-archive@example.com>",
+            subject: "Failed Archive Export",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+        try mailDatabase.updateExportPath(id: "failed-archive-export", path: exportFilePath)
+
+        // Configure mock to fail
+        mockAppleScript.shouldFail = true
+
+        // Archive should throw
+        XCTAssertThrowsError(try backwardSync.archiveMessage(id: "failed-archive-export"))
+
+        // Verify the exported file was NOT deleted (since AppleScript failed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exportFilePath), "Exported .md file should NOT be deleted when archive fails")
+    }
+
+    func testDeleteMessageFailureDoesNotDeleteExportFile() throws {
+        // Create an actual .md file
+        let exportFilePath = (testDir as NSString).appendingPathComponent("test-failed-delete.md")
+        try "# Test Email\n\nTest content".write(toFile: exportFilePath, atomically: true, encoding: .utf8)
+
+        let message = MailMessage(
+            id: "failed-delete-export",
+            messageId: "<failed-delete@example.com>",
+            subject: "Failed Delete Export",
+            mailboxStatus: .inbox
+        )
+        try mailDatabase.upsertMessage(message)
+        try mailDatabase.updateExportPath(id: "failed-delete-export", path: exportFilePath)
+
+        // Configure mock to fail
+        mockAppleScript.shouldFail = true
+
+        // Delete should throw
+        XCTAssertThrowsError(try backwardSync.deleteMessage(id: "failed-delete-export"))
+
+        // Verify the exported file was NOT deleted (since AppleScript failed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exportFilePath), "Exported .md file should NOT be deleted when delete fails")
+    }
 }

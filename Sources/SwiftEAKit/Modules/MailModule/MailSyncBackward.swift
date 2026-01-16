@@ -51,15 +51,45 @@ public enum BackwardSyncError: Error, LocalizedError {
 /// Uses the optimistic update pattern:
 /// 1. Update local DB status immediately
 /// 2. Execute AppleScript to move message in Apple Mail
-/// 3. On success: clear pending action
+/// 3. On success: clear pending action and delete exported .md file
 /// 4. On failure: rollback local status to original state
 public final class MailSyncBackward: @unchecked Sendable {
     private let mailDatabase: MailDatabase
     private let appleScriptService: AppleScriptServiceProtocol
+    private let fileManager: FileManager
 
-    public init(mailDatabase: MailDatabase, appleScriptService: AppleScriptServiceProtocol = AppleScriptService.shared) {
+    public init(
+        mailDatabase: MailDatabase,
+        appleScriptService: AppleScriptServiceProtocol = AppleScriptService.shared,
+        fileManager: FileManager = .default
+    ) {
         self.mailDatabase = mailDatabase
         self.appleScriptService = appleScriptService
+        self.fileManager = fileManager
+    }
+
+    // MARK: - Private Helpers
+
+    /// Delete the exported .md file for a message after archive/delete
+    ///
+    /// This cleans up orphaned .md files when messages are archived or deleted.
+    /// Logs a warning if deletion fails but does not throw (non-fatal).
+    ///
+    /// - Parameter message: The message whose export file should be deleted
+    private func deleteExportedFile(message: MailMessage) {
+        guard let exportPath = message.exportPath else {
+            return
+        }
+
+        do {
+            if fileManager.fileExists(atPath: exportPath) {
+                try fileManager.removeItem(atPath: exportPath)
+            }
+        } catch {
+            // Log warning but don't fail - this is a cleanup operation
+            // The message was already successfully archived/deleted in Mail.app
+            print("Warning: Failed to delete exported file at \(exportPath): \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Public API
@@ -95,8 +125,9 @@ public final class MailSyncBackward: @unchecked Sendable {
             let script = MailSyncBackwardScripts.archiveMessage(byMessageId: rfc822MessageId)
             _ = try appleScriptService.executeMailScript(script)
 
-            // Step 4a: Success - clear pending action
+            // Step 4a: Success - clear pending action and delete exported file
             try mailDatabase.clearPendingSyncAction(id: id)
+            deleteExportedFile(message: message)
         } catch {
             // Step 4b: Failure - rollback status but keep pending action for retry
             // The pending_sync_action is retained so processPendingActions() can retry
@@ -140,8 +171,9 @@ public final class MailSyncBackward: @unchecked Sendable {
             let script = MailSyncBackwardScripts.deleteMessage(byMessageId: rfc822MessageId)
             _ = try appleScriptService.executeMailScript(script)
 
-            // Step 4a: Success - clear pending action
+            // Step 4a: Success - clear pending action and delete exported file
             try mailDatabase.clearPendingSyncAction(id: id)
+            deleteExportedFile(message: message)
         } catch {
             // Step 4b: Failure - rollback status but keep pending action for retry
             // The pending_sync_action is retained so processPendingActions() can retry
