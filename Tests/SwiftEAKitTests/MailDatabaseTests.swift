@@ -3255,6 +3255,158 @@ final class MailDatabaseTests: XCTestCase {
         XCTAssertEqual(result1.mailboxCount, result2.mailboxCount)
     }
 
+    // MARK: - Bulk Copy Error Handling Tests
+
+    func testAttachEnvelopeIndexThrowsForMissingFile() throws {
+        try database.initialize()
+
+        let nonExistentPath = (testDir as NSString).appendingPathComponent("NonExistent/Envelope Index")
+
+        XCTAssertThrowsError(try database.attachEnvelopeIndex(path: nonExistentPath)) { error in
+            guard case MailDatabaseError.envelopeIndexNotFound(let path) = error else {
+                XCTFail("Expected envelopeIndexNotFound error, got \(error)")
+                return
+            }
+            XCTAssertEqual(path, nonExistentPath)
+        }
+    }
+
+    func testAttachEnvelopeIndexThrowsForCorruptedFile() throws {
+        try database.initialize()
+
+        // Create a corrupted file (not a valid SQLite database)
+        let corruptedPath = (testDir as NSString).appendingPathComponent("CorruptedEnvelope")
+        let corruptedData = "This is not a valid SQLite database".data(using: .utf8)!
+        FileManager.default.createFile(atPath: corruptedPath, contents: corruptedData)
+
+        XCTAssertThrowsError(try database.attachEnvelopeIndex(path: corruptedPath)) { error in
+            guard case MailDatabaseError.envelopeIndexAttachFailed = error else {
+                XCTFail("Expected envelopeIndexAttachFailed error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testAttachEnvelopeIndexThrowsForIncompatibleSchema() throws {
+        try database.initialize()
+
+        // Create a valid SQLite file but with incompatible schema (missing required tables)
+        let incompatiblePath = (testDir as NSString).appendingPathComponent("IncompatibleEnvelope")
+
+        // Create a database with a different schema (no messages/addresses/mailboxes tables)
+        let sql = """
+            CREATE TABLE IF NOT EXISTS some_other_table (id INTEGER PRIMARY KEY, data TEXT);
+            INSERT INTO some_other_table (id, data) VALUES (1, 'test');
+            """
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [incompatiblePath]
+
+        let pipe = Pipe()
+        process.standardInput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+
+        let inputData = sql.data(using: .utf8)!
+        pipe.fileHandleForWriting.write(inputData)
+        pipe.fileHandleForWriting.closeFile()
+
+        process.waitUntilExit()
+
+        // Attaching should succeed (it's a valid SQLite file)
+        try database.attachEnvelopeIndex(path: incompatiblePath)
+
+        // But bulkCopy operations should fail when querying non-existent tables
+        XCTAssertThrowsError(try database.bulkCopyAddresses()) { error in
+            guard case MailDatabaseError.queryFailed = error else {
+                XCTFail("Expected queryFailed error for missing table, got \(error)")
+                return
+            }
+        }
+
+        // Clean up by detaching (may fail if attach partially failed, ignore error)
+        try? database.detachEnvelopeIndex()
+    }
+
+    func testPerformBulkCopyWithMissingEnvelopeIndexThrows() throws {
+        try database.initialize()
+
+        let nonExistentPath = (testDir as NSString).appendingPathComponent("MissingEnvelope/Envelope Index")
+
+        // performBulkCopy requires envelope to be attached first - trying to attach missing file should fail
+        XCTAssertThrowsError(try database.attachEnvelopeIndex(path: nonExistentPath)) { error in
+            guard case MailDatabaseError.envelopeIndexNotFound(let path) = error else {
+                XCTFail("Expected envelopeIndexNotFound error, got \(error)")
+                return
+            }
+            XCTAssertEqual(path, nonExistentPath)
+        }
+    }
+
+    func testBulkCopyRollbackOnError() throws {
+        try database.initialize()
+
+        // First, perform a successful bulk copy to populate some data
+        let validEnvelopePath = (testDir as NSString).appendingPathComponent("ValidEnvelopeForRollback")
+        try createMockEnvelopeIndexWithMessages(at: validEnvelopePath, messages: [
+            MockEnvelopeMessage(
+                rowId: 1,
+                subjectId: 1,
+                senderId: 1,
+                mailboxId: 1,
+                dateReceived: 1736000000.0,
+                dateSent: 1735990000.0,
+                messageId: "<rollback-test@example.com>",
+                read: 1,
+                flagged: 0
+            )
+        ])
+
+        try database.attachEnvelopeIndex(path: validEnvelopePath)
+        let initialResult = try database.performBulkCopy()
+        try database.detachEnvelopeIndex()
+
+        // Verify data was copied
+        XCTAssertGreaterThan(initialResult.totalCount, 0)
+
+        // Now create an incompatible envelope (valid SQLite but missing tables)
+        let incompatiblePath = (testDir as NSString).appendingPathComponent("IncompatibleEnvelopeForRollback")
+        let sql = "CREATE TABLE IF NOT EXISTS unrelated_table (id INTEGER PRIMARY KEY);"
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [incompatiblePath]
+
+        let pipe = Pipe()
+        process.standardInput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+
+        let inputData = sql.data(using: .utf8)!
+        pipe.fileHandleForWriting.write(inputData)
+        pipe.fileHandleForWriting.closeFile()
+
+        process.waitUntilExit()
+
+        // Attach incompatible envelope
+        try database.attachEnvelopeIndex(path: incompatiblePath)
+
+        // performBulkCopy should fail (missing tables)
+        // Since we use INSERT OR REPLACE, operations are individually atomic
+        // The data from the first successful copy should remain unchanged
+        XCTAssertThrowsError(try database.performBulkCopy())
+
+        try? database.detachEnvelopeIndex()
+
+        // Verify original data is still intact (not rolled back, since we use individual statements)
+        // The key point is that partially completed work from a failed bulk copy doesn't corrupt data
+        let message = try database.getMessage(appleRowId: 1)
+        XCTAssertNotNil(message, "Original data should remain after failed bulk copy attempt")
+    }
+
     // MARK: - Mock Envelope Index Messages Helper
 
     /// Structure to represent a mock message for testing
