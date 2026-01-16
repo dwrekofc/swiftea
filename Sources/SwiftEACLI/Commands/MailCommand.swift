@@ -2895,6 +2895,7 @@ enum MailActionError: Error, LocalizedError {
     case mailboxRequired
     case confirmationRequired(action: String)
     case invalidFlagOperation
+    case conflictingFlagOperation
     case invalidMarkOperation
 
     var errorDescription: String? {
@@ -2907,6 +2908,8 @@ enum MailActionError: Error, LocalizedError {
             return "Destructive action '\(action)' requires --yes to confirm or --dry-run to preview."
         case .invalidFlagOperation:
             return "Specify either --set or --clear for flag operation."
+        case .conflictingFlagOperation:
+            return "Cannot specify both --set and --clear."
         case .invalidMarkOperation:
             return "Specify either --read or --unread for mark operation."
         }
@@ -3140,7 +3143,10 @@ struct MailFlagCommand: ParsableCommand {
 
     func validate() throws {
         // Exactly one of --set or --clear must be provided
-        if set == clear {
+        if set && clear {
+            throw MailActionError.conflictingFlagOperation
+        }
+        if !set && !clear {
             throw MailActionError.invalidFlagOperation
         }
     }
