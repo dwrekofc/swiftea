@@ -243,163 +243,56 @@ public final class MailSyncBackward: @unchecked Sendable {
 /// AppleScript templates for moving messages to Archive and Trash
 public struct MailSyncBackwardScripts {
 
-    /// Common script fragment to find a message by ID using two-stage search
-    ///
-    /// Mail.app doesn't support global message searches - we must search within each mailbox.
-    /// Uses a two-stage approach for performance:
-    /// 1. First searches common mailboxes (Inbox, Sent, Archive, Drafts, Junk, Trash)
-    /// 2. If not found, falls back to searching ALL mailboxes in each account
-    ///
-    /// This balances performance (fast search of common folders) with completeness
-    /// (fallback finds messages in custom folders).
-    private static func messageSearchScript(messageId: String) -> String {
-        """
-        set targetMsgId to "\(escapeAppleScript(messageId))"
-        set theMessage to missing value
-
-        -- Stage 1: Search common mailboxes first (fast path)
-        set commonMailboxes to {"Inbox", "Sent Items", "Sent", "Archive", "Drafts", "Junk", "Spam", "Trash", "Deleted Items"}
-        set searchedFolders to {}
-
-        repeat with acc in accounts
-            repeat with mboxName in commonMailboxes
-                try
-                    set targetMbox to mailbox mboxName of acc
-                    set foundMsgs to (every message of targetMbox whose message id is targetMsgId)
-                    if (count of foundMsgs) > 0 then
-                        set theMessage to item 1 of foundMsgs
-                        exit repeat
-                    end if
-                    -- Track which folders we actually searched (mailbox exists)
-                    if mboxName is not in searchedFolders then
-                        set end of searchedFolders to mboxName
-                    end if
-                end try
-            end repeat
-            if theMessage is not missing value then exit repeat
-        end repeat
-
-        -- Stage 2: If not found, search ALL mailboxes as fallback
-        if theMessage is missing value then
-            repeat with acc in accounts
-                try
-                    set allMailboxes to every mailbox of acc
-                    repeat with mbox in allMailboxes
-                        try
-                            set foundMsgs to (every message of mbox whose message id is targetMsgId)
-                            if (count of foundMsgs) > 0 then
-                                set theMessage to item 1 of foundMsgs
-                                exit repeat
-                            end if
-                        end try
-                    end repeat
-                end try
-                if theMessage is not missing value then exit repeat
-            end repeat
-        end if
-
-        if theMessage is missing value then
-            error "Message not found. Searched common folders: " & (searchedFolders as text) & " plus all account mailboxes" number -1728
-        end if
-        """
-    }
-
     /// Generate script to archive a message (move to Archive mailbox)
     ///
     /// Uses the account's Archive mailbox which Mail.app creates automatically.
-    /// Supports localized folder names by trying multiple common names.
+    /// Searches inbox only for simplicity - like deleteMessage().
+    ///
     /// - Parameter messageId: The RFC822 Message-ID to search for
     /// - Returns: AppleScript to move the message to Archive
     public static func archiveMessage(byMessageId messageId: String) -> String {
-        // Try multiple archive mailbox names for different locales
-        // English: Archive, All Mail
-        // Spanish: Archivo
-        // French: Archives
-        // German: Archiv
-        let archiveNames = ["Archive", "All Mail", "Archives", "Archivo", "Archiv"]
+        let escapedId = escapeAppleScript(messageId)
+        return """
+        set targetMsgId to "\(escapedId)"
+        set candidates to {targetMsgId, "<" & targetMsgId & ">"}
 
-        var script = messageSearchScript(messageId: messageId)
-        script += """
-        set theAccount to account of mailbox of theMessage
-        set archiveMailbox to missing value
-
-        """
-
-        // Try each archive name
-        for (index, name) in archiveNames.enumerated() {
-            if index > 0 {
-                script += "if archiveMailbox is missing value then\n"
-            }
-            script += """
+        repeat with cid in candidates
             try
-                set archiveMailbox to mailbox "\(name)" of theAccount
+                set m to first message of inbox whose message id is (cid as text)
+                set theAccount to account of mailbox of m
+                set archiveMailbox to mailbox "Archive" of theAccount
+                move m to archiveMailbox
+                return "archived"
             end try
-            """
-            if index > 0 {
-                script += "\nend if\n"
-            }
-        }
+        end repeat
 
-        script += """
-
-        if archiveMailbox is missing value then
-            error "Archive mailbox not found. Checked: \(archiveNames.joined(separator: ", "))" number -1729
-        end if
-
-        move theMessage to archiveMailbox
-        return "archived"
+        error "Message not found in Inbox with ID: " & targetMsgId number -1728
         """
-
-        return script
     }
 
-    /// Generate script to delete a message (move to Trash mailbox)
+    /// Generate script to delete a message (move to Trash)
     ///
-    /// Uses the account's Trash mailbox.
-    /// Supports localized folder names by trying multiple common names.
+    /// Uses Mail.app's native `delete` command which automatically moves to Trash.
+    /// Searches global inbox directly - simple and fast.
+    ///
     /// - Parameter messageId: The RFC822 Message-ID to search for
-    /// - Returns: AppleScript to move the message to Trash
+    /// - Returns: AppleScript to delete the message
     public static func deleteMessage(byMessageId messageId: String) -> String {
-        // Try multiple trash mailbox names for different locales
-        // English: Trash, Deleted Items
-        // Spanish: Papelera
-        // French: Corbeille
-        // German: Papierkorb
-        let trashNames = ["Trash", "Deleted Items", "Papelera", "Corbeille", "Papierkorb"]
+        let escapedId = escapeAppleScript(messageId)
+        return """
+        set targetMsgId to "\(escapedId)"
+        set candidates to {targetMsgId, "<" & targetMsgId & ">"}
 
-        var script = messageSearchScript(messageId: messageId)
-        script += """
-        set theAccount to account of mailbox of theMessage
-        set trashMailbox to missing value
-
-        """
-
-        // Try each trash name
-        for (index, name) in trashNames.enumerated() {
-            if index > 0 {
-                script += "if trashMailbox is missing value then\n"
-            }
-            script += """
+        repeat with cid in candidates
             try
-                set trashMailbox to mailbox "\(name)" of theAccount
+                set m to first message of inbox whose message id is (cid as text)
+                delete m
+                return "deleted"
             end try
-            """
-            if index > 0 {
-                script += "\nend if\n"
-            }
-        }
+        end repeat
 
-        script += """
-
-        if trashMailbox is missing value then
-            error "Trash mailbox not found. Checked: \(trashNames.joined(separator: ", "))" number -1730
-        end if
-
-        move theMessage to trashMailbox
-        return "deleted"
+        error "Message not found in Inbox with ID: " & targetMsgId number -1728
         """
-
-        return script
     }
 
     /// Strip RFC822 angle brackets from message ID for Mail.app AppleScript lookup

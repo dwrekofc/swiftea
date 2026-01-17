@@ -146,20 +146,43 @@ public final class AppleScriptService: AppleScriptServiceProtocol, Sendable {
     /// - Returns: The result of the script execution
     /// - Throws: `AppleScriptError` if execution fails
     public func execute(_ script: String) throws -> AppleScriptResult {
-        var error: NSDictionary?
+        // Use osascript process instead of NSAppleScript to avoid RunLoop blocking issues
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-l", "AppleScript", "-e", script]
 
-        guard let appleScript = NSAppleScript(source: script) else {
-            throw AppleScriptError.scriptCompilationFailed(details: "Failed to create NSAppleScript instance")
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw AppleScriptError.executionFailed(code: -1, message: "Failed to run osascript: \(error.localizedDescription)")
         }
 
-        let result = appleScript.executeAndReturnError(&error)
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
 
-        if let error = error {
-            throw mapAppleScriptError(error)
+        let output = String(data: stdoutData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let errorOutput = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if process.terminationStatus != 0 {
+            // Parse error output for known error patterns
+            let errorMessage = errorOutput ?? "Unknown error"
+
+            if errorMessage.contains("not authorized") || errorMessage.contains("-1743") {
+                throw AppleScriptError.automationPermissionDenied(guidance: "Grant access in System Settings > Privacy & Security > Automation.")
+            }
+            if errorMessage.contains("-1728") || errorMessage.contains("Can't get") {
+                throw AppleScriptError.messageNotFound(messageId: "unknown")
+            }
+
+            throw AppleScriptError.executionFailed(code: Int(process.terminationStatus), message: errorMessage)
         }
 
-        // Extract string output, handling list results
-        let output = extractStringOutput(from: result)
         return .success(output)
     }
 
@@ -259,86 +282,6 @@ public final class AppleScriptService: AppleScriptServiceProtocol, Sendable {
         throw AppleScriptError.mailLaunchTimeout(seconds: timeout)
     }
 
-    // MARK: - Error Mapping
-
-    /// Map NSAppleScript error dictionary to structured AppleScriptError
-    private func mapAppleScriptError(_ error: NSDictionary) -> AppleScriptError {
-        let errorNumber = error[NSAppleScript.errorNumber] as? Int ?? -1
-        let errorMessage = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
-        let errorBrief = error[NSAppleScript.errorBriefMessage] as? String
-
-        // Automation permission denied
-        // Error -1743: "Not authorized to send Apple events to Mail."
-        // Error -600: "Application isn't running." (sometimes indicates permission issue)
-        if errorNumber == -1743 || errorMessage.lowercased().contains("not authorized") {
-            return .automationPermissionDenied(guidance: """
-                swea needs permission to control Mail.app.
-
-                Grant access in System Settings > Privacy & Security > Automation.
-                """)
-        }
-
-        // Application not running or not responding
-        // Error -600: "Application isn't running."
-        // Error -609: "Connection is invalid."
-        // Error -903: "No user interaction allowed." (can happen with non-GUI context)
-        if errorNumber == -600 || errorNumber == -609 || errorNumber == -903 {
-            return .mailAppNotResponding(underlying: errorBrief ?? errorMessage)
-        }
-
-        // Message or object not found
-        // Error -1728: "Can't get [object]." (object doesn't exist)
-        // Error -1719: "Can't get [item] of [container]."
-        if errorNumber == -1728 || errorNumber == -1719 {
-            if errorMessage.lowercased().contains("message") {
-                // Extract message ID from error if possible
-                return .messageNotFound(messageId: "unknown")
-            }
-            if errorMessage.lowercased().contains("mailbox") {
-                // Extract mailbox name from error if possible
-                let mailboxName = extractQuotedValue(from: errorMessage) ?? "unknown"
-                return .mailboxNotFound(mailbox: mailboxName)
-            }
-        }
-
-        // Compilation errors
-        // Error -2740: Syntax error
-        // Error -2741: Semantic error
-        if errorNumber == -2740 || errorNumber == -2741 {
-            return .scriptCompilationFailed(details: errorMessage)
-        }
-
-        // Default: execution failed with generic error
-        return .executionFailed(code: errorNumber, message: errorMessage)
-    }
-
-    /// Extract a quoted value from an error message (e.g., "Can't get mailbox \"INBOX\"")
-    private func extractQuotedValue(from message: String) -> String? {
-        let pattern = "\"([^\"]+)\""
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: message, options: [], range: NSRange(message.startIndex..., in: message)),
-              let range = Range(match.range(at: 1), in: message) else {
-            return nil
-        }
-        return String(message[range])
-    }
-
-    /// Extract string output from NSAppleEventDescriptor
-    private func extractStringOutput(from descriptor: NSAppleEventDescriptor) -> String? {
-        // Handle list results
-        if descriptor.numberOfItems > 0 {
-            var items: [String] = []
-            for i in 1...descriptor.numberOfItems {
-                if let item = descriptor.atIndex(i)?.stringValue {
-                    items.append(item)
-                }
-            }
-            return items.isEmpty ? nil : items.joined(separator: "\n")
-        }
-
-        // Handle simple values
-        return descriptor.stringValue
-    }
 }
 
 // MARK: - Mail Action Scripts
