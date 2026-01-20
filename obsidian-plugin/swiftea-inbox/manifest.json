@@ -1,0 +1,10 @@
+{
+  "id": "swiftea-inbox",
+  "name": "SwiftEA Inbox",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Keyboard-first email inbox pane for SwiftEA (swea).",
+  "author": "SwiftEA",
+  "isDesktopOnly": true
+}
+

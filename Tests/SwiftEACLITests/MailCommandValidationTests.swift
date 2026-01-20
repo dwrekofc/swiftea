@@ -773,4 +773,100 @@ final class MailCommandValidationTests: XCTestCase {
         XCTAssertEqual(ThreadSortOption.subject.toDbSortOrder(), .subject)
         XCTAssertEqual(ThreadSortOption.messageCount.toDbSortOrder(), .messageCount)
     }
+
+    // MARK: - MailArchiveCommand / MailDeleteCommand Bulk (--ids) Validation Tests
+
+    func testArchiveCommandRequiresIdOrIds() {
+        XCTAssertThrowsError(try MailArchiveCommand.parseAsRoot(["--yes"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(
+                errorString.contains("specify --id or --ids") || errorString.contains("Missing required option"),
+                "Error should indicate --id/--ids is required"
+            )
+        }
+    }
+
+    func testArchiveCommandRejectsIdAndIdsTogether() {
+        XCTAssertThrowsError(try MailArchiveCommand.parseAsRoot(["--id", "mail-1", "--ids", "mail-2,mail-3", "--yes"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(errorString.contains("exactly one of --id or --ids"))
+        }
+    }
+
+    func testArchiveCommandRejectsEmptyIdsList() {
+        XCTAssertThrowsError(try MailArchiveCommand.parseAsRoot(["--ids", " , , ", "--yes"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(errorString.contains("No message IDs provided in --ids"))
+        }
+    }
+
+    func testArchiveCommandParsesSingleId() throws {
+        let command = try MailArchiveCommand.parseAsRoot(["--id", "mail-1", "--yes"]) as! MailArchiveCommand
+        XCTAssertEqual(command.id, "mail-1")
+        XCTAssertNil(command.ids)
+        XCTAssertTrue(command.yes)
+        XCTAssertFalse(command.dryRun)
+    }
+
+    func testArchiveCommandParsesBulkIds() throws {
+        let command = try MailArchiveCommand.parseAsRoot(["--ids", "mail-1,mail-2", "--yes"]) as! MailArchiveCommand
+        XCTAssertNil(command.id)
+        XCTAssertEqual(command.ids, "mail-1,mail-2")
+        XCTAssertTrue(command.yes)
+        XCTAssertFalse(command.dryRun)
+    }
+
+    func testArchiveCommandStillRequiresYesOrDryRun() {
+        XCTAssertThrowsError(try MailArchiveCommand.parseAsRoot(["--id", "mail-1"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(errorString.contains("requires --yes") || errorString.contains("confirmationRequired"))
+        }
+    }
+
+    func testDeleteCommandRequiresIdOrIds() {
+        XCTAssertThrowsError(try MailDeleteCommand.parseAsRoot(["--yes"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(
+                errorString.contains("specify --id or --ids") || errorString.contains("Missing required option"),
+                "Error should indicate --id/--ids is required"
+            )
+        }
+    }
+
+    func testDeleteCommandRejectsIdAndIdsTogether() {
+        XCTAssertThrowsError(try MailDeleteCommand.parseAsRoot(["--id", "mail-1", "--ids", "mail-2,mail-3", "--yes"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(errorString.contains("exactly one of --id or --ids"))
+        }
+    }
+
+    func testDeleteCommandRejectsEmptyIdsList() {
+        XCTAssertThrowsError(try MailDeleteCommand.parseAsRoot(["--ids", " , ", "--yes"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(errorString.contains("No message IDs provided in --ids"))
+        }
+    }
+
+    func testDeleteCommandParsesSingleId() throws {
+        let command = try MailDeleteCommand.parseAsRoot(["--id", "mail-1", "--yes"]) as! MailDeleteCommand
+        XCTAssertEqual(command.id, "mail-1")
+        XCTAssertNil(command.ids)
+        XCTAssertTrue(command.yes)
+        XCTAssertFalse(command.dryRun)
+    }
+
+    func testDeleteCommandParsesBulkIds() throws {
+        let command = try MailDeleteCommand.parseAsRoot(["--ids", "mail-1,mail-2", "--yes"]) as! MailDeleteCommand
+        XCTAssertNil(command.id)
+        XCTAssertEqual(command.ids, "mail-1,mail-2")
+        XCTAssertTrue(command.yes)
+        XCTAssertFalse(command.dryRun)
+    }
+
+    func testDeleteCommandStillRequiresYesOrDryRun() {
+        XCTAssertThrowsError(try MailDeleteCommand.parseAsRoot(["--id", "mail-1"])) { error in
+            let errorString = String(describing: error)
+            XCTAssertTrue(errorString.contains("requires --yes") || errorString.contains("confirmationRequired"))
+        }
+    }
 }

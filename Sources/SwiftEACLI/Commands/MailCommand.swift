@@ -3145,6 +3145,12 @@ enum MailActionError: Error, LocalizedError {
     }
 }
 
+private func parseCommaSeparatedIds(_ raw: String) -> [String] {
+    raw.split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+}
+
 struct MailArchiveCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "archive",
@@ -3158,8 +3164,11 @@ struct MailArchiveCommand: ParsableCommand {
             """
     )
 
-    @Option(name: .long, help: "Message ID to archive (required)")
-    var id: String
+    @Option(name: .long, help: "Message ID to archive (use --ids for multiple)")
+    var id: String?
+
+    @Option(name: .long, help: "Message IDs to archive (comma-separated)")
+    var ids: String?
 
     @Flag(name: .long, help: "Confirm the destructive action")
     var yes: Bool = false
@@ -3168,6 +3177,16 @@ struct MailArchiveCommand: ParsableCommand {
     var dryRun: Bool = false
 
     func validate() throws {
+        if id != nil && ids != nil {
+            throw ValidationError("Specify exactly one of --id or --ids.")
+        }
+        if id == nil && ids == nil {
+            throw ValidationError("Missing required option: specify --id or --ids.")
+        }
+        if let ids, parseCommaSeparatedIds(ids).isEmpty {
+            throw ValidationError("No message IDs provided in --ids.")
+        }
+
         // Validate that either --yes or --dry-run is provided
         if !yes && !dryRun {
             throw MailActionError.confirmationRequired(action: "archive")
@@ -3183,26 +3202,49 @@ struct MailArchiveCommand: ParsableCommand {
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        // Resolve message to Mail.app reference
-        let resolver = MessageResolver(database: mailDatabase)
-        let resolved = try resolver.resolve(id: id)
+        let idsToProcess: [String] = {
+            if let id { return [id] }
+            return parseCommaSeparatedIds(ids ?? "")
+        }()
 
-        if dryRun {
-            print("[DRY RUN] Would archive message:")
-            print("  ID: \(resolved.swiftEAId)")
-            print("  Message-ID: \(resolved.messageId)")
-            print("  Subject: \(resolved.message.subject)")
-            print("  From: \(resolved.message.senderEmail ?? "Unknown")")
-            print("  Current mailbox: \(resolved.message.mailboxName ?? "Unknown")")
-            return
+        let resolver = MessageResolver(database: mailDatabase)
+        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
+
+        var archived = 0
+        var failed = 0
+
+        for rawId in idsToProcess {
+            do {
+                let resolved = try resolver.resolve(id: rawId)
+
+                if dryRun {
+                    print("[DRY RUN] Would archive message:")
+                    print("  ID: \(resolved.swiftEAId)")
+                    print("  Message-ID: \(resolved.messageId)")
+                    print("  Subject: \(resolved.message.subject)")
+                    print("  From: \(resolved.message.senderEmail ?? "Unknown")")
+                    print("  Current mailbox: \(resolved.message.mailboxName ?? "Unknown")")
+                    continue
+                }
+
+                try backwardSync.archiveMessage(id: resolved.swiftEAId)
+                archived += 1
+
+                print("Archived message: \(resolved.swiftEAId)")
+                print("  Subject: \(resolved.message.subject)")
+            } catch {
+                failed += 1
+                fputs("Error: failed to archive '\(rawId)': \(error.localizedDescription)\n", stderr)
+            }
         }
 
-        // Use MailSyncBackward for optimistic update pattern
-        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
-        try backwardSync.archiveMessage(id: resolved.swiftEAId)
+        if idsToProcess.count > 1 {
+            print("Done. Archived: \(archived), Failed: \(failed)")
+        }
 
-        print("Archived message: \(resolved.swiftEAId)")
-        print("  Subject: \(resolved.message.subject)")
+        if failed > 0 {
+            throw ExitCode.failure
+        }
     }
 }
 
@@ -3219,8 +3261,11 @@ struct MailDeleteCommand: ParsableCommand {
             """
     )
 
-    @Option(name: .long, help: "Message ID to delete (required)")
-    var id: String
+    @Option(name: .long, help: "Message ID to delete (use --ids for multiple)")
+    var id: String?
+
+    @Option(name: .long, help: "Message IDs to delete (comma-separated)")
+    var ids: String?
 
     @Flag(name: .long, help: "Confirm the destructive action")
     var yes: Bool = false
@@ -3229,6 +3274,16 @@ struct MailDeleteCommand: ParsableCommand {
     var dryRun: Bool = false
 
     func validate() throws {
+        if id != nil && ids != nil {
+            throw ValidationError("Specify exactly one of --id or --ids.")
+        }
+        if id == nil && ids == nil {
+            throw ValidationError("Missing required option: specify --id or --ids.")
+        }
+        if let ids, parseCommaSeparatedIds(ids).isEmpty {
+            throw ValidationError("No message IDs provided in --ids.")
+        }
+
         // Validate that either --yes or --dry-run is provided
         if !yes && !dryRun {
             throw MailActionError.confirmationRequired(action: "delete")
@@ -3244,26 +3299,49 @@ struct MailDeleteCommand: ParsableCommand {
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
-        // Resolve message to Mail.app reference
-        let resolver = MessageResolver(database: mailDatabase)
-        let resolved = try resolver.resolve(id: id)
+        let idsToProcess: [String] = {
+            if let id { return [id] }
+            return parseCommaSeparatedIds(ids ?? "")
+        }()
 
-        if dryRun {
-            print("[DRY RUN] Would delete message:")
-            print("  ID: \(resolved.swiftEAId)")
-            print("  Message-ID: \(resolved.messageId)")
-            print("  Subject: \(resolved.message.subject)")
-            print("  From: \(resolved.message.senderEmail ?? "Unknown")")
-            print("  Current mailbox: \(resolved.message.mailboxName ?? "Unknown")")
-            return
+        let resolver = MessageResolver(database: mailDatabase)
+        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
+
+        var deleted = 0
+        var failed = 0
+
+        for rawId in idsToProcess {
+            do {
+                let resolved = try resolver.resolve(id: rawId)
+
+                if dryRun {
+                    print("[DRY RUN] Would delete message:")
+                    print("  ID: \(resolved.swiftEAId)")
+                    print("  Message-ID: \(resolved.messageId)")
+                    print("  Subject: \(resolved.message.subject)")
+                    print("  From: \(resolved.message.senderEmail ?? "Unknown")")
+                    print("  Current mailbox: \(resolved.message.mailboxName ?? "Unknown")")
+                    continue
+                }
+
+                try backwardSync.deleteMessage(id: resolved.swiftEAId)
+                deleted += 1
+
+                print("Deleted message: \(resolved.swiftEAId)")
+                print("  Subject: \(resolved.message.subject)")
+            } catch {
+                failed += 1
+                fputs("Error: failed to delete '\(rawId)': \(error.localizedDescription)\n", stderr)
+            }
         }
 
-        // Use MailSyncBackward for optimistic update pattern
-        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
-        try backwardSync.deleteMessage(id: resolved.swiftEAId)
+        if idsToProcess.count > 1 {
+            print("Done. Deleted: \(deleted), Failed: \(failed)")
+        }
 
-        print("Deleted message: \(resolved.swiftEAId)")
-        print("  Subject: \(resolved.message.subject)")
+        if failed > 0 {
+            throw ExitCode.failure
+        }
     }
 }
 
