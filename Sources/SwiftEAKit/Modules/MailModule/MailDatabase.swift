@@ -2338,6 +2338,63 @@ public final class MailDatabase: @unchecked Sendable {
         return messages
     }
 
+    /// Get lightweight message summaries for inbox-style UIs.
+    ///
+    /// This avoids decoding full message bodies and other heavy fields when the caller only needs
+    /// sender/subject/date + a short preview.
+    public func getMessageSummaries(
+        mailboxStatus: MailboxStatus = .inbox,
+        limit: Int = 100,
+        offset: Int = 0,
+        previewLength: Int = 160
+    ) throws -> [MailMessageSummary] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let previewLen = max(1, previewLength)
+
+        let result = try conn.query("""
+            SELECT
+                id,
+                sender_name,
+                sender_email,
+                subject,
+                SUBSTR(COALESCE(body_text, ''), 1, \(previewLen)) AS preview,
+                date_sent,
+                date_received,
+                mailbox_name,
+                is_read,
+                is_flagged,
+                has_attachments
+            FROM messages
+            WHERE mailbox_status = '\(mailboxStatus.rawValue)' AND is_deleted = 0
+            ORDER BY date_received DESC
+            LIMIT \(limit) OFFSET \(offset)
+            """)
+
+        var summaries: [MailMessageSummary] = []
+        for row in result {
+            summaries.append(
+                MailMessageSummary(
+                    id: getStringValue(row, 0) ?? "",
+                    senderName: getStringValue(row, 1),
+                    senderEmail: getStringValue(row, 2),
+                    subject: getStringValue(row, 3) ?? "",
+                    preview: getStringValue(row, 4) ?? "",
+                    dateSent: getIntValue(row, 5).map { Date(timeIntervalSince1970: Double($0)) },
+                    dateReceived: getIntValue(row, 6).map { Date(timeIntervalSince1970: Double($0)) },
+                    mailboxName: getStringValue(row, 7),
+                    isRead: (getIntValue(row, 8) ?? 0) == 1,
+                    isFlagged: (getIntValue(row, 9) ?? 0) == 1,
+                    hasAttachments: (getIntValue(row, 10) ?? 0) == 1
+                )
+            )
+        }
+
+        return summaries
+    }
+
     /// Get message counts grouped by mailbox status
     /// - Returns: Dictionary with status as key and count as value
     public func getMessageCountByStatus() throws -> [MailboxStatus: Int] {
@@ -3164,6 +3221,47 @@ public struct MailMessage: Sendable {
         self.threadId = threadId
         self.threadPosition = threadPosition
         self.threadTotal = threadTotal
+    }
+}
+
+/// Lightweight summary of a message for list UIs
+public struct MailMessageSummary: Sendable {
+    public let id: String
+    public let senderName: String?
+    public let senderEmail: String?
+    public let subject: String
+    public let preview: String
+    public let dateSent: Date?
+    public let dateReceived: Date?
+    public let mailboxName: String?
+    public let isRead: Bool
+    public let isFlagged: Bool
+    public let hasAttachments: Bool
+
+    public init(
+        id: String,
+        senderName: String? = nil,
+        senderEmail: String? = nil,
+        subject: String,
+        preview: String,
+        dateSent: Date? = nil,
+        dateReceived: Date? = nil,
+        mailboxName: String? = nil,
+        isRead: Bool = false,
+        isFlagged: Bool = false,
+        hasAttachments: Bool = false
+    ) {
+        self.id = id
+        self.senderName = senderName
+        self.senderEmail = senderEmail
+        self.subject = subject
+        self.preview = preview
+        self.dateSent = dateSent
+        self.dateReceived = dateReceived
+        self.mailboxName = mailboxName
+        self.isRead = isRead
+        self.isFlagged = isFlagged
+        self.hasAttachments = hasAttachments
     }
 }
 

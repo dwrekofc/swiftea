@@ -147,6 +147,7 @@ struct MailSyncCommand: ParsableCommand {
               swea mail sync --full       # Full resync + export all
               swea mail sync --no-export  # Sync only, skip markdown export
               swea mail sync --watch      # Start automatic sync daemon
+              swea mail sync --ensure-watch --interval 60  # Ensure daemon is installed and running
               swea mail sync --status     # Check sync/daemon status
               swea mail sync --stop       # Stop the daemon
             """
@@ -160,6 +161,9 @@ struct MailSyncCommand: ParsableCommand {
 
     @Flag(name: .long, help: "Show sync status and watch daemon state")
     var status: Bool = false
+
+    @Flag(name: .long, help: "Ensure the watch daemon is installed and running (no-op if already running)")
+    var ensureWatch: Bool = false
 
     @Flag(name: .long, help: "Force a full sync, ignoring previous sync state")
     var full: Bool = false
@@ -182,7 +186,7 @@ struct MailSyncCommand: ParsableCommand {
         """)
     var bulkCopy: Bool = false
 
-    @Option(name: .long, help: "Sync interval in seconds for watch mode (default: 300, minimum: 30)")
+    @Option(name: .long, help: "Sync interval in seconds for watch mode (default: 60, minimum: 30)")
     var interval: Int?
 
     @Option(name: .long, help: "Explicit vault path (for daemon mode when CWD is unreliable)")
@@ -249,8 +253,8 @@ struct MailSyncCommand: ParsableCommand {
     private static let defaultIntervalSeconds = 60
 
     func validate() throws {
-        // --watch and --stop are mutually exclusive
-        if watch && stop {
+        let modeFlags = [watch, ensureWatch, stop, status, daemon].filter { $0 }
+        if modeFlags.count > 1 {
             throw MailValidationError.watchAndStopMutuallyExclusive
         }
 
@@ -339,6 +343,31 @@ struct MailSyncCommand: ParsableCommand {
             vault = try VaultContext.require()
         }
 
+        // Handle --watch flag
+        if watch {
+            try installWatchDaemon(vault: vault, verbose: verbose)
+            return
+        }
+
+        // Handle --ensure-watch flag
+        if ensureWatch {
+            let daemonStatus = getDaemonStatus()
+            if daemonStatus.isRunning {
+                if verbose {
+                    print("Watch daemon already running (pid=\(daemonStatus.pid ?? -1))")
+                }
+                return
+            }
+            try installWatchDaemon(vault: vault, verbose: verbose)
+            return
+        }
+
+        // Handle --stop flag
+        if stop {
+            try stopWatchDaemon(verbose: verbose)
+            return
+        }
+
         // Create mail database in vault's data folder
         let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
@@ -352,18 +381,6 @@ struct MailSyncCommand: ParsableCommand {
         // Handle --status flag
         if status {
             try showSyncStatus(mailDatabase: mailDatabase, vault: vault)
-            return
-        }
-
-        // Handle --watch flag
-        if watch {
-            try installWatchDaemon(vault: vault, verbose: verbose)
-            return
-        }
-
-        // Handle --stop flag
-        if stop {
-            try stopWatchDaemon(verbose: verbose)
             return
         }
 

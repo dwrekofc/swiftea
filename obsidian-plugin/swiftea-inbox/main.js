@@ -192,6 +192,18 @@ class SwiftEAEmailSource {
     const cli = this.resolveCliPath();
     await execFileAsync(cli, ["mail", "delete", "--ids", list.join(","), "--yes"], { cwd });
   }
+
+  async syncMail() {
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    await execFileAsync(cli, ["mail", "sync"], { cwd });
+  }
+
+  async ensureWatchDaemon(intervalSeconds = 60) {
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    await execFileAsync(cli, ["mail", "sync", "--ensure-watch", "--interval", String(intervalSeconds)], { cwd });
+  }
 }
 
 class SwiftEAInboxView extends ItemView {
@@ -209,6 +221,11 @@ class SwiftEAInboxView extends ItemView {
     this.overlayLoadSeq = 0;
     this.actionInProgress = false;
     this.overlayEmailId = null;
+    this.manualSyncInProgress = false;
+    this.externalRefreshTimer = null;
+    this.fsWatcher = null;
+    this.pollInterval = null;
+    this.pendingExternalRefresh = false;
 
     this._onScroll = this.onScroll.bind(this);
     this._onKeyDownList = this.onKeyDownList.bind(this);
@@ -232,8 +249,20 @@ class SwiftEAInboxView extends ItemView {
     this.contentEl.empty();
 
     this.headerEl = this.contentEl.createDiv({ cls: "swiftea-inbox__header" });
-    this.titleEl = this.headerEl.createDiv({ cls: "swiftea-inbox__title" });
-    this.countEl = this.headerEl.createDiv({ cls: "swiftea-inbox__count" });
+    this.headerRowEl = this.headerEl.createDiv({ cls: "swiftea-inbox__header-row" });
+    this.headerTextEl = this.headerRowEl.createDiv({ cls: "swiftea-inbox__header-text" });
+    this.titleEl = this.headerTextEl.createDiv({ cls: "swiftea-inbox__title" });
+    this.countEl = this.headerTextEl.createDiv({ cls: "swiftea-inbox__count" });
+    this.actionsEl = this.headerRowEl.createDiv({ cls: "swiftea-inbox__actions" });
+    this.syncButtonEl = this.actionsEl.createEl("button", {
+      cls: "swiftea-inbox__sync-button",
+      text: "Sync"
+    });
+    this.syncButtonEl.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      void this.runManualSync();
+    });
 
     this.columnsEl = this.headerEl.createDiv({ cls: "swiftea-inbox__columns" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--select", text: "" });
@@ -261,10 +290,12 @@ class SwiftEAInboxView extends ItemView {
     this.scrollEl.focus();
 
     await this.reload();
+    this.startRealtimeRefresh();
   }
 
   async onClose() {
     this.closeOverlay();
+    this.stopRealtimeRefresh();
     if (this.scrollEl) {
       this.scrollEl.removeEventListener("scroll", this._onScroll);
       this.scrollEl.removeEventListener("keydown", this._onKeyDownList);
@@ -288,6 +319,127 @@ class SwiftEAInboxView extends ItemView {
     this.updateSpacerHeight();
     this.renderVisible();
     await this.loadMore();
+  }
+
+  setSyncButtonState(isSyncing) {
+    if (!this.syncButtonEl) return;
+    if (isSyncing) {
+      this.syncButtonEl.setAttr("disabled", "true");
+      this.syncButtonEl.setText("Syncing…");
+      return;
+    }
+    this.syncButtonEl.removeAttr("disabled");
+    this.syncButtonEl.setText("Sync");
+  }
+
+  async runManualSync() {
+    if (this.manualSyncInProgress) return;
+    this.manualSyncInProgress = true;
+    this.setSyncButtonState(true);
+    let ok = false;
+    try {
+      await this.plugin.syncMailNow();
+      ok = true;
+    } catch (e) {
+      new Notice("SwiftEA sync failed. See console for details.");
+      // eslint-disable-next-line no-console
+      console.error("[SwiftEA Inbox] sync failed:", e);
+    } finally {
+      this.manualSyncInProgress = false;
+      this.setSyncButtonState(false);
+    }
+
+    if (ok) {
+      await this.refreshFromExternalChange("manual-sync");
+      new Notice("SwiftEA sync complete.");
+    }
+  }
+
+  startRealtimeRefresh() {
+    this.stopRealtimeRefresh();
+
+    const vaultPath = this.source.getVaultPath();
+    const swifteaDir = path.join(vaultPath, "Swiftea");
+
+    try {
+      this.fsWatcher = fs.watch(swifteaDir, { persistent: false }, (_event, filename) => {
+        if (filename && !String(filename).startsWith("mail.db")) return;
+        this.scheduleExternalRefresh("fs-watch");
+      });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[SwiftEA Inbox] could not watch Swiftea/ for updates:", e);
+    }
+
+    // Fallback polling in case filesystem notifications are dropped.
+    this.pollInterval = window.setInterval(() => {
+      this.scheduleExternalRefresh("poll");
+    }, 30_000);
+  }
+
+  stopRealtimeRefresh() {
+    if (this.externalRefreshTimer) {
+      window.clearTimeout(this.externalRefreshTimer);
+      this.externalRefreshTimer = null;
+    }
+    if (this.pollInterval) {
+      window.clearInterval(this.pollInterval);
+      this.pollInterval = null;
+    }
+    if (this.fsWatcher) {
+      try {
+        this.fsWatcher.close();
+      } catch {
+        // ignore
+      }
+      this.fsWatcher = null;
+    }
+  }
+
+  scheduleExternalRefresh(_reason) {
+    if (this.externalRefreshTimer) window.clearTimeout(this.externalRefreshTimer);
+    this.externalRefreshTimer = window.setTimeout(() => {
+      this.externalRefreshTimer = null;
+      void this.refreshFromExternalChange(_reason);
+    }, 500);
+  }
+
+  async refreshFromExternalChange(_reason) {
+    if (this.actionInProgress || this.isLoading || this.manualSyncInProgress) return;
+
+    // If the overlay is open, avoid resetting list state while the user is reading.
+    if (this.overlayEl) {
+      this.pendingExternalRefresh = true;
+      return;
+    }
+
+    const scrollTop = this.scrollEl?.scrollTop ?? 0;
+    const selectedEmailId = this.emails[this.selectedIndex]?.id || null;
+    const loadedCount = Math.max(this.emails.length, this.plugin.settings.pageSize || DEFAULT_SETTINGS.pageSize);
+
+    try {
+      const next = await this.source.listInbox({ offset: 0, limit: loadedCount });
+      this.emails = next;
+
+      if (selectedEmailId) {
+        const nextIndex = this.emails.findIndex((m) => m.id === selectedEmailId);
+        if (nextIndex >= 0) this.selectedIndex = nextIndex;
+      }
+
+      // Keep any still-present selections.
+      const nextIdSet = new Set(this.emails.map((m) => m.id));
+      this.selectedIds = new Set(Array.from(this.selectedIds).filter((id) => nextIdSet.has(id)));
+
+      this.hasMore = next.length >= loadedCount;
+      this.ensureSelection();
+      this.updateHeader();
+      this.updateSpacerHeight();
+      this.renderVisible();
+      if (this.scrollEl) this.scrollEl.scrollTop = scrollTop;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[SwiftEA Inbox] background refresh failed:", e);
+    }
   }
 
   removeEmailAtIndex(index) {
@@ -772,6 +924,12 @@ class SwiftEAInboxView extends ItemView {
       return;
     }
 
+    if (!ctrl && (key === "s" || key === "S")) {
+      evt.preventDefault();
+      void this.runManualSync();
+      return;
+    }
+
     if (!ctrl && key === "d") {
       evt.preventDefault();
       void this.deleteSelected();
@@ -896,6 +1054,12 @@ class SwiftEAInboxView extends ItemView {
       return;
     }
 
+    if (evt.key === "s" || evt.key === "S") {
+      evt.preventDefault();
+      void this.runManualSync();
+      return;
+    }
+
     if (evt.key === "d") {
       evt.preventDefault();
       void this.deleteSelected();
@@ -915,6 +1079,11 @@ class SwiftEAInboxView extends ItemView {
     this.overlayBodyWrap = null;
     this.overlayEmailId = null;
     if (this.scrollEl) this.scrollEl.focus();
+
+    if (this.pendingExternalRefresh) {
+      this.pendingExternalRefresh = false;
+      this.scheduleExternalRefresh("overlay-closed");
+    }
   }
 }
 
@@ -930,11 +1099,68 @@ module.exports = class SwiftEAInboxPlugin extends Plugin {
       callback: () => this.activateView()
     });
 
+    this.addCommand({
+      id: "swiftea-sync-mail",
+      name: "SwiftEA: Sync mail now",
+      hotkeys: [{ modifiers: [], key: "s" }],
+      callback: () => void this.syncMailNow()
+    });
+
     this.addSettingTab(new SwiftEAInboxSettingTab(this.app, this));
+
+    // Ensure the background sync daemon is running so the inbox updates continuously.
+    void this.ensureWatchDaemonStarted();
   }
 
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  async syncMailNow() {
+    if (this._syncPromise) return this._syncPromise;
+    const source = new SwiftEAEmailSource(this.app, this.settings);
+    this._syncPromise = (async () => {
+      await source.syncMail();
+      this.refreshOpenViews();
+    })();
+
+    try {
+      await this._syncPromise;
+    } finally {
+      this._syncPromise = null;
+    }
+  }
+
+  async ensureWatchDaemonStarted() {
+    const now = Date.now();
+    if (this._lastEnsureWatchAttempt && now - this._lastEnsureWatchAttempt < 60_000) return;
+    this._lastEnsureWatchAttempt = now;
+
+    if (this._ensureWatchPromise) return this._ensureWatchPromise;
+    const source = new SwiftEAEmailSource(this.app, this.settings);
+    this._ensureWatchPromise = (async () => {
+      await source.ensureWatchDaemon(60);
+    })();
+
+    try {
+      await this._ensureWatchPromise;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[SwiftEA Inbox] could not ensure watch daemon is running:", e);
+      new Notice("SwiftEA: couldn't start background sync. Run `swea mail sync --watch` once from the vault root.");
+    } finally {
+      this._ensureWatchPromise = null;
+    }
+  }
+
+  refreshOpenViews() {
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view && typeof view.refreshFromExternalChange === "function") {
+        void view.refreshFromExternalChange("plugin-refresh");
+      }
+    }
   }
 
   async activateView() {

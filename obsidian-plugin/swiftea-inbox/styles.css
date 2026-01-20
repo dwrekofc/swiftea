@@ -15,6 +15,37 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.swiftea-inbox__header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.swiftea-inbox__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.swiftea-inbox__sync-button {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+}
+
+.swiftea-inbox__sync-button:hover {
+  background: var(--interactive-hover);
+}
+
+.swiftea-inbox__sync-button[disabled] {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 .swiftea-inbox__title {
   font-size: 14px;
   font-weight: 600;
