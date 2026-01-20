@@ -831,7 +831,7 @@ public final class MailSync: @unchecked Sendable {
         // Query message columns with JOINs to resolve subject/sender foreign keys
         // The messages.subject and messages.sender columns are FK integers, not text
         // Attachment detection is done during .emlx parsing instead
-        // Filter to INBOX only: we join with mailboxes and only select messages from INBOX folders
+        // Filter to main INBOX only: excludes subfolders like Inbox/Kudos
         var sql = """
             SELECT m.ROWID, s.subject, a.address AS sender_email, a.comment AS sender_name,
                    m.date_received, m.date_sent, m.message_id, m.mailbox, m.read, m.flagged
@@ -839,7 +839,7 @@ public final class MailSync: @unchecked Sendable {
             LEFT JOIN subjects s ON m.subject = s.ROWID
             LEFT JOIN addresses a ON m.sender = a.ROWID
             INNER JOIN mailboxes mb ON m.mailbox = mb.ROWID
-            WHERE LOWER(mb.url) LIKE '%/inbox' OR LOWER(mb.url) LIKE '%/inbox/%'
+            WHERE LOWER(mb.url) LIKE '%/inbox'
             """
 
         if let sinceDate = since {

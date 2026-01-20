@@ -83,7 +83,7 @@ public enum EnvelopeIndexMessages {
         LEFT JOIN subjects s ON m.subject = s.ROWID
         LEFT JOIN addresses a ON m.sender = a.ROWID
         INNER JOIN mailboxes mb ON m.mailbox = mb.ROWID
-        WHERE LOWER(mb.url) LIKE '%/inbox' OR LOWER(mb.url) LIKE '%/inbox/%'
+        WHERE LOWER(mb.url) LIKE '%/inbox'
         """
 
     /// Query to check if messages exist by ROWID (for deletion detection)
