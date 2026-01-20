@@ -202,7 +202,16 @@ class SwiftEAEmailSource {
   async ensureWatchDaemon(intervalSeconds = 60) {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "sync", "--ensure-watch", "--interval", String(intervalSeconds)], { cwd });
+    try {
+      await execFileAsync(cli, ["mail", "sync", "--ensure-watch", "--interval", String(intervalSeconds)], { cwd });
+    } catch (e) {
+      const message = String(e?.message || "");
+      if (message.includes("--ensure-watch")) {
+        await execFileAsync(cli, ["mail", "sync", "--watch", "--interval", String(intervalSeconds)], { cwd });
+        return;
+      }
+      throw e;
+    }
   }
 }
 
