@@ -654,26 +654,29 @@ public final class EmlxParser: Sendable {
 
     private func decodeQuotedPrintableBody(_ text: String, charset: String = "utf-8") -> String {
         var bytes: [UInt8] = []
-        let lines = text.components(separatedBy: "\n")
 
-        for i in 0..<lines.count {
-            var line = lines[i]
+        // First, join soft line breaks (lines ending with =)
+        // A soft line break is "=\r\n" or "=\n" and should be removed entirely
+        var joinedText = text
+        // Handle both CRLF and LF line endings
+        joinedText = joinedText.replacingOccurrences(of: "=\r\n", with: "")
+        joinedText = joinedText.replacingOccurrences(of: "=\n", with: "")
 
-            // Handle soft line breaks
-            while line.hasSuffix("=") && i < lines.count - 1 {
-                line = String(line.dropLast())
-                // This is simplified - proper implementation would need index tracking
-                break
-            }
+        // Now process the joined text line by line
+        let lines = joinedText.components(separatedBy: .newlines)
+
+        for (lineIndex, line) in lines.enumerated() {
+            // Strip trailing carriage return if present
+            let cleanLine = line.hasSuffix("\r") ? String(line.dropLast()) : line
 
             // Decode =XX sequences into bytes
-            var index = line.startIndex
-            while index < line.endIndex {
-                if line[index] == "=" {
-                    let nextIndex = line.index(after: index)
-                    if nextIndex < line.endIndex {
-                        if let endIndex = line.index(nextIndex, offsetBy: 2, limitedBy: line.endIndex) {
-                            let hex = String(line[nextIndex..<endIndex])
+            var index = cleanLine.startIndex
+            while index < cleanLine.endIndex {
+                if cleanLine[index] == "=" {
+                    let nextIndex = cleanLine.index(after: index)
+                    if nextIndex < cleanLine.endIndex {
+                        if let endIndex = cleanLine.index(nextIndex, offsetBy: 2, limitedBy: cleanLine.endIndex) {
+                            let hex = String(cleanLine[nextIndex..<endIndex])
                             if let byte = UInt8(hex, radix: 16) {
                                 bytes.append(byte)
                                 index = endIndex
@@ -682,12 +685,18 @@ public final class EmlxParser: Sendable {
                         }
                     }
                 }
-                if let byte = String(line[index]).data(using: .utf8)?.first {
-                    bytes.append(byte)
+                // Append the character as UTF-8 bytes
+                let char = cleanLine[index]
+                if let charData = String(char).data(using: .utf8) {
+                    bytes.append(contentsOf: charData)
                 }
-                index = line.index(after: index)
+                index = cleanLine.index(after: index)
             }
-            bytes.append(contentsOf: "\n".data(using: .utf8)!)
+
+            // Add newline between lines (but not after the last line)
+            if lineIndex < lines.count - 1 {
+                bytes.append(0x0A) // \n
+            }
         }
 
         let data = Data(bytes)

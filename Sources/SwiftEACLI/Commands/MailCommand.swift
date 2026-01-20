@@ -103,6 +103,7 @@ public struct Mail: ParsableCommand {
             """,
         subcommands: [
             MailSyncCommand.self,
+            MailInboxCommand.self,
             MailSearchCommand.self,
             MailShowCommand.self,
             MailThreadCommand.self,
@@ -1286,6 +1287,122 @@ private func performDaemonBackwardSync(mailDatabase: MailDatabase) {
     }
 }
 
+struct MailInboxCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "inbox",
+        abstract: "List recent messages for inbox-style UIs",
+        discussion: """
+            Lists recent messages from the local mail mirror in a lightweight format suitable
+            for UI clients (e.g., an Obsidian plugin inbox list).
+
+            Examples:
+              swea mail inbox --limit 100 --offset 0 --json
+              swea mail inbox --status archived --limit 100 --offset 200 --json
+            """
+    )
+
+    @Option(name: .long, help: "Maximum results to return")
+    var limit: Int = 100
+
+    @Option(name: .long, help: "Number of results to skip (pagination)")
+    var offset: Int = 0
+
+    @Option(name: .long, help: "Mailbox status filter: inbox, archived, deleted (default: inbox)")
+    var status: String = "inbox"
+
+    @Option(name: .long, help: "Preview snippet length (characters)")
+    var previewLength: Int = 160
+
+    @Flag(name: .long, help: "Output as JSON")
+    var json: Bool = false
+
+    func validate() throws {
+        if limit <= 0 {
+            throw MailValidationError.invalidLimit
+        }
+        if offset < 0 {
+            throw MailValidationError.invalidOffset
+        }
+        if previewLength <= 0 {
+            throw MailValidationError.invalidPreviewLength
+        }
+
+        let validStatuses = ["inbox", "archived", "deleted"]
+        if !validStatuses.contains(status.lowercased()) {
+            throw MailValidationError.invalidStatus(value: status)
+        }
+    }
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        let mailboxStatus = MailboxStatus(rawValue: status.lowercased()) ?? .inbox
+        let results = try mailDatabase.getMessageSummaries(
+            mailboxStatus: mailboxStatus,
+            limit: limit,
+            offset: offset,
+            previewLength: previewLength
+        )
+
+        if json {
+            var output: [[String: Any]] = []
+            for msg in results {
+                let sender: String
+                if let name = msg.senderName, let email = msg.senderEmail {
+                    sender = "\(name) <\(email)>"
+                } else if let email = msg.senderEmail {
+                    sender = email
+                } else if let name = msg.senderName {
+                    sender = name
+                } else {
+                    sender = "Unknown"
+                }
+
+                let date = (msg.dateReceived ?? msg.dateSent)?.iso8601String ?? ""
+                let msgDict: [String: Any] = [
+                    "id": msg.id,
+                    "sender": sender,
+                    "senderName": msg.senderName ?? "",
+                    "senderEmail": msg.senderEmail ?? "",
+                    "subject": msg.subject,
+                    "preview": msg.preview,
+                    "date": date,
+                    "dateReceived": msg.dateReceived?.iso8601String ?? "",
+                    "dateSent": msg.dateSent?.iso8601String ?? "",
+                    "mailbox": msg.mailboxName ?? "",
+                    "mailboxStatus": mailboxStatus.rawValue,
+                    "isRead": msg.isRead,
+                    "isFlagged": msg.isFlagged,
+                    "hasAttachments": msg.hasAttachments
+                ]
+                output.append(msgDict)
+            }
+
+            if let data = try? JSONSerialization.data(withJSONObject: output, options: .prettyPrinted),
+               let jsonString = String(data: data, encoding: .utf8) {
+                print(jsonString)
+            }
+            return
+        }
+
+        if results.isEmpty {
+            printError("No messages found.")
+            return
+        }
+
+        for msg in results {
+            let date = (msg.dateReceived ?? msg.dateSent).map { DateFormatter.localizedString(from: $0, dateStyle: .short, timeStyle: .short) } ?? "Unknown"
+            let sender = msg.senderName ?? msg.senderEmail ?? "Unknown"
+            print("\(date)  \(sender): \(msg.subject)")
+        }
+    }
+}
+
 struct MailSearchCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "search",
@@ -1526,6 +1643,18 @@ struct MailShowCommand: ParsableCommand {
 
         // Handle --json flag
         if json {
+            // Determine body content with same fallback logic as non-JSON output
+            let bodyContent: String
+            if html {
+                bodyContent = message.bodyHtml ?? ""
+            } else if let textBody = message.bodyText, !textBody.isEmpty {
+                bodyContent = textBody
+            } else if let htmlBody = message.bodyHtml {
+                bodyContent = stripHtml(htmlBody)
+            } else {
+                bodyContent = ""
+            }
+
             let output: [String: Any] = [
                 "id": message.id,
                 "messageId": message.messageId ?? "",
@@ -1536,7 +1665,7 @@ struct MailShowCommand: ParsableCommand {
                 "isRead": message.isRead,
                 "isFlagged": message.isFlagged,
                 "hasAttachments": message.hasAttachments,
-                "body": html ? (message.bodyHtml ?? "") : (message.bodyText ?? "")
+                "body": bodyContent
             ]
             if let data = try? JSONSerialization.data(withJSONObject: output, options: .prettyPrinted),
                let jsonString = String(data: data, encoding: .utf8) {
@@ -2927,6 +3056,8 @@ struct MailExportThreadsCommand: ParsableCommand {
 /// Error thrown when CLI input validation fails
 public enum MailValidationError: Error, LocalizedError, Equatable {
     case invalidLimit
+    case invalidOffset
+    case invalidPreviewLength
     case emptyRecipient
     case invalidEmailFormat(email: String)
     case watchAndStopMutuallyExclusive
@@ -2938,6 +3069,10 @@ public enum MailValidationError: Error, LocalizedError, Equatable {
         switch self {
         case .invalidLimit:
             return "--limit must be a positive integer"
+        case .invalidOffset:
+            return "--offset must be 0 or greater"
+        case .invalidPreviewLength:
+            return "--preview-length must be a positive integer"
         case .emptyRecipient:
             return "--to requires a non-empty email address"
         case .invalidEmailFormat(let email):
@@ -3416,7 +3551,7 @@ struct MailReplyCommand: ParsableCommand {
                 let preview = replyBody.prefix(100)
                 print("  Body: \(preview)\(replyBody.count > 100 ? "..." : "")")
             }
-            print("  Mode: \(send ? "Send immediately" : "Open draft in Mail.app")")
+            print("  Mode: \(send ? "Send immediately" : "Save as draft")")
             return
         }
 
@@ -3435,7 +3570,7 @@ struct MailReplyCommand: ParsableCommand {
             if send {
                 print("Sent \(replyType) to: \(resolved.message.senderEmail ?? "Unknown")")
             } else {
-                print("Created \(replyType) draft in Mail.app")
+                print("Saved \(replyType) draft")
             }
             print("  Original subject: \(resolved.message.subject)")
         }
@@ -3449,7 +3584,7 @@ struct MailComposeCommand: ParsableCommand {
         discussion: """
             Creates a new email draft in Mail.app.
 
-            By default, opens the compose window in Mail.app for editing.
+            By default, saves the message as a draft without opening a compose window.
             Use --send to send the message immediately.
             Use --dry-run to preview the action without making changes.
             """
@@ -3521,7 +3656,7 @@ struct MailComposeCommand: ParsableCommand {
                 let preview = messageBody.prefix(100)
                 print("  Body: \(preview)\(messageBody.count > 100 ? "..." : "")")
             }
-            print("  Mode: \(send ? "Send immediately" : "Open draft in Mail.app")")
+            print("  Mode: \(send ? "Send immediately" : "Save as draft")")
             return
         }
 
@@ -3542,7 +3677,7 @@ struct MailComposeCommand: ParsableCommand {
             if send {
                 print("Sent message to: \(to)")
             } else {
-                print("Created draft in Mail.app")
+                print("Saved draft")
             }
             print("  Subject: \(subject)")
         }
