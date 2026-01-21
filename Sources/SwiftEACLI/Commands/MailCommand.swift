@@ -3313,7 +3313,8 @@ struct MailArchiveCommand: ParsableCommand {
                 print("  Subject: \(resolved.message.subject)")
             } catch {
                 failed += 1
-                fputs("Error: failed to archive '\(rawId)': \(error.localizedDescription)\n", stderr)
+                let details = "\(String(reflecting: error)) | \(error.localizedDescription)"
+                fputs("Error: failed to archive '\(rawId)': \(details)\n", stderr)
             }
         }
 
@@ -3410,7 +3411,8 @@ struct MailDeleteCommand: ParsableCommand {
                 print("  Subject: \(resolved.message.subject)")
             } catch {
                 failed += 1
-                fputs("Error: failed to delete '\(rawId)': \(error.localizedDescription)\n", stderr)
+                let details = "\(String(reflecting: error)) | \(error.localizedDescription)"
+                fputs("Error: failed to delete '\(rawId)': \(details)\n", stderr)
             }
         }
 

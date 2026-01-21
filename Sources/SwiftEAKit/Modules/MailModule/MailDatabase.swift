@@ -57,6 +57,8 @@ public final class MailDatabase: @unchecked Sendable {
     private var database: Database?
     private var connection: Connection?
     private let databasePath: String
+    private static let defaultWriteRetryDeadlineSeconds: TimeInterval = 30.0
+    private var didWrite: Bool = false
 
     public init(databasePath: String) {
         self.databasePath = databasePath
@@ -85,16 +87,14 @@ public final class MailDatabase: @unchecked Sendable {
 
     /// Close the database connection
     public func close() {
-        // Checkpoint the WAL before closing to ensure all changes are flushed to the main DB file
-        // This prevents "database is locked" errors when the next process tries to access it
-        if let conn = connection {
+        // Avoid aggressive checkpointing on every close, which can increase lock contention when multiple
+        // short-lived commands (e.g. inbox UI polling) run alongside the daemon. Rely on SQLite's
+        // auto-checkpointing, and do a non-blocking PASSIVE checkpoint only after writes.
+        if didWrite, let conn = connection {
             do {
-                // PRAGMA wal_checkpoint(RESTART) forces all committed transactions to be flushed
-                // This empties the WAL file and can be safely called even if no transactions are pending
-                _ = try conn.query("PRAGMA wal_checkpoint(RESTART)")
+                _ = try conn.query("PRAGMA wal_checkpoint(PASSIVE)")
             } catch {
-                // Silently ignore checkpoint errors during cleanup
-                // The connection will still be released even if checkpoint fails
+                // Ignore checkpoint errors during cleanup.
             }
         }
 
@@ -107,6 +107,50 @@ public final class MailDatabase: @unchecked Sendable {
     deinit {
         // Ensure cleanup even if close() wasn't explicitly called
         close()
+    }
+
+    // MARK: - Transient Write Retry
+
+    private static func isTransientLockError(_ error: Error) -> Bool {
+        let description = "\(String(reflecting: error)) | \(error.localizedDescription)".lowercased()
+        return description.contains("database is locked") ||
+            description.contains("locked") ||
+            description.contains("database is busy") ||
+            description.contains("busy") ||
+            description.contains("timeout") ||
+            description.contains("temporarily") ||
+            description.contains("try again")
+    }
+
+    private func executeWriteWithRetry(
+        _ sql: String,
+        deadlineSeconds: TimeInterval = MailDatabase.defaultWriteRetryDeadlineSeconds
+    ) throws {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let deadline = Date().addingTimeInterval(deadlineSeconds)
+        var attempt = 0
+
+        while true {
+            do {
+                _ = try conn.execute(sql)
+                didWrite = true
+                return
+            } catch {
+                guard MailDatabase.isTransientLockError(error), Date() < deadline else {
+                    throw error
+                }
+
+                attempt += 1
+                let baseDelay = min(0.05 * pow(2.0, Double(min(attempt - 1, 10))), 1.0)
+                let jitter = baseDelay * Double.random(in: 0.1...0.2)
+                let delaySeconds = baseDelay + jitter
+                let delayMicroseconds = useconds_t(max(0, min(delaySeconds, 5.0)) * 1_000_000)
+                usleep(delayMicroseconds)
+            }
+        }
     }
 
     // MARK: - Envelope Index Attachment
@@ -2249,12 +2293,8 @@ public final class MailDatabase: @unchecked Sendable {
     ///   - id: The message ID
     ///   - status: The new mailbox status (inbox, archived, deleted)
     public func updateMailboxStatus(id: String, status: MailboxStatus) throws {
-        guard let conn = connection else {
-            throw MailDatabaseError.notInitialized
-        }
-
         let now = Int(Date().timeIntervalSince1970)
-        _ = try conn.execute("""
+        try executeWriteWithRetry("""
             UPDATE messages SET mailbox_status = '\(status.rawValue)', updated_at = \(now)
             WHERE id = '\(escapeSql(id))'
             """)
@@ -2265,12 +2305,8 @@ public final class MailDatabase: @unchecked Sendable {
     ///   - id: The message ID
     ///   - action: The sync action to queue (archive or delete)
     public func setPendingSyncAction(id: String, action: SyncAction) throws {
-        guard let conn = connection else {
-            throw MailDatabaseError.notInitialized
-        }
-
         let now = Int(Date().timeIntervalSince1970)
-        _ = try conn.execute("""
+        try executeWriteWithRetry("""
             UPDATE messages SET pending_sync_action = '\(action.rawValue)', updated_at = \(now)
             WHERE id = '\(escapeSql(id))'
             """)
@@ -2279,12 +2315,8 @@ public final class MailDatabase: @unchecked Sendable {
     /// Clear the pending sync action for a message (after successful sync)
     /// - Parameter id: The message ID
     public func clearPendingSyncAction(id: String) throws {
-        guard let conn = connection else {
-            throw MailDatabaseError.notInitialized
-        }
-
         let now = Int(Date().timeIntervalSince1970)
-        _ = try conn.execute("""
+        try executeWriteWithRetry("""
             UPDATE messages SET pending_sync_action = NULL, updated_at = \(now)
             WHERE id = '\(escapeSql(id))'
             """)
