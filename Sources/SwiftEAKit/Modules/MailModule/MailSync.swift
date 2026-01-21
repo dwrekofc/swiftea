@@ -449,6 +449,16 @@ public final class MailSync: @unchecked Sendable {
             result.threadsUpdated = threadingResult.updated
         }
 
+        // Phase 1.5: Detect missed messages (ROWID-based)
+        // This catches messages that slipped through timestamp-based sync due to
+        // Apple Mail's delayed writes to the Envelope Index (race condition fix).
+        // A message received at T1 might not be in the DB until after we sync at T2,
+        // causing the next sync to skip it because T1 < T2.
+        reportProgress(.syncingMessages, 0, 1, "Checking for missed messages...")
+        let missedMessages = try detectMissedMessages(info: info, errors: &errors)
+        result.added += missedMessages.added
+        result.processed += missedMessages.added
+
         // Phase 2: Check for status changes on existing messages (read/flagged)
         reportProgress(.detectingChanges, 0, 1, "Detecting status changes...")
         let statusChanges = try detectStatusChanges()
@@ -519,6 +529,59 @@ public final class MailSync: @unchecked Sendable {
         }
 
         return changesDetected
+    }
+
+    /// Detect messages that exist in Apple Mail but are missing from the mirror database.
+    /// This fixes a race condition where Apple Mail delays writing to the Envelope Index:
+    /// - Message received at time T1
+    /// - Not written to Envelope Index yet
+    /// - Sync runs at T2, updating last_sync_time = T2
+    /// - Mail finally writes message to Envelope Index
+    /// - Next sync skips it because T1 < T2
+    ///
+    /// By comparing ROWIDs instead of just timestamps, we catch any messages that slipped through.
+    private func detectMissedMessages(
+        info: EnvelopeIndexInfo,
+        errors: inout [String]
+    ) throws -> (added: Int, processed: Int) {
+        // Get all ROWIDs currently in Apple Mail's Inbox
+        let sourceRowIds = try queryInboxRowIds()
+        guard !sourceRowIds.isEmpty else { return (0, 0) }
+
+        // Get all ROWIDs we've already synced to the mirror
+        let mirrorRowIds = Set(try mailDatabase.getAllAppleRowIds())
+
+        // Find ROWIDs in source that are NOT in mirror (missed messages)
+        let missedRowIds = sourceRowIds.subtracting(mirrorRowIds)
+        guard !missedRowIds.isEmpty else { return (0, 0) }
+
+        reportProgress(.syncingMessages, 0, missedRowIds.count,
+                       "Found \(missedRowIds.count) missed messages, syncing...")
+
+        // Query full message details for the missed ROWIDs
+        let missedMessages = try queryMessagesByRowIds(Array(missedRowIds))
+
+        // Process messages into objects
+        var processedMessages: [MailMessage] = []
+        processedMessages.reserveCapacity(missedMessages.count)
+
+        for messageRow in missedMessages {
+            do {
+                let message = try processMessageToObject(messageRow, mailBasePath: info.mailBasePath)
+                processedMessages.append(message)
+            } catch {
+                errors.append("Missed message \(messageRow.rowId): \(error.localizedDescription)")
+            }
+        }
+
+        guard !processedMessages.isEmpty else { return (0, 0) }
+
+        // Batch insert the missed messages
+        let batchConfig = MailDatabase.BatchInsertConfig(batchSize: options.databaseBatchSize)
+        let batchResult = try mailDatabase.batchUpsertMessages(processedMessages, config: batchConfig)
+        errors.append(contentsOf: batchResult.errors)
+
+        return (batchResult.inserted, batchResult.inserted + batchResult.updated)
     }
 
     /// Detect messages that exist in the mirror but have been deleted from Apple Mail
@@ -825,6 +888,79 @@ public final class MailSync: @unchecked Sendable {
         let isRead: Bool
         let isFlagged: Bool
         let hasAttachments: Bool
+    }
+
+    /// Query all ROWIDs from Apple Mail's Inbox (for detecting missed messages)
+    /// This helps catch messages that slipped through timestamp-based sync due to
+    /// Apple Mail's delayed writes to the Envelope Index.
+    private func queryInboxRowIds() throws -> Set<Int> {
+        let sql = """
+            SELECT m.ROWID
+            FROM messages m
+            INNER JOIN mailboxes mb ON m.mailbox = mb.ROWID
+            WHERE LOWER(mb.url) LIKE '%/inbox'
+            """
+
+        let rows = try executeQuery(sql)
+        var rowIds = Set<Int>()
+        for row in rows {
+            if let rowId = row["ROWID"] as? Int64 {
+                rowIds.insert(Int(rowId))
+            }
+        }
+        return rowIds
+    }
+
+    /// Query messages by specific ROWIDs (for syncing missed messages)
+    private func queryMessagesByRowIds(_ rowIds: [Int]) throws -> [MessageRow] {
+        guard !rowIds.isEmpty else { return [] }
+
+        let idList = rowIds.map { String($0) }.joined(separator: ",")
+        let sql = """
+            SELECT m.ROWID, s.subject, a.address AS sender_email, a.comment AS sender_name,
+                   m.date_received, m.date_sent, m.message_id, m.mailbox, m.read, m.flagged
+            FROM messages m
+            LEFT JOIN subjects s ON m.subject = s.ROWID
+            LEFT JOIN addresses a ON m.sender = a.ROWID
+            INNER JOIN mailboxes mb ON m.mailbox = mb.ROWID
+            WHERE LOWER(mb.url) LIKE '%/inbox' AND m.ROWID IN (\(idList))
+            ORDER BY m.date_received DESC
+            """
+
+        let rows = try executeQuery(sql)
+
+        return rows.compactMap { row -> MessageRow? in
+            guard let rowId = row["ROWID"] as? Int64 else { return nil }
+
+            let senderEmail = row["sender_email"] as? String
+            let senderName = row["sender_name"] as? String
+            var sender: String? = nil
+            if let email = senderEmail {
+                if let name = senderName, !name.isEmpty {
+                    sender = "\"\(name)\" <\(email)>"
+                } else {
+                    sender = email
+                }
+            }
+
+            let dateReceived: Double? = (row["date_received"] as? Int64).map { Double($0) }
+                ?? (row["date_received"] as? Double)
+            let dateSent: Double? = (row["date_sent"] as? Int64).map { Double($0) }
+                ?? (row["date_sent"] as? Double)
+
+            return MessageRow(
+                rowId: rowId,
+                subject: row["subject"] as? String,
+                sender: sender,
+                dateReceived: dateReceived,
+                dateSent: dateSent,
+                messageId: row["message_id"] as? String,
+                mailboxId: row["mailbox"] as? Int64,
+                isRead: (row["read"] as? Int64 ?? 0) == 1,
+                isFlagged: (row["flagged"] as? Int64 ?? 0) == 1,
+                hasAttachments: false
+            )
+        }
     }
 
     private func queryMessages(since: Date?) throws -> [MessageRow] {
