@@ -272,7 +272,7 @@ public struct MailSyncBackwardScripts {
 
     /// Generate script to delete a message (move to Trash)
     ///
-    /// Uses Mail.app's native `delete` command which automatically moves to Trash.
+    /// Explicitly moves message to the account's Trash mailbox (matching archiveMessage pattern).
     /// Searches global inbox directly - simple and fast.
     ///
     /// - Parameter messageId: The RFC822 Message-ID to search for
