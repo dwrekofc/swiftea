@@ -273,6 +273,11 @@ class SwiftEAInboxView extends ItemView {
       void this.runManualSync();
     });
 
+    // Sync button state with plugin-level sync status (handles view recreation mid-sync)
+    if (this.plugin._syncPromise) {
+      this.setSyncButtonState(true);
+    }
+
     this.columnsEl = this.headerEl.createDiv({ cls: "swiftea-inbox__columns" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--select", text: "" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--sender", text: "Sender" });
@@ -333,12 +338,12 @@ class SwiftEAInboxView extends ItemView {
   setSyncButtonState(isSyncing) {
     if (!this.syncButtonEl) return;
     if (isSyncing) {
-      this.syncButtonEl.setAttr("disabled", "true");
-      this.syncButtonEl.setText("Syncing…");
+      this.syncButtonEl.setAttribute("disabled", "true");
+      this.syncButtonEl.textContent = "Syncing…";
       return;
     }
-    this.syncButtonEl.removeAttr("disabled");
-    this.syncButtonEl.setText("Sync");
+    this.syncButtonEl.removeAttribute("disabled");
+    this.syncButtonEl.textContent = "Sync";
   }
 
   async runManualSync() {
@@ -1137,6 +1142,18 @@ module.exports = class SwiftEAInboxPlugin extends Plugin {
       await this._syncPromise;
     } finally {
       this._syncPromise = null;
+      this.resetSyncButtonsOnAllViews();
+    }
+  }
+
+  resetSyncButtonsOnAllViews() {
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view && typeof view.setSyncButtonState === "function") {
+        view.setSyncButtonState(false);
+        view.manualSyncInProgress = false;
+      }
     }
   }
 
