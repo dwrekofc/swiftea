@@ -72,8 +72,9 @@ public final class MailDatabase: @unchecked Sendable {
             // This prevents "database is locked" errors when daemon and manual sync run concurrently
             if let conn = connection {
                 _ = try conn.query("PRAGMA journal_mode=WAL")
-                // Set busy timeout to 5 seconds to wait for locks instead of failing immediately
-                _ = try conn.query("PRAGMA busy_timeout=5000")
+                // Set busy timeout to 30 seconds to wait for locks instead of failing immediately
+                // Longer timeout needed because daemon holds persistent connection
+                _ = try conn.query("PRAGMA busy_timeout=30000")
             }
 
             try runMigrations()

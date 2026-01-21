@@ -385,8 +385,10 @@ struct MailSyncCommand: ParsableCommand {
         }
 
         // Handle --daemon flag: run as persistent daemon with sleep/wake detection
+        // Close the connection first since the daemon manages its own connections
         if daemon {
-            try runPersistentDaemon(mailDatabase: mailDatabase, vault: vault)
+            mailDatabase.close()
+            try runPersistentDaemon(databasePath: mailDbPath, vault: vault)
             return
         }
 
@@ -896,7 +898,7 @@ struct MailSyncCommand: ParsableCommand {
 
     /// Run as a persistent daemon that syncs on startup, on a schedule, and on system wake.
     /// This mode is used internally by the LaunchAgent for sleep/wake-aware syncing.
-    private func runPersistentDaemon(mailDatabase: MailDatabase, vault: VaultContext) throws {
+    private func runPersistentDaemon(databasePath: String, vault: VaultContext) throws {
         let syncInterval = effectiveSyncInterval
         let exportDir = (vault.dataFolderPath as NSString).appendingPathComponent("Mail")
 
@@ -904,17 +906,18 @@ struct MailSyncCommand: ParsableCommand {
         log("Sync interval: \(formatInterval(syncInterval))")
         log("Export directory: \(exportDir)")
 
-        // Run initial incremental sync on startup
-        log("Running initial sync...")
-        performDaemonSync(mailDatabase: mailDatabase, exportDir: exportDir)
-
         // Create a daemon controller to handle sleep/wake events
+        // Controller creates fresh database connections for each sync cycle
         let controller = MailSyncDaemonController(
-            mailDatabase: mailDatabase,
+            databasePath: databasePath,
             exportDir: exportDir,
             syncIntervalSeconds: TimeInterval(syncInterval),
             logger: log
         )
+
+        // Run initial sync through the controller (uses same open/close pattern as scheduled syncs)
+        log("Running initial sync...")
+        controller.runInitialSync()
 
         // Start the run loop - this blocks until the daemon is terminated
         controller.startRunLoop()
@@ -928,13 +931,17 @@ struct MailSyncCommand: ParsableCommand {
 /// Controls the mail sync daemon with sleep/wake detection.
 /// Uses NSWorkspace notifications to detect system wake and trigger incremental sync.
 final class MailSyncDaemonController: NSObject {
-    private let mailDatabase: MailDatabase
+    private let databasePath: String
     private let exportDir: String
     private let logger: (String) -> Void
     private var isSyncing = false
     private let syncQueue = DispatchQueue(label: "com.swiftea.mail.sync.daemon")
-    private var syncTimer: Timer?
-    private let backwardSync: MailSyncBackward
+    private var dispatchTimer: DispatchSourceTimer?
+
+    /// Single persistent database connection to avoid libsql file handle leaks
+    /// libsql doesn't properly release file handles on close(), so we keep one connection
+    private var mailDatabase: MailDatabase?
+    private let databaseLock = NSLock()
 
     /// Interval between scheduled syncs (configurable, default 1 minute)
     private let syncIntervalSeconds: TimeInterval
@@ -945,27 +952,66 @@ final class MailSyncDaemonController: NSObject {
     /// Track last sync time to debounce wake events
     private var lastSyncTime: Date?
 
-    init(mailDatabase: MailDatabase, exportDir: String, syncIntervalSeconds: TimeInterval = 60, logger: @escaping (String) -> Void) {
-        self.mailDatabase = mailDatabase
+    init(databasePath: String, exportDir: String, syncIntervalSeconds: TimeInterval = 60, logger: @escaping (String) -> Void) {
+        self.databasePath = databasePath
         self.exportDir = exportDir
         self.syncIntervalSeconds = syncIntervalSeconds
         self.logger = logger
-        self.backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
         super.init()
 
         // Register for sleep/wake notifications
         registerForPowerNotifications()
     }
 
+    /// Get or create the database connection (lazy initialization)
+    private func getDatabase() throws -> MailDatabase {
+        databaseLock.lock()
+        defer { databaseLock.unlock() }
+
+        if let db = mailDatabase {
+            return db
+        }
+
+        let db = MailDatabase(databasePath: databasePath)
+        try db.initialize()
+        mailDatabase = db
+        return db
+    }
+
+    /// Reset the database connection (e.g., after errors)
+    private func resetDatabase() {
+        databaseLock.lock()
+        defer { databaseLock.unlock() }
+
+        mailDatabase?.close()
+        mailDatabase = nil
+    }
+
     deinit {
         unregisterForPowerNotifications()
-        syncTimer?.invalidate()
+        dispatchTimer?.cancel()
+        mailDatabase?.close()
+    }
+
+    /// Run the initial sync synchronously before starting the run loop.
+    /// Runs on syncQueue to ensure database connection is created on the same queue
+    /// that will be used for scheduled syncs (libsql connections are not thread-safe).
+    func runInitialSync() {
+        syncQueue.sync {
+            performSync(reason: "initial")
+        }
     }
 
     /// Start the run loop. Blocks until the daemon is terminated.
     func startRunLoop() {
-        // Schedule periodic sync timer
+        // Schedule periodic sync timer (uses DispatchSourceTimer, not RunLoop Timer)
         scheduleSyncTimer()
+
+        // Add a dummy port to keep the run loop alive
+        // This is needed because DispatchSourceTimer doesn't add sources to the run loop,
+        // but we still need the run loop for NSWorkspace sleep/wake notifications
+        let dummyPort = NSMachPort()
+        RunLoop.current.add(dummyPort, forMode: .default)
 
         // Run the main run loop to receive notifications
         // This blocks until the process is terminated
@@ -1009,20 +1055,25 @@ final class MailSyncDaemonController: NSObject {
     @objc private func systemWillSleep(_ notification: Notification) {
         logger("System going to sleep")
         // Cancel any pending sync timer - we'll sync on wake instead
-        syncTimer?.invalidate()
-        syncTimer = nil
+        dispatchTimer?.cancel()
+        dispatchTimer = nil
     }
 
     // MARK: - Sync Timer
 
     private func scheduleSyncTimer() {
-        // Invalidate existing timer
-        syncTimer?.invalidate()
+        // Cancel existing timer
+        dispatchTimer?.cancel()
 
-        // Schedule new timer on the main run loop
-        syncTimer = Timer.scheduledTimer(withTimeInterval: syncIntervalSeconds, repeats: true) { [weak self] _ in
+        // Use DispatchSourceTimer instead of Timer for reliable daemon operation
+        // Timer.scheduledTimer can fail to fire in LaunchAgent contexts due to run loop mode issues
+        let timer = DispatchSource.makeTimerSource(queue: syncQueue)
+        timer.schedule(deadline: .now() + syncIntervalSeconds, repeating: syncIntervalSeconds)
+        timer.setEventHandler { [weak self] in
             self?.triggerSync(reason: "scheduled")
         }
+        timer.resume()
+        dispatchTimer = timer
 
         logger("Scheduled sync timer (every \(Int(syncIntervalSeconds))s)")
     }
@@ -1066,6 +1117,7 @@ final class MailSyncDaemonController: NSObject {
     }
 
     /// Perform the actual sync with retry logic.
+    /// Uses a single persistent database connection to avoid libsql file handle leaks.
     private func performSync(reason: String) {
         logger("Starting \(reason) sync...")
 
@@ -1078,7 +1130,8 @@ final class MailSyncDaemonController: NSObject {
 
         while attempt < maxRetryAttempts {
             do {
-                let sync = MailSync(mailDatabase: mailDatabase)
+                let db = try getDatabase()
+                let sync = MailSync(mailDatabase: db)
                 let result = try sync.sync()
 
                 logger("Sync complete: +\(result.messagesAdded) ~\(result.messagesUpdated) (\(String(format: "%.2f", result.duration))s)")
@@ -1088,10 +1141,10 @@ final class MailSyncDaemonController: NSObject {
                 }
 
                 // Auto-export new messages after successful sync
-                performAutoExport()
+                performAutoExport(mailDatabase: db)
 
                 // Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
-                performBackwardSync()
+                performBackwardSync(mailDatabase: db)
                 return
 
             } catch {
@@ -1099,19 +1152,27 @@ final class MailSyncDaemonController: NSObject {
                 attempt += 1
 
                 // Check if error is transient
-                let description = error.localizedDescription.lowercased()
+                // NOTE: LibsqlError doesn't conform to LocalizedError, so localizedDescription is often
+                // a generic "(Libsql.LibsqlError error 0.)" and loses the underlying runtime message.
+                // Use String(reflecting:) to preserve details for transient detection + logging.
+                let description = "\(String(reflecting: error)) | \(error.localizedDescription)".lowercased()
                 let isTransient = description.contains("locked") ||
                                   description.contains("busy") ||
                                   description.contains("timeout") ||
                                   description.contains("temporarily") ||
                                   description.contains("try again")
 
+                // Reset database connection on transient errors (might be stale)
+                if isTransient {
+                    resetDatabase()
+                }
+
                 if isTransient && attempt < maxRetryAttempts {
                     let delay = min(baseRetryDelay * pow(2.0, Double(attempt - 1)), maxRetryDelay)
                     let jitter = delay * Double.random(in: 0.1...0.2)
                     let totalDelay = delay + jitter
 
-                    logger("Transient error (attempt \(attempt)/\(maxRetryAttempts)): \(error.localizedDescription)")
+                    logger("Transient error (attempt \(attempt)/\(maxRetryAttempts)): \(String(reflecting: error))")
                     logger("Retrying in \(String(format: "%.1f", totalDelay))s...")
 
                     Thread.sleep(forTimeInterval: totalDelay)
@@ -1122,13 +1183,13 @@ final class MailSyncDaemonController: NSObject {
         }
 
         if let error = lastError {
-            logger("ERROR: Sync failed after \(attempt) attempt(s): \(error.localizedDescription)")
+            logger("ERROR: Sync failed after \(attempt) attempt(s): \(String(reflecting: error))")
         }
     }
 
     /// Export newly synced messages to Swiftea/Mail/ as markdown files
     /// Messages are grouped by conversation/thread for better organization.
-    private func performAutoExport() {
+    private func performAutoExport(mailDatabase: MailDatabase) {
         let exporter = MailExporter(mailDatabase: mailDatabase)
 
         do {
@@ -1155,7 +1216,8 @@ final class MailSyncDaemonController: NSObject {
     }
 
     /// Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
-    private func performBackwardSync() {
+    private func performBackwardSync(mailDatabase: MailDatabase) {
+        let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
         do {
             let result = try backwardSync.processPendingActions()
 
@@ -1208,7 +1270,7 @@ private func performDaemonSync(mailDatabase: MailDatabase, exportDir: String) {
         } catch {
             attempt += 1
 
-            let description = error.localizedDescription.lowercased()
+            let description = "\(String(reflecting: error)) | \(error.localizedDescription)".lowercased()
             let isTransient = description.contains("locked") ||
                               description.contains("busy") ||
                               description.contains("timeout") ||
@@ -1221,14 +1283,14 @@ private func performDaemonSync(mailDatabase: MailDatabase, exportDir: String) {
                 let totalDelay = delay + jitter
 
                 let timestamp = ISO8601DateFormatter().string(from: Date())
-                fputs("[\(timestamp)] Transient error (attempt \(attempt)/\(maxRetryAttempts)): \(error.localizedDescription)\n", stdout)
+                fputs("[\(timestamp)] Transient error (attempt \(attempt)/\(maxRetryAttempts)): \(String(reflecting: error))\n", stdout)
                 fputs("[\(timestamp)] Retrying in \(String(format: "%.1f", totalDelay))s...\n", stdout)
                 fflush(stdout)
 
                 Thread.sleep(forTimeInterval: totalDelay)
             } else {
                 let timestamp = ISO8601DateFormatter().string(from: Date())
-                fputs("[\(timestamp)] ERROR: Initial sync failed: \(error.localizedDescription)\n", stderr)
+                fputs("[\(timestamp)] ERROR: Initial sync failed: \(String(reflecting: error))\n", stderr)
                 fflush(stderr)
                 return
             }
