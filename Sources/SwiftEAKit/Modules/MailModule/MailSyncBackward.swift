@@ -247,6 +247,7 @@ public struct MailSyncBackwardScripts {
     ///
     /// Uses the account's Archive mailbox which Mail.app creates automatically.
     /// Searches inbox only for simplicity - like deleteMessage().
+    /// Supports localized mailbox names for different locales.
     ///
     /// - Parameter messageId: The RFC822 Message-ID to search for
     /// - Returns: AppleScript to move the message to Archive
@@ -255,14 +256,26 @@ public struct MailSyncBackwardScripts {
         return """
         set targetMsgId to "\(escapedId)"
         set candidates to {targetMsgId, "<" & targetMsgId & ">"}
+        set archiveNames to {"Archive", "All Mail", "Archives", "Archivo", "Archiv"}
 
         repeat with cid in candidates
             try
                 set m to first message of inbox whose message id is (cid as text)
                 set theAccount to account of mailbox of m
-                set archiveMailbox to mailbox "Archive" of theAccount
-                move m to archiveMailbox
-                return "archived"
+                repeat with archiveName in archiveNames
+                    try
+                        set archiveMailbox to mailbox (archiveName as text) of theAccount
+                        move m to archiveMailbox
+                        return "archived"
+                    end try
+                end repeat
+                error "Archive mailbox not found" number -1729
+            on error errMsg number errNum
+                if errNum is -1728 then
+                    -- Message not found with this candidate, try next
+                else if errNum is -1729 then
+                    error errMsg number errNum
+                end if
             end try
         end repeat
 
@@ -274,6 +287,7 @@ public struct MailSyncBackwardScripts {
     ///
     /// Explicitly moves message to the account's Trash mailbox (matching archiveMessage pattern).
     /// Searches global inbox directly - simple and fast.
+    /// Supports localized mailbox names for different locales.
     ///
     /// - Parameter messageId: The RFC822 Message-ID to search for
     /// - Returns: AppleScript to delete the message
@@ -282,12 +296,26 @@ public struct MailSyncBackwardScripts {
         return """
         set targetMsgId to "\(escapedId)"
         set candidates to {targetMsgId, "<" & targetMsgId & ">"}
+        set trashNames to {"Trash", "Deleted Items", "Papelera", "Corbeille", "Papierkorb"}
 
         repeat with cid in candidates
             try
                 set m to first message of inbox whose message id is (cid as text)
-                delete m
-                return "deleted"
+                set theAccount to account of mailbox of m
+                repeat with trashName in trashNames
+                    try
+                        set trashMailbox to mailbox (trashName as text) of theAccount
+                        move m to trashMailbox
+                        return "deleted"
+                    end try
+                end repeat
+                error "Trash mailbox not found" number -1730
+            on error errMsg number errNum
+                if errNum is -1728 then
+                    -- Message not found with this candidate, try next
+                else if errNum is -1730 then
+                    error errMsg number errNum
+                end if
             end try
         end repeat
 
