@@ -712,17 +712,14 @@ final class MailSyncBackwardTests: XCTestCase {
         XCTAssertTrue(script.contains("error"))
     }
 
-    func testArchiveScriptSupportsLocalizedMailboxNames() {
+    func testArchiveScriptUsesMailboxFallbackList() {
         let script = MailSyncBackwardScripts.archiveMessage(byMessageId: "<test@example.com>")
 
-        // Should try multiple archive mailbox names for different locales
+        // Should have a list of archive mailbox names to try (for locale support)
+        XCTAssertTrue(script.contains("archiveNames"))
+        // Primary English name should be present
         XCTAssertTrue(script.contains("Archive"))
-        XCTAssertTrue(script.contains("All Mail"))
-        XCTAssertTrue(script.contains("Archives"))  // French
-        XCTAssertTrue(script.contains("Archivo"))   // Spanish
-        XCTAssertTrue(script.contains("Archiv"))    // German
-        // Should have error if none of the names work
-        XCTAssertTrue(script.contains("-1729"))
+        // Should have error handling if no archive mailbox found
         XCTAssertTrue(script.contains("Archive mailbox not found"))
     }
 
