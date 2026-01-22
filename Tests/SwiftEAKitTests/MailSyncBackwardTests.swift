@@ -690,9 +690,8 @@ final class MailSyncBackwardTests: XCTestCase {
         // Note: angle brackets are stripped for Mail.app AppleScript lookup
         XCTAssertTrue(script.contains("delete@example.com"))
         XCTAssertFalse(script.contains("<delete@example.com>"), "Angle brackets should be stripped")
-        // Now uses Trash mailbox like archive does
-        XCTAssertTrue(script.contains("Trash"))
-        XCTAssertTrue(script.contains("move"))
+        // Uses native 'delete' command which moves to Trash automatically
+        XCTAssertTrue(script.contains("delete m"))
     }
 
     func testScriptsEscapeSpecialCharacters() {
@@ -727,18 +726,14 @@ final class MailSyncBackwardTests: XCTestCase {
         XCTAssertTrue(script.contains("Archive mailbox not found"))
     }
 
-    func testDeleteScriptSupportsLocalizedMailboxNames() {
+    func testDeleteScriptUsesNativeDelete() {
         let script = MailSyncBackwardScripts.deleteMessage(byMessageId: "<test@example.com>")
 
-        // Should try multiple trash mailbox names for different locales
-        XCTAssertTrue(script.contains("Trash"))
-        XCTAssertTrue(script.contains("Deleted Items"))
-        XCTAssertTrue(script.contains("Papelera"))   // Spanish
-        XCTAssertTrue(script.contains("Corbeille"))  // French
-        XCTAssertTrue(script.contains("Papierkorb")) // German
-        // Should have error if none of the names work
-        XCTAssertTrue(script.contains("-1730"))
-        XCTAssertTrue(script.contains("Trash mailbox not found"))
+        // Native 'delete' command handles Trash automatically - no localized names needed
+        XCTAssertTrue(script.contains("delete m"))
+        // Should not contain localized mailbox names (native delete handles this)
+        XCTAssertFalse(script.contains("trashNames"))
+        XCTAssertFalse(script.contains("trashMailbox"))
     }
 
     func testArchiveScriptHasNoOrphanEndIf() {
