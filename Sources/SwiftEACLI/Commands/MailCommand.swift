@@ -341,6 +341,18 @@ struct MailSyncCommand: ParsableCommand {
         if ensureWatch {
             let daemonStatus = getDaemonStatus()
             if daemonStatus.isRunning {
+                // Check if existing plist is stale (contains vault-path from old install)
+                let launchAgentPath = getLaunchAgentPath()
+                if let plistContent = try? String(contentsOfFile: launchAgentPath, encoding: .utf8),
+                   plistContent.contains("--vault-path") {
+                    // Stale plist — force reinstall with global daemon config
+                    if verbose {
+                        print("Upgrading daemon from vault-based to global mode...")
+                    }
+                    try stopWatchDaemon(verbose: verbose)
+                    try installWatchDaemon(verbose: verbose)
+                    return
+                }
                 if verbose {
                     print("Watch daemon already running (pid=\(daemonStatus.pid ?? -1))")
                 }

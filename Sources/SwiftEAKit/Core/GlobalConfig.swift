@@ -180,7 +180,9 @@ public final class GlobalConfigManager {
     /// Load the global config from disk, creating defaults if not found
     public func loadConfig() throws -> GlobalConfig {
         guard fileManager.fileExists(atPath: configPath) else {
-            return GlobalConfig()
+            let defaultConfig = GlobalConfig()
+            try saveConfig(defaultConfig)
+            return defaultConfig
         }
 
         let data = try Data(contentsOf: URL(fileURLWithPath: configPath))

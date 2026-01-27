@@ -105,7 +105,7 @@ public struct Config: ParsableCommand {
             print("Global Configuration:")
             print("=====================")
             print("  database.path: \(config.database.path ?? GlobalConfigManager.defaultDatabasePath)")
-            for key in GlobalMailConfig.keys.keys.sorted() {
+            for key in GlobalMailConfig.keys.keys.sorted() where key != "database.path" {
                 let value = config.mail.getValue(for: key) ?? "(not set)"
                 let displayValue = value.isEmpty ? "(not set)" : value
                 print("  \(key): \(displayValue)")
