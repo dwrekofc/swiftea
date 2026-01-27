@@ -118,6 +118,9 @@ public struct Mail: ParsableCommand {
             MailMarkCommand.self,
             MailReplyCommand.self,
             MailComposeCommand.self,
+            // Label commands
+            MailLabelCommand.self,
+            MailLabelCountsCommand.self,
             // Database maintenance
             MailMigrateCommand.self
         ]
@@ -1234,6 +1237,9 @@ struct MailInboxCommand: ParsableCommand {
     @Flag(name: .long, help: "Output as JSON")
     var json: Bool = false
 
+    @Option(name: .long, help: "Filter by label (e.g., task, waiting, reference, read_later, expenses)")
+    var label: String?
+
     func validate() throws {
         if limit <= 0 {
             throw MailValidationError.invalidLimit
@@ -1264,7 +1270,8 @@ struct MailInboxCommand: ParsableCommand {
             limit: limit,
             offset: offset,
             previewLength: previewLength,
-            filter: resolved.viewFilter
+            filter: resolved.viewFilter,
+            label: label
         )
 
         if json {
@@ -1296,7 +1303,8 @@ struct MailInboxCommand: ParsableCommand {
                     "mailboxStatus": mailboxStatus.rawValue,
                     "isRead": msg.isRead,
                     "isFlagged": msg.isFlagged,
-                    "hasAttachments": msg.hasAttachments
+                    "hasAttachments": msg.hasAttachments,
+                    "labels": msg.labels
                 ]
                 output.append(msgDict)
             }
@@ -1317,6 +1325,164 @@ struct MailInboxCommand: ParsableCommand {
             let date = (msg.dateReceived ?? msg.dateSent).map { DateFormatter.localizedString(from: $0, dateStyle: .short, timeStyle: .short) } ?? "Unknown"
             let sender = msg.senderName ?? msg.senderEmail ?? "Unknown"
             print("\(date)  \(sender): \(msg.subject)")
+        }
+    }
+}
+
+struct MailLabelCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "label",
+        abstract: "Add, remove, or clear labels on messages",
+        discussion: """
+            Manage triage labels on mail messages. Labels help organize your inbox
+            into categories like task, waiting, reference, read_later, and expenses.
+
+            EXAMPLES
+              swea mail label --id <ID> --add task
+              swea mail label --ids X,Y,Z --add task
+              swea mail label --id <ID> --remove task
+              swea mail label --id <ID> --clear
+              swea mail label --id <ID> --json
+            """
+    )
+
+    @Option(name: .long, help: "Message ID")
+    var id: String?
+
+    @Option(name: .long, help: "Comma-separated message IDs")
+    var ids: String?
+
+    @Option(name: .long, help: "Label to add")
+    var add: String?
+
+    @Option(name: .long, help: "Label to remove")
+    var remove: String?
+
+    @Flag(name: .long, help: "Clear all labels")
+    var clear: Bool = false
+
+    @Flag(name: .long, help: "Output as JSON")
+    var json: Bool = false
+
+    func validate() throws {
+        if id != nil && ids != nil {
+            throw ValidationError("Specify exactly one of --id or --ids.")
+        }
+        if id == nil && ids == nil {
+            throw ValidationError("Missing required option: specify --id or --ids.")
+        }
+        if let ids, parseCommaSeparatedIds(ids).isEmpty {
+            throw ValidationError("No message IDs provided in --ids.")
+        }
+        if add == nil && remove == nil && !clear {
+            throw ValidationError("Specify --add <label>, --remove <label>, or --clear.")
+        }
+        if clear && (add != nil || remove != nil) {
+            throw ValidationError("--clear cannot be combined with --add or --remove.")
+        }
+        if add != nil && remove != nil {
+            throw ValidationError("--add and --remove cannot be used together.")
+        }
+    }
+
+    func run() throws {
+        let vault = VaultContext.optional()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        let idsToProcess: [String] = {
+            if let id { return [id] }
+            return parseCommaSeparatedIds(ids ?? "")
+        }()
+
+        if clear {
+            for msgId in idsToProcess {
+                try mailDatabase.clearLabels(messageId: msgId)
+            }
+            if json {
+                let result: [String: Any] = ["action": "clear", "ids": idsToProcess, "success": true]
+                if let data = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
+                   let jsonString = String(data: data, encoding: .utf8) {
+                    print(jsonString)
+                }
+            } else {
+                print("Cleared labels on \(idsToProcess.count) message(s).")
+            }
+            return
+        }
+
+        if let labelToAdd = add {
+            for msgId in idsToProcess {
+                try mailDatabase.addLabel(messageId: msgId, label: labelToAdd)
+            }
+            if json {
+                let result: [String: Any] = ["action": "add", "label": labelToAdd, "ids": idsToProcess, "success": true]
+                if let data = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
+                   let jsonString = String(data: data, encoding: .utf8) {
+                    print(jsonString)
+                }
+            } else {
+                print("Added label '\(labelToAdd)' to \(idsToProcess.count) message(s).")
+            }
+            return
+        }
+
+        if let labelToRemove = remove {
+            for msgId in idsToProcess {
+                try mailDatabase.removeLabel(messageId: msgId, label: labelToRemove)
+            }
+            if json {
+                let result: [String: Any] = ["action": "remove", "label": labelToRemove, "ids": idsToProcess, "success": true]
+                if let data = try? JSONSerialization.data(withJSONObject: result, options: .prettyPrinted),
+                   let jsonString = String(data: data, encoding: .utf8) {
+                    print(jsonString)
+                }
+            } else {
+                print("Removed label '\(labelToRemove)' from \(idsToProcess.count) message(s).")
+            }
+        }
+    }
+}
+
+struct MailLabelCountsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "label-counts",
+        abstract: "Get message counts per label",
+        discussion: """
+            Returns the number of inbox messages for each label.
+
+            EXAMPLES
+              swea mail label-counts --json
+            """
+    )
+
+    @Flag(name: .long, help: "Output as JSON")
+    var json: Bool = false
+
+    func run() throws {
+        let vault = VaultContext.optional()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        let counts = try mailDatabase.getLabelCounts(filter: resolved.viewFilter)
+
+        if json {
+            if let data = try? JSONSerialization.data(withJSONObject: counts, options: .prettyPrinted),
+               let jsonString = String(data: data, encoding: .utf8) {
+                print(jsonString)
+            }
+        } else {
+            if counts.isEmpty {
+                print("No labels assigned.")
+            } else {
+                for (label, count) in counts.sorted(by: { $0.key < $1.key }) {
+                    print("\(label): \(count)")
+                }
+            }
         }
     }
 }

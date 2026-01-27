@@ -15,6 +15,14 @@ const DEFAULT_SETTINGS = {
 const ROW_HEIGHT_PX = 44;
 const OVERSCAN_ROWS = 10;
 
+const TRIAGE_LABELS = [
+  { key: "1", name: "task", short: "Task", color: "#e05252" },
+  { key: "2", name: "waiting", short: "Wait", color: "#e0ac00" },
+  { key: "3", name: "reference", short: "Ref", color: "#4caf50" },
+  { key: "4", name: "read_later", short: "Read", color: "#4c8ce0" },
+  { key: "5", name: "expenses", short: "Exp", color: "#a855f7" }
+];
+
 function execFileAsync(file, args, options) {
   return new Promise((resolve, reject) => {
     execFile(
@@ -193,14 +201,12 @@ class SwiftEAEmailSource {
     return configured;
   }
 
-  async listInbox({ offset, limit }) {
+  async listInbox({ offset, limit, label }) {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    const { stdout } = await execFileAsync(
-      cli,
-      ["mail", "inbox", "--json", "--limit", String(limit), "--offset", String(offset)],
-      { cwd }
-    );
+    const args = ["mail", "inbox", "--json", "--limit", String(limit), "--offset", String(offset)];
+    if (label) args.push("--label", label);
+    const { stdout } = await execFileAsync(cli, args, { cwd });
     const parsed = JSON.parse(stdout);
     if (!Array.isArray(parsed)) throw new Error("Unexpected JSON from swea mail inbox.");
     return parsed.map((item) => ({
@@ -208,7 +214,8 @@ class SwiftEAEmailSource {
       sender: String(item.sender || ""),
       subject: String(item.subject || ""),
       preview: String(item.preview || ""),
-      date: String(item.date || "")
+      date: String(item.date || ""),
+      labels: Array.isArray(item.labels) ? item.labels : []
     }));
   }
 
@@ -277,6 +284,37 @@ class SwiftEAEmailSource {
       throw e;
     }
   }
+
+  async labelMessages(ids, label) {
+    const list = Array.isArray(ids) ? ids.map((v) => String(v).trim()).filter(Boolean) : [];
+    if (!list.length) return;
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    await execFileAsync(cli, ["mail", "label", "--ids", list.join(","), "--add", label], { cwd });
+  }
+
+  async unlabelMessages(ids, label) {
+    const list = Array.isArray(ids) ? ids.map((v) => String(v).trim()).filter(Boolean) : [];
+    if (!list.length) return;
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    await execFileAsync(cli, ["mail", "label", "--ids", list.join(","), "--remove", label], { cwd });
+  }
+
+  async clearLabels(ids) {
+    const list = Array.isArray(ids) ? ids.map((v) => String(v).trim()).filter(Boolean) : [];
+    if (!list.length) return;
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    await execFileAsync(cli, ["mail", "label", "--ids", list.join(","), "--clear"], { cwd });
+  }
+
+  async getLabelCounts() {
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    const { stdout } = await execFileAsync(cli, ["mail", "label-counts", "--json"], { cwd });
+    return JSON.parse(stdout);
+  }
 }
 
 class SwiftEAInboxView extends ItemView {
@@ -299,6 +337,8 @@ class SwiftEAInboxView extends ItemView {
     this.fsWatcher = null;
     this.pollInterval = null;
     this.pendingExternalRefresh = false;
+    this.activeLabelFilter = null;
+    this.labelCounts = {};
 
     this._onScroll = this.onScroll.bind(this);
     this._onKeyDownList = this.onKeyDownList.bind(this);
@@ -342,16 +382,21 @@ class SwiftEAInboxView extends ItemView {
       this.setSyncButtonState(true);
     }
 
-    this.columnsEl = this.headerEl.createDiv({ cls: "swiftea-inbox__columns" });
+    this.bodyWrapEl = this.contentEl.createDiv({ cls: "swiftea-inbox__body-wrap" });
+    this.sidebarEl = this.bodyWrapEl.createDiv({ cls: "swiftea-inbox__sidebar" });
+    this.mainEl = this.bodyWrapEl.createDiv({ cls: "swiftea-inbox__main" });
+
+    this.columnsEl = this.mainEl.createDiv({ cls: "swiftea-inbox__columns" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--select", text: "" });
+    this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--labels", text: "" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--sender", text: "Sender" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--subject", text: "Subject" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--preview", text: "Preview" });
     this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--date", text: "Date" });
 
-    this.statusContainerEl = this.contentEl.createDiv({ cls: "swiftea-inbox__status-container" });
+    this.statusContainerEl = this.mainEl.createDiv({ cls: "swiftea-inbox__status-container" });
 
-    this.scrollEl = this.contentEl.createDiv({ cls: "swiftea-inbox__scroll" });
+    this.scrollEl = this.mainEl.createDiv({ cls: "swiftea-inbox__scroll" });
     this.scrollEl.setAttr("tabindex", "0");
     this.scrollEl.addEventListener("scroll", this._onScroll, { passive: true });
     this.scrollEl.addEventListener("keydown", this._onKeyDownList);
@@ -359,15 +404,17 @@ class SwiftEAInboxView extends ItemView {
     this.spacerEl = this.scrollEl.createDiv({ cls: "swiftea-inbox__spacer" });
     this.rowsEl = this.spacerEl.createDiv({ cls: "swiftea-inbox__rows" });
 
-    this.hintEl = this.contentEl.createDiv({ cls: "swiftea-inbox__hint" });
+    this.hintEl = this.mainEl.createDiv({ cls: "swiftea-inbox__hint" });
     this.hintEl.setText(
-      "Click/Cmd+click/Shift+click select • Shift+↑/↓ range • Enter open • e archive • d delete • Esc close • g/G jump • Ctrl+u/d page"
+      "Click/Cmd+click/Shift+click select • Shift+↑/↓ range • Enter open • e archive • d delete • 1-5 label • 0 clear labels • Esc close • g/G jump • Ctrl+u/d page"
     );
 
     this.updateHeader();
+    this.renderSidebar();
     this.scrollEl.focus();
 
     await this.reload();
+    void this.refreshLabelCounts();
     this.startRealtimeRefresh();
   }
 
@@ -381,8 +428,12 @@ class SwiftEAInboxView extends ItemView {
   }
 
   updateHeader() {
-    const title = this.plugin.settings.title || "Inbox";
-    this.titleEl.setText(title);
+    if (this.activeLabelFilter) {
+      const info = TRIAGE_LABELS.find((l) => l.name === this.activeLabelFilter);
+      this.titleEl.setText(info ? info.short : this.activeLabelFilter);
+    } else {
+      this.titleEl.setText(this.plugin.settings.title || "Inbox");
+    }
     this.countEl.setText(this.emails.length ? `(${this.emails.length} emails)` : "");
   }
 
@@ -499,7 +550,7 @@ class SwiftEAInboxView extends ItemView {
     const loadedCount = Math.max(this.emails.length, this.plugin.settings.pageSize || DEFAULT_SETTINGS.pageSize);
 
     try {
-      const next = await this.source.listInbox({ offset: 0, limit: loadedCount });
+      const next = await this.source.listInbox({ offset: 0, limit: loadedCount, label: this.activeLabelFilter });
       this.emails = next;
 
       if (selectedEmailId) {
@@ -767,7 +818,7 @@ class SwiftEAInboxView extends ItemView {
     try {
       const pageSize = Math.max(20, Number(this.plugin.settings.pageSize) || DEFAULT_SETTINGS.pageSize);
       const offset = this.emails.length;
-      const items = await this.source.listInbox({ offset, limit: pageSize });
+      const items = await this.source.listInbox({ offset, limit: pageSize, label: this.activeLabelFilter });
       if (items.length < pageSize) this.hasMore = false;
       this.emails.push(...items);
       this.ensureSelection();
@@ -883,7 +934,35 @@ class SwiftEAInboxView extends ItemView {
       date.className = "swiftea-inbox__cell swiftea-inbox__cell--date";
       date.textContent = formatShortDate(email.date);
 
+      const labelsCell = document.createElement("div");
+      labelsCell.className = "swiftea-inbox__cell swiftea-inbox__cell--labels";
+      const emailLabels = email.labels || [];
+
+      if (emailLabels.length === 1) {
+        const info = TRIAGE_LABELS.find((l) => l.name === emailLabels[0]);
+        if (info) {
+          const pill = document.createElement("span");
+          pill.className = "swiftea-inbox__label-pill";
+          pill.textContent = info.short;
+          pill.style.background = info.color;
+          pill.style.color = "#fff";
+          labelsCell.appendChild(pill);
+        }
+      } else if (emailLabels.length > 1) {
+        for (const lbl of emailLabels) {
+          const info = TRIAGE_LABELS.find((l) => l.name === lbl);
+          if (info) {
+            const dot = document.createElement("span");
+            dot.className = "swiftea-inbox__label-dot";
+            dot.style.background = info.color;
+            dot.title = info.short;
+            labelsCell.appendChild(dot);
+          }
+        }
+      }
+
       row.appendChild(selectCell);
+      row.appendChild(labelsCell);
       row.appendChild(sender);
       row.appendChild(subject);
       row.appendChild(preview);
@@ -990,6 +1069,18 @@ class SwiftEAInboxView extends ItemView {
     if (!ctrl && key === "d") {
       evt.preventDefault();
       void this.deleteSelected();
+      return;
+    }
+
+    // Label keys 1-5 (toggle) and 0 (clear all)
+    if (!ctrl && key >= "0" && key <= "5") {
+      evt.preventDefault();
+      if (key === "0") {
+        void this.clearLabelsSelected();
+      } else {
+        const labelInfo = TRIAGE_LABELS[parseInt(key) - 1];
+        if (labelInfo) void this.toggleLabelSelected(labelInfo.name);
+      }
       return;
     }
   }
@@ -1122,6 +1213,18 @@ class SwiftEAInboxView extends ItemView {
       void this.deleteSelected();
       return;
     }
+
+    // Label keys 1-5 (toggle) and 0 (clear all) in overlay
+    if (!ctrlOrMeta && evt.key >= "0" && evt.key <= "5") {
+      evt.preventDefault();
+      if (evt.key === "0") {
+        void this.clearLabelsSelected();
+      } else {
+        const labelInfo = TRIAGE_LABELS[parseInt(evt.key) - 1];
+        if (labelInfo) void this.toggleLabelSelected(labelInfo.name);
+      }
+      return;
+    }
   }
 
   closeOverlay() {
@@ -1151,6 +1254,135 @@ class SwiftEAInboxView extends ItemView {
     const nextIndex = removedIndex - 1;
     const safeIndex = clamp(nextIndex, 0, this.emails.length - 1);
     void this.loadOverlayForIndex(safeIndex);
+  }
+
+  // --- Label Methods ---
+
+  async toggleLabelSelected(labelName) {
+    const ids = this.getSelectedIds();
+    if (!ids.length) return;
+
+    // If ALL selected emails already have this label → remove, otherwise → add
+    const allHaveLabel = ids.every((id) => {
+      const email = this.emails.find((e) => e.id === id);
+      return email?.labels?.includes(labelName);
+    });
+
+    if (allHaveLabel) {
+      for (const id of ids) {
+        const email = this.emails.find((e) => e.id === id);
+        if (email) email.labels = (email.labels || []).filter((l) => l !== labelName);
+      }
+      this.renderVisible();
+      const labelInfo = TRIAGE_LABELS.find((l) => l.name === labelName);
+      new Notice(`Removed "${labelInfo?.short || labelName}".`);
+
+      if (this.activeLabelFilter === labelName) {
+        this.removeEmailsByIdSet(new Set(ids));
+      }
+
+      const source = this.source;
+      this.actionQueue.enqueueBatch([...ids], `unlabel-${labelName}`, () =>
+        source.unlabelMessages(ids, labelName)
+      );
+    } else {
+      for (const id of ids) {
+        const email = this.emails.find((e) => e.id === id);
+        if (email && !(email.labels || []).includes(labelName)) {
+          email.labels = [...(email.labels || []), labelName];
+        }
+      }
+      this.renderVisible();
+      const labelInfo = TRIAGE_LABELS.find((l) => l.name === labelName);
+      new Notice(`Labeled "${labelInfo?.short || labelName}".`);
+
+      const source = this.source;
+      this.actionQueue.enqueueBatch([...ids], `label-${labelName}`, () =>
+        source.labelMessages(ids, labelName)
+      );
+    }
+
+    this.updateLabelCountsFromEmails();
+  }
+
+  async clearLabelsSelected() {
+    const ids = this.getSelectedIds();
+    if (!ids.length) return;
+
+    for (const id of ids) {
+      const email = this.emails.find((e) => e.id === id);
+      if (email) email.labels = [];
+    }
+    this.renderVisible();
+    new Notice("Labels cleared.");
+
+    if (this.activeLabelFilter) {
+      this.removeEmailsByIdSet(new Set(ids));
+    }
+
+    const source = this.source;
+    this.actionQueue.enqueueBatch([...ids], "clear-labels", () => source.clearLabels(ids));
+
+    this.updateLabelCountsFromEmails();
+  }
+
+  updateLabelCountsFromEmails() {
+    const counts = {};
+    for (const email of this.emails) {
+      for (const lbl of email.labels || []) {
+        counts[lbl] = (counts[lbl] || 0) + 1;
+      }
+    }
+    this.labelCounts = counts;
+    this.renderSidebar();
+  }
+
+  renderSidebar() {
+    if (!this.sidebarEl) return;
+    this.sidebarEl.empty();
+
+    // "Inbox" entry
+    const inboxItem = this.sidebarEl.createDiv({ cls: "swiftea-inbox__sidebar-item" });
+    if (!this.activeLabelFilter) inboxItem.addClass("is-active");
+    inboxItem.createSpan({ text: "Inbox" });
+    inboxItem.addEventListener("click", () => this.setLabelFilter(null));
+
+    // Separator
+    this.sidebarEl.createDiv({ cls: "swiftea-inbox__sidebar-separator" });
+
+    // Label entries
+    for (const label of TRIAGE_LABELS) {
+      const item = this.sidebarEl.createDiv({ cls: "swiftea-inbox__sidebar-item" });
+      if (this.activeLabelFilter === label.name) item.addClass("is-active");
+
+      const dot = item.createSpan({ cls: "swiftea-inbox__sidebar-dot" });
+      dot.style.background = label.color;
+
+      item.createSpan({ text: label.short });
+
+      const count = this.labelCounts[label.name] || 0;
+      if (count > 0) {
+        item.createSpan({ cls: "swiftea-inbox__sidebar-count", text: String(count) });
+      }
+
+      item.addEventListener("click", () => this.setLabelFilter(label.name));
+    }
+  }
+
+  setLabelFilter(label) {
+    this.activeLabelFilter = label;
+    this.renderSidebar();
+    this.updateHeader();
+    void this.reload();
+  }
+
+  async refreshLabelCounts() {
+    try {
+      this.labelCounts = await this.source.getLabelCounts();
+    } catch {
+      this.labelCounts = {};
+    }
+    this.renderSidebar();
   }
 }
 

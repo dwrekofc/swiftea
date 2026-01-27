@@ -62,7 +62,7 @@
 .swiftea-inbox__columns {
   margin-top: 8px;
   display: grid;
-  grid-template-columns: 26px minmax(140px, 220px) minmax(180px, 2fr) minmax(240px, 3fr) 86px;
+  grid-template-columns: 26px 56px minmax(140px, 220px) minmax(180px, 2fr) minmax(240px, 3fr) 86px;
   gap: 10px;
   font-size: 11px;
   color: var(--text-faint);
@@ -99,7 +99,7 @@
 
 .swiftea-inbox__row {
   display: grid;
-  grid-template-columns: 26px minmax(140px, 220px) minmax(180px, 2fr) minmax(240px, 3fr) 86px;
+  grid-template-columns: 26px 56px minmax(140px, 220px) minmax(180px, 2fr) minmax(240px, 3fr) 86px;
   gap: 10px;
   align-items: center;
   padding: 0 12px;
@@ -247,4 +247,90 @@
   font-family: var(--font-text);
   font-size: 13px;
   line-height: 1.5;
+}
+
+/* Sidebar + main layout */
+.swiftea-inbox__body-wrap {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.swiftea-inbox__sidebar {
+  width: 160px;
+  min-width: 160px;
+  border-right: 1px solid var(--background-modifier-border);
+  padding: 8px 0;
+  overflow-y: auto;
+}
+
+.swiftea-inbox__sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--text-normal);
+  cursor: pointer;
+  user-select: none;
+}
+
+.swiftea-inbox__sidebar-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.swiftea-inbox__sidebar-item.is-active {
+  background: var(--background-modifier-active-hover);
+  font-weight: 600;
+}
+
+.swiftea-inbox__sidebar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.swiftea-inbox__sidebar-count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.swiftea-inbox__sidebar-separator {
+  height: 1px;
+  margin: 6px 12px;
+  background: var(--background-modifier-border);
+}
+
+.swiftea-inbox__main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Label pills and dots in list rows */
+.swiftea-inbox__cell--labels {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.swiftea-inbox__label-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.swiftea-inbox__label-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
