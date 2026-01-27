@@ -488,8 +488,12 @@ class SwiftEAInboxView extends ItemView {
     try {
       if (ids.length === 1) {
         await this.source.archiveMessage(ids[0]);
-        if (this.overlayEl) this.closeOverlay();
+        const wasInOverlay = !!this.overlayEl;
+        const removedIndex = this.selectedIndex;
         this.removeEmailAtIndex(this.selectedIndex);
+        if (wasInOverlay) {
+          this.advanceOverlayAfterRemoval(removedIndex);
+        }
         new Notice("Archived.");
         return;
       }
@@ -531,8 +535,12 @@ class SwiftEAInboxView extends ItemView {
     try {
       if (ids.length === 1) {
         await this.source.deleteMessage(ids[0]);
-        if (this.overlayEl) this.closeOverlay();
+        const wasInOverlay = !!this.overlayEl;
+        const removedIndex = this.selectedIndex;
         this.removeEmailAtIndex(this.selectedIndex);
+        if (wasInOverlay) {
+          this.advanceOverlayAfterRemoval(removedIndex);
+        }
         new Notice("Deleted.");
         return;
       }
@@ -1098,6 +1106,16 @@ class SwiftEAInboxView extends ItemView {
       this.pendingExternalRefresh = false;
       this.scheduleExternalRefresh("overlay-closed");
     }
+  }
+
+  advanceOverlayAfterRemoval(removedIndex) {
+    if (this.emails.length === 0 || removedIndex === 0) {
+      this.closeOverlay();
+      return;
+    }
+    const nextIndex = removedIndex - 1;
+    const safeIndex = clamp(nextIndex, 0, this.emails.length - 1);
+    void this.loadOverlayForIndex(safeIndex);
   }
 }
 
