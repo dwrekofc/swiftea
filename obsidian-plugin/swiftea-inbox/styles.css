@@ -334,3 +334,34 @@
   border-radius: 50%;
   flex-shrink: 0;
 }
+
+/* AI category badges */
+.swiftea-inbox__category {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.swiftea-inbox__category--action-required {
+  background: rgba(235, 87, 87, 0.15);
+  color: var(--text-error, #eb5757);
+}
+
+.swiftea-inbox__category--internal-fyi {
+  background: rgba(47, 128, 237, 0.15);
+  color: var(--text-accent, #2f80ed);
+}
+
+.swiftea-inbox__category--meeting-invite {
+  background: rgba(111, 76, 255, 0.15);
+  color: #6f4cff;
+}
+
+.swiftea-inbox__category--noise {
+  background: rgba(130, 130, 130, 0.15);
+  color: var(--text-muted);
+}

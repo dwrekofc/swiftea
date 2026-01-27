@@ -707,6 +707,9 @@ public final class MailDatabase: @unchecked Sendable {
         if currentVersion < 10 {
             try applyMigrationV10(conn)
         }
+        if currentVersion < 11 {
+            try applyMigrationV11(conn)
+        }
     }
 
     /// Migration v1: Initial schema with all mail tables
@@ -1068,10 +1071,22 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Migration v11: AI screening columns (summary, category) on messages
+    private func applyMigrationV11(_ conn: Connection) throws {
+        do {
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN summary TEXT")
+            _ = try conn.execute("ALTER TABLE messages ADD COLUMN category TEXT")
+            _ = try conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_category ON messages(category)")
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (11)")
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
     // MARK: - Schema Version API
 
     /// The current schema version number (latest migration version)
-    public static let currentSchemaVersion = 10
+    public static let currentSchemaVersion = 11
 
     /// Description of each schema migration
     public static let migrationDescriptions: [Int: String] = [
@@ -1084,7 +1099,8 @@ public final class MailDatabase: @unchecked Sendable {
         7: "Large inbox query optimization indexes",
         8: "Addresses table for bulk copy from Envelope Index",
         9: "Composite index for view filter performance (account_id, mailbox_name, mailbox_status)",
-        10: "Message labels junction table for triage labels"
+        10: "Message labels junction table for triage labels",
+        11: "AI screening columns (summary, category) on messages"
     ]
 
     /// Get the current schema version from the database
@@ -2507,7 +2523,8 @@ public final class MailDatabase: @unchecked Sendable {
                 is_read,
                 is_flagged,
                 has_attachments,
-                (SELECT GROUP_CONCAT(label, ',') FROM message_labels WHERE message_id = messages.id) AS labels
+                (SELECT GROUP_CONCAT(label, ',') FROM message_labels WHERE message_id = messages.id) AS labels,
+                category
             FROM messages
             WHERE \(whereSQL)
             ORDER BY date_received DESC
@@ -2532,7 +2549,8 @@ public final class MailDatabase: @unchecked Sendable {
                     isRead: (getIntValue(row, 8) ?? 0) == 1,
                     isFlagged: (getIntValue(row, 9) ?? 0) == 1,
                     hasAttachments: (getIntValue(row, 10) ?? 0) == 1,
-                    labels: labels
+                    labels: labels,
+                    category: getStringValue(row, 12)
                 )
             )
         }
@@ -2573,6 +2591,96 @@ public final class MailDatabase: @unchecked Sendable {
             }
         }
         return counts
+    }
+
+    // MARK: - AI Screening
+
+    /// Update screening results for a message (summary and category only)
+    public func updateScreeningResult(messageId: String, summary: String, category: String) throws {
+        try executeWriteWithRetry(
+            "UPDATE messages SET summary = '\(escapeSql(summary))', category = '\(escapeSql(category))' WHERE id = '\(escapeSql(messageId))'"
+        )
+    }
+
+    /// Get messages that have not been screened yet (category IS NULL)
+    public func getUnscreenedMessages(limit: Int = 50, filter: MailViewFilter? = nil) throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var whereClauses = [
+            "category IS NULL",
+            "is_deleted = 0",
+            "(body_text IS NOT NULL OR body_html IS NOT NULL)"
+        ]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "messages") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
+
+        let result = try conn.query("""
+            SELECT * FROM messages
+            WHERE \(whereSQL)
+            ORDER BY date_received DESC
+            LIMIT \(limit)
+            """)
+
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
+    /// Get all screenable messages (for --force re-screening)
+    public func getAllScreenableMessages(limit: Int = 50, filter: MailViewFilter? = nil) throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var whereClauses = [
+            "is_deleted = 0",
+            "(body_text IS NOT NULL OR body_html IS NOT NULL)"
+        ]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "messages") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
+
+        let result = try conn.query("""
+            SELECT * FROM messages
+            WHERE \(whereSQL)
+            ORDER BY date_received DESC
+            LIMIT \(limit)
+            """)
+
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
+    }
+
+    /// Get the first recipient email address for a message
+    public func getFirstRecipientEmail(messageId: String) throws -> String? {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT email FROM recipients
+            WHERE message_id = '\(escapeSql(messageId))' AND type = 'to'
+            LIMIT 1
+            """)
+
+        for row in result {
+            return getStringValue(row, 0)
+        }
+        return nil
     }
 
     // MARK: - Message Labels
@@ -3310,6 +3418,10 @@ extension MailDatabase {
         let threadPosition = getIntValue(row, 27)
         let threadTotal = getIntValue(row, 28)
 
+        // Parse AI screening results (columns 29, 30) - added in migration V11
+        let summary = getStringValue(row, 29)
+        let category = getStringValue(row, 30)
+
         return MailMessage(
             id: getStringValue(row, 0) ?? "",
             appleRowId: getIntValue(row, 1),
@@ -3337,7 +3449,9 @@ extension MailDatabase {
             references: references,
             threadId: threadId,
             threadPosition: threadPosition,
-            threadTotal: threadTotal
+            threadTotal: threadTotal,
+            summary: summary,
+            category: category
         )
     }
 
@@ -3453,6 +3567,9 @@ public struct MailMessage: Sendable {
     // Thread position metadata (added in migration V6)
     public let threadPosition: Int?
     public let threadTotal: Int?
+    // AI screening results (added in migration V11)
+    public let summary: String?
+    public let category: String?
 
     public init(
         id: String,
@@ -3481,7 +3598,9 @@ public struct MailMessage: Sendable {
         references: [String] = [],
         threadId: String? = nil,
         threadPosition: Int? = nil,
-        threadTotal: Int? = nil
+        threadTotal: Int? = nil,
+        summary: String? = nil,
+        category: String? = nil
     ) {
         self.id = id
         self.appleRowId = appleRowId
@@ -3510,6 +3629,8 @@ public struct MailMessage: Sendable {
         self.threadId = threadId
         self.threadPosition = threadPosition
         self.threadTotal = threadTotal
+        self.summary = summary
+        self.category = category
     }
 }
 
@@ -3527,6 +3648,7 @@ public struct MailMessageSummary: Sendable {
     public let isFlagged: Bool
     public let hasAttachments: Bool
     public let labels: [String]
+    public let category: String?
 
     public init(
         id: String,
@@ -3540,7 +3662,8 @@ public struct MailMessageSummary: Sendable {
         isRead: Bool = false,
         isFlagged: Bool = false,
         hasAttachments: Bool = false,
-        labels: [String] = []
+        labels: [String] = [],
+        category: String? = nil
     ) {
         self.id = id
         self.senderName = senderName
@@ -3554,6 +3677,7 @@ public struct MailMessageSummary: Sendable {
         self.isFlagged = isFlagged
         self.hasAttachments = hasAttachments
         self.labels = labels
+        self.category = category
     }
 }
 

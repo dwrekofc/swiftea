@@ -215,7 +215,8 @@ class SwiftEAEmailSource {
       subject: String(item.subject || ""),
       preview: String(item.preview || ""),
       date: String(item.date || ""),
-      labels: Array.isArray(item.labels) ? item.labels : []
+      labels: Array.isArray(item.labels) ? item.labels : [],
+      category: String(item.category || "")
     }));
   }
 
@@ -925,6 +926,13 @@ class SwiftEAInboxView extends ItemView {
       const subject = document.createElement("div");
       subject.className = "swiftea-inbox__cell swiftea-inbox__cell--subject";
       subject.textContent = email.subject || "(No subject)";
+
+      if (email.category) {
+        const badge = document.createElement("span");
+        badge.className = "swiftea-inbox__category swiftea-inbox__category--" + email.category;
+        badge.textContent = email.category;
+        subject.appendChild(badge);
+      }
 
       const preview = document.createElement("div");
       preview.className = "swiftea-inbox__cell swiftea-inbox__cell--preview";

@@ -36,18 +36,21 @@ public struct VaultConfig: Codable {
     public var accounts: [BoundAccount]
     public var mail: MailSettings
     public var calendar: CalendarSettings
+    public var ai: AISettings
 
     public init(
         version: String = "1.0",
         accounts: [BoundAccount] = [],
         mail: MailSettings = MailSettings(),
-        calendar: CalendarSettings = CalendarSettings()
+        calendar: CalendarSettings = CalendarSettings(),
+        ai: AISettings = AISettings()
     ) {
         self.version = version
         self.createdAt = Date()
         self.accounts = accounts
         self.mail = mail
         self.calendar = calendar
+        self.ai = ai
     }
 
     /// Handle decoding with optional settings for backward compatibility
@@ -58,6 +61,7 @@ public struct VaultConfig: Codable {
         accounts = try container.decodeIfPresent([BoundAccount].self, forKey: .accounts) ?? []
         mail = try container.decodeIfPresent(MailSettings.self, forKey: .mail) ?? MailSettings()
         calendar = try container.decodeIfPresent(CalendarSettings.self, forKey: .calendar) ?? CalendarSettings()
+        ai = try container.decodeIfPresent(AISettings.self, forKey: .ai) ?? AISettings()
     }
 }
 
@@ -301,6 +305,72 @@ public struct CalendarSettings: Codable {
         case "calendar.export.outputDir":
             exportOutputDir = value.isEmpty ? nil : value
             return nil
+        default:
+            return "Unknown key: \(key)"
+        }
+    }
+
+    private func parseBool(_ value: String) -> Bool? {
+        switch value.lowercased() {
+        case "true", "1", "yes", "on":
+            return true
+        case "false", "0", "no", "off":
+            return false
+        default:
+            return nil
+        }
+    }
+}
+
+/// AI-specific configuration settings
+public struct AISettings: Codable {
+    /// OpenRouter model to use for screening
+    public var model: String
+
+    /// Whether to auto-screen new messages during sync
+    public var autoScreenOnSync: Bool
+
+    /// Available config keys for AI settings
+    public static let keys: [String: String] = [
+        "ai.model": "OpenRouter model ID for AI screening (default: google/gemini-2.0-flash-001)",
+        "ai.autoScreenOnSync": "Auto-screen new emails during sync: true or false"
+    ]
+
+    public init(
+        model: String = "google/gemini-2.0-flash-001",
+        autoScreenOnSync: Bool = true
+    ) {
+        self.model = model
+        self.autoScreenOnSync = autoScreenOnSync
+    }
+
+    /// Get a setting value by key
+    public func getValue(for key: String) -> String? {
+        switch key {
+        case "ai.model":
+            return model
+        case "ai.autoScreenOnSync":
+            return autoScreenOnSync ? "true" : "false"
+        default:
+            return nil
+        }
+    }
+
+    /// Set a setting value by key, returns error message if invalid
+    public mutating func setValue(_ value: String, for key: String) -> String? {
+        switch key {
+        case "ai.model":
+            if value.isEmpty {
+                return "Model cannot be empty."
+            }
+            model = value
+            return nil
+        case "ai.autoScreenOnSync":
+            if let bool = parseBool(value) {
+                autoScreenOnSync = bool
+                return nil
+            }
+            return "Invalid value: \(value). Must be 'true' or 'false'."
         default:
             return "Unknown key: \(key)"
         }

@@ -103,6 +103,7 @@ public struct Mail: ParsableCommand {
             """,
         subcommands: [
             MailSyncCommand.self,
+            MailScreenCommand.self,
             MailInboxCommand.self,
             MailSearchCommand.self,
             MailShowCommand.self,
@@ -472,6 +473,11 @@ struct MailSyncCommand: ParsableCommand {
                 try performAutoExport(mailDatabase: mailDatabase, vault: vault)
             }
 
+            // Auto-screen new messages if API key is available
+            if let vault = vault {
+                performAutoScreen(mailDatabase: mailDatabase, vault: vault)
+            }
+
             // Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
             try performBackwardSync(mailDatabase: mailDatabase)
         } catch let error as MailSyncError {
@@ -513,6 +519,59 @@ struct MailSyncCommand: ParsableCommand {
         } catch {
             // Log but don't fail sync if export has issues
             logError("Auto-export failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Auto-Screen
+
+    /// Screen newly synced messages using AI if API key is available
+    private func performAutoScreen(mailDatabase: MailDatabase, vault: VaultContext) {
+        guard AIScreeningService.hasAPIKey else { return }
+        guard vault.config.ai.autoScreenOnSync else { return }
+
+        do {
+            guard let apiKey = AIScreeningService.environmentAPIKey else { return }
+
+            let promptTemplate = try PromptTemplateManager.loadOrCreateTemplate(vaultRoot: vault.rootPath)
+            let service = AIScreeningService(
+                apiKey: apiKey,
+                model: vault.config.ai.model,
+                promptTemplate: promptTemplate
+            )
+
+            let messages = try mailDatabase.getUnscreenedMessages(limit: 50, filter: vault.mailViewFilter)
+            guard !messages.isEmpty else { return }
+
+            var screened = 0
+            var failed = 0
+            for message in messages {
+                let recipientEmail = try? mailDatabase.getFirstRecipientEmail(messageId: message.id)
+                let result = service.screen(message: message, recipientEmail: recipientEmail)
+                switch result {
+                case .success(let screening):
+                    try mailDatabase.updateScreeningResult(
+                        messageId: screening.messageId,
+                        summary: screening.summary,
+                        category: screening.category.rawValue
+                    )
+                    screened += 1
+                case .failure(let error):
+                    if verbose {
+                        logError("Screening failed for \(message.id): \(error.localizedDescription)")
+                    }
+                    failed += 1
+                }
+            }
+
+            if screened > 0 {
+                log("Auto-screen: \(screened) message(s) classified")
+            }
+            if failed > 0 && verbose {
+                log("Auto-screen: \(failed) message(s) failed")
+            }
+        } catch {
+            // Log but don't fail sync if screening has issues
+            logError("Auto-screen failed: \(error.localizedDescription)")
         }
     }
 
@@ -1208,6 +1267,124 @@ final class MailSyncDaemonController: NSObject {
     }
 }
 
+// MARK: - Screen Command
+
+struct MailScreenCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "screen",
+        abstract: "AI-screen emails to classify and summarize them",
+        discussion: """
+            Uses an AI model via OpenRouter to classify and summarize emails.
+            Each email gets a 1-sentence summary and a category:
+              action-required, internal-fyi, meeting-invite, noise
+
+            Requires the OPENROUTER_API_KEY environment variable to be set.
+            The prompt template can be customized at .swiftea/ai-prompt.md
+
+            EXAMPLES
+              swea mail screen                  # Screen unscreened emails
+              swea mail screen --force          # Re-screen all emails
+              swea mail screen --limit 10       # Screen up to 10
+              swea mail screen --dry-run        # Preview without API calls
+              swea mail screen --prompt-path    # Print path to prompt template
+            """
+    )
+
+    @Flag(name: .long, help: "Re-screen all emails, not just unscreened ones")
+    var force: Bool = false
+
+    @Option(name: .long, help: "Maximum number of emails to screen")
+    var limit: Int = 50
+
+    @Flag(name: .long, help: "Preview which emails would be screened without making API calls")
+    var dryRun: Bool = false
+
+    @Flag(name: .long, help: "Print the path to the AI prompt template and exit")
+    var promptPath: Bool = false
+
+    func run() throws {
+        let vault = try VaultContext.require()
+
+        // --prompt-path: just print the path and exit (no API key needed)
+        if promptPath {
+            print(PromptTemplateManager.promptPath(vaultRoot: vault.rootPath))
+            return
+        }
+
+        // Resolve database
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        // Get messages to screen
+        let messages: [MailMessage]
+        if force {
+            messages = try mailDatabase.getAllScreenableMessages(limit: limit, filter: resolved.viewFilter)
+        } else {
+            messages = try mailDatabase.getUnscreenedMessages(limit: limit, filter: resolved.viewFilter)
+        }
+
+        if messages.isEmpty {
+            print("No emails to screen.")
+            return
+        }
+
+        print("Found \(messages.count) email(s) to screen.")
+
+        if dryRun {
+            for msg in messages {
+                let date = msg.dateReceived.map {
+                    DateFormatter.localizedString(from: $0, dateStyle: .short, timeStyle: .short)
+                } ?? "Unknown"
+                let sender = msg.senderName ?? msg.senderEmail ?? "Unknown"
+                let existing = msg.category.map { " [\($0)]" } ?? ""
+                print("  \(date)  \(sender): \(msg.subject)\(existing)")
+            }
+            return
+        }
+
+        // Require API key for actual screening
+        guard let apiKey = AIScreeningService.environmentAPIKey else {
+            printError("Error: \(AIScreeningError.apiKeyMissing.localizedDescription)")
+            throw ExitCode.failure
+        }
+
+        let promptTemplate = try PromptTemplateManager.loadOrCreateTemplate(vaultRoot: vault.rootPath)
+        let service = AIScreeningService(
+            apiKey: apiKey,
+            model: vault.config.ai.model,
+            promptTemplate: promptTemplate
+        )
+
+        var screened = 0
+        var failed = 0
+        for (index, message) in messages.enumerated() {
+            let sender = message.senderName ?? message.senderEmail ?? "Unknown"
+            print("[\(index + 1)/\(messages.count)] Screening: \(sender) - \(message.subject)")
+
+            let recipientEmail = try? mailDatabase.getFirstRecipientEmail(messageId: message.id)
+            let result = service.screen(message: message, recipientEmail: recipientEmail)
+
+            switch result {
+            case .success(let screening):
+                try mailDatabase.updateScreeningResult(
+                    messageId: screening.messageId,
+                    summary: screening.summary,
+                    category: screening.category.rawValue
+                )
+                print("  -> \(screening.category.rawValue): \(screening.summary)")
+                screened += 1
+            case .failure(let error):
+                printError("  -> Failed: \(error.localizedDescription)")
+                failed += 1
+            }
+        }
+
+        print("\nScreening complete: \(screened) classified, \(failed) failed")
+    }
+}
+
 struct MailInboxCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "inbox",
@@ -1304,7 +1481,8 @@ struct MailInboxCommand: ParsableCommand {
                     "isRead": msg.isRead,
                     "isFlagged": msg.isFlagged,
                     "hasAttachments": msg.hasAttachments,
-                    "labels": msg.labels
+                    "labels": msg.labels,
+                    "category": msg.category ?? ""
                 ]
                 output.append(msgDict)
             }

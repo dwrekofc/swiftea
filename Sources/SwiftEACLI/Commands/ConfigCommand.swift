@@ -49,6 +49,11 @@ public struct Config: ParsableCommand {
         GlobalMailConfig.keys.keys.contains(key) || key == "database.path"
     }
 
+    /// Check if a key is an AI config key
+    private func isAIKey(_ key: String) -> Bool {
+        key.hasPrefix("ai.")
+    }
+
     public func run() throws {
         // Handle --list flag
         if list {
@@ -65,6 +70,16 @@ public struct Config: ParsableCommand {
                 print("    \(description)")
                 print("")
             }
+
+            print("AI configuration keys:\n")
+            for (key, description) in AISettings.keys.sorted(by: { $0.key < $1.key }) {
+                print("  \(key)")
+                print("    \(description)")
+                print("")
+            }
+            print("  ai.promptPath (read-only)")
+            print("    Path to the AI prompt template file")
+            print("")
             return
         }
 
@@ -125,8 +140,19 @@ public struct Config: ParsableCommand {
                 print("Setting in vault config for backward compatibility.")
             }
 
-            // Set a value
-            if let error = config.mail.setValue(value, for: key) {
+            // Route to appropriate settings section
+            let error: String?
+            if isAIKey(key) {
+                if key == "ai.promptPath" {
+                    print("Error: ai.promptPath is read-only.")
+                    throw ExitCode.failure
+                }
+                error = config.ai.setValue(value, for: key)
+            } else {
+                error = config.mail.setValue(value, for: key)
+            }
+
+            if let error = error {
                 print("Error: \(error)")
                 throw ExitCode.failure
             }
@@ -136,8 +162,22 @@ public struct Config: ParsableCommand {
             print("Set \(key) = \(value)")
 
         } else if let key = key {
-            // Get a specific value
-            if let value = config.mail.getValue(for: key) {
+            // Handle read-only computed keys
+            if key == "ai.promptPath" {
+                print(PromptTemplateManager.promptPath(vaultRoot: vault.rootPath))
+                return
+            }
+
+            // Get a specific value - try AI keys first, then mail
+            if isAIKey(key) {
+                if let value = config.ai.getValue(for: key) {
+                    print(value)
+                } else {
+                    print("Unknown AI config key: \(key)")
+                    print("Use 'swea config --list' to see available keys.")
+                    throw ExitCode.failure
+                }
+            } else if let value = config.mail.getValue(for: key) {
                 print(value)
             } else {
                 print("Unknown config key: \(key)")
@@ -154,6 +194,16 @@ public struct Config: ParsableCommand {
                 let displayValue = value.isEmpty ? "(not set)" : value
                 print("  \(key): \(displayValue)")
             }
+
+            // Show AI settings
+            print("")
+            print("AI Configuration:")
+            for key in AISettings.keys.keys.sorted() {
+                let value = config.ai.getValue(for: key) ?? "(not set)"
+                let displayValue = value.isEmpty ? "(not set)" : value
+                print("  \(key): \(displayValue)")
+            }
+            print("  ai.promptPath: \(PromptTemplateManager.promptPath(vaultRoot: vault.rootPath))")
 
             // Show view filter if set
             if let viewFilter = config.mail.viewFilter {
