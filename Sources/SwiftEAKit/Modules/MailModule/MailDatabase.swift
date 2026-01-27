@@ -1180,7 +1180,7 @@ public final class MailDatabase: @unchecked Sendable {
             )
             ON CONFLICT(id) DO UPDATE SET
                 apple_rowid = excluded.apple_rowid,
-                message_id = excluded.message_id,
+                message_id = COALESCE(excluded.message_id, messages.message_id),
                 mailbox_id = excluded.mailbox_id,
                 mailbox_name = excluded.mailbox_name,
                 account_id = excluded.account_id,
@@ -1193,15 +1193,15 @@ public final class MailDatabase: @unchecked Sendable {
                 is_flagged = excluded.is_flagged,
                 is_deleted = excluded.is_deleted,
                 has_attachments = excluded.has_attachments,
-                emlx_path = excluded.emlx_path,
-                body_text = excluded.body_text,
-                body_html = excluded.body_html,
+                emlx_path = COALESCE(excluded.emlx_path, messages.emlx_path),
+                body_text = COALESCE(excluded.body_text, messages.body_text),
+                body_html = COALESCE(excluded.body_html, messages.body_html),
                 updated_at = \(now),
                 mailbox_status = excluded.mailbox_status,
                 pending_sync_action = excluded.pending_sync_action,
                 last_known_mailbox_id = excluded.last_known_mailbox_id,
-                in_reply_to = excluded.in_reply_to,
-                threading_references = excluded.threading_references,
+                in_reply_to = COALESCE(excluded.in_reply_to, messages.in_reply_to),
+                threading_references = COALESCE(excluded.threading_references, messages.threading_references),
                 thread_id = excluded.thread_id,
                 thread_position = excluded.thread_position,
                 thread_total = excluded.thread_total
@@ -1234,6 +1234,28 @@ public final class MailDatabase: @unchecked Sendable {
             return try rowToMessage(row)
         }
         return nil
+    }
+
+    /// Get inbox messages missing RFC822 Message-ID (for repair pass).
+    /// These are messages synced before their .emlx files were available on disk.
+    public func getMessagesWithMissingMessageId() throws -> [MailMessage] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        let result = try conn.query("""
+            SELECT * FROM messages
+            WHERE (message_id IS NULL OR message_id = '')
+              AND mailbox_status = 'inbox'
+        """)
+
+        var messages: [MailMessage] = []
+        for row in result {
+            if let message = try? rowToMessage(row) {
+                messages.append(message)
+            }
+        }
+        return messages
     }
 
     /// Search messages using FTS
@@ -2119,7 +2141,7 @@ public final class MailDatabase: @unchecked Sendable {
                     )
                     ON CONFLICT(id) DO UPDATE SET
                         apple_rowid = excluded.apple_rowid,
-                        message_id = excluded.message_id,
+                        message_id = COALESCE(excluded.message_id, messages.message_id),
                         mailbox_id = excluded.mailbox_id,
                         mailbox_name = excluded.mailbox_name,
                         account_id = excluded.account_id,
@@ -2132,15 +2154,15 @@ public final class MailDatabase: @unchecked Sendable {
                         is_flagged = excluded.is_flagged,
                         is_deleted = excluded.is_deleted,
                         has_attachments = excluded.has_attachments,
-                        emlx_path = excluded.emlx_path,
-                        body_text = excluded.body_text,
-                        body_html = excluded.body_html,
+                        emlx_path = COALESCE(excluded.emlx_path, messages.emlx_path),
+                        body_text = COALESCE(excluded.body_text, messages.body_text),
+                        body_html = COALESCE(excluded.body_html, messages.body_html),
                         updated_at = \(timestamp),
                         mailbox_status = excluded.mailbox_status,
                         pending_sync_action = excluded.pending_sync_action,
                         last_known_mailbox_id = excluded.last_known_mailbox_id,
-                        in_reply_to = excluded.in_reply_to,
-                        threading_references = excluded.threading_references,
+                        in_reply_to = COALESCE(excluded.in_reply_to, messages.in_reply_to),
+                        threading_references = COALESCE(excluded.threading_references, messages.threading_references),
                         thread_id = excluded.thread_id,
                         thread_position = excluded.thread_position,
                         thread_total = excluded.thread_total

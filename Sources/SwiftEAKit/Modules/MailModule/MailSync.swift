@@ -342,6 +342,12 @@ public final class MailSync: @unchecked Sendable {
             // Report indexing phase (FTS rebuild happens in batchUpsertMessages defer block)
             reportProgress(.indexing, messagesProcessed, messagesProcessed, "Full-text index rebuilt")
 
+            // Repair pass: backfill messages synced before their .emlx files existed
+            let repairedCount = repairIncompleteMessages(mailBasePath: info.mailBasePath, errors: &errors)
+            if repairedCount > 0 {
+                reportProgress(.syncingMessages, 0, 1, "Repaired \(repairedCount) incomplete messages")
+            }
+
             // Phase 3: Thread detection - assign messages to threads
             let threadingResult = performThreadDetection(
                 for: processedMessages,
@@ -447,6 +453,12 @@ public final class MailSync: @unchecked Sendable {
             )
             result.threadsCreated = threadingResult.created
             result.threadsUpdated = threadingResult.updated
+        }
+
+        // Repair pass: backfill messages synced before their .emlx files existed
+        let repairedCount = repairIncompleteMessages(mailBasePath: info.mailBasePath, errors: &errors)
+        if repairedCount > 0 {
+            reportProgress(.syncingMessages, 0, 1, "Repaired \(repairedCount) incomplete messages")
         }
 
         // Phase 1.5: Detect missed messages (ROWID-based)
@@ -1273,6 +1285,84 @@ public final class MailSync: @unchecked Sendable {
         }
 
         return fsPath
+    }
+
+    // MARK: - Repair Incomplete Messages
+
+    /// Repair messages that were synced before their .emlx files were available on disk.
+    /// Finds inbox messages missing RFC822 Message-ID and attempts to extract it
+    /// from .emlx files that may now exist on disk.
+    ///
+    /// - Parameters:
+    ///   - mailBasePath: The base Mail directory path
+    ///   - errors: Array to append any repair errors to
+    /// - Returns: Number of messages successfully repaired
+    private func repairIncompleteMessages(mailBasePath: String, errors: inout [String]) -> Int {
+        do {
+            let incomplete = try mailDatabase.getMessagesWithMissingMessageId()
+            if incomplete.isEmpty { return 0 }
+
+            var repairedCount = 0
+            for message in incomplete {
+                guard let appleRowId = message.appleRowId,
+                      let mailboxId = message.mailboxId else { continue }
+
+                // Look up mailbox path from the cache (populated during sync setup)
+                guard let cached = mailboxCache[mailboxId],
+                      let mailboxPath = cached.path else { continue }
+
+                // Try to find .emlx file on disk
+                guard let emlxFilePath = discovery.emlxPath(
+                    forMessageId: appleRowId,
+                    mailboxPath: mailboxPath,
+                    mailBasePath: mailBasePath
+                ) else { continue }
+
+                // Parse .emlx to extract RFC822 Message-ID + body content
+                do {
+                    let parsed = try emlxParser.parse(path: emlxFilePath)
+                    guard let rfc822Id = parsed.messageId, !rfc822Id.isEmpty else { continue }
+
+                    // Build repaired message preserving all existing fields
+                    let repairedMessage = MailMessage(
+                        id: message.id,
+                        appleRowId: message.appleRowId,
+                        messageId: rfc822Id,
+                        mailboxId: message.mailboxId,
+                        mailboxName: message.mailboxName,
+                        accountId: message.accountId,
+                        subject: message.subject,
+                        senderName: message.senderName,
+                        senderEmail: message.senderEmail,
+                        dateSent: message.dateSent,
+                        dateReceived: message.dateReceived,
+                        isRead: message.isRead,
+                        isFlagged: message.isFlagged,
+                        isDeleted: message.isDeleted,
+                        hasAttachments: !parsed.attachments.isEmpty,
+                        emlxPath: emlxFilePath,
+                        bodyText: parsed.bodyText,
+                        bodyHtml: parsed.bodyHtml,
+                        mailboxStatus: message.mailboxStatus,
+                        pendingSyncAction: message.pendingSyncAction,
+                        lastKnownMailboxId: message.lastKnownMailboxId,
+                        inReplyTo: parsed.inReplyTo,
+                        references: parsed.references,
+                        threadId: message.threadId,
+                        threadPosition: message.threadPosition,
+                        threadTotal: message.threadTotal
+                    )
+                    try mailDatabase.upsertMessage(repairedMessage)
+                    repairedCount += 1
+                } catch {
+                    // .emlx still not available or parse failed — will retry next sync
+                }
+            }
+            return repairedCount
+        } catch {
+            errors.append("Repair pass failed: \(error.localizedDescription)")
+            return 0
+        }
     }
 
     // MARK: - Thread Detection
