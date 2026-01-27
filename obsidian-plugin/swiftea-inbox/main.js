@@ -76,6 +76,70 @@ async function copyToClipboard(text) {
   }
 }
 
+class BackgroundActionQueue {
+  constructor() {
+    this._queue = [];
+    this._processing = false;
+    this._processedIds = new Set();
+  }
+
+  get isProcessing() {
+    return this._processing;
+  }
+
+  get pending() {
+    return this._queue.length;
+  }
+
+  enqueue(id, type, action, maxAttempts = 5) {
+    if (this._processedIds.has(id)) return;
+    this._processedIds.add(id);
+    this._queue.push({ id, type, action, attempt: 0, maxAttempts });
+    this._drain();
+  }
+
+  enqueueBatch(ids, type, action, maxAttempts = 5) {
+    const key = ids.join(",");
+    if (this._processedIds.has(key)) return;
+    this._processedIds.add(key);
+    this._queue.push({ id: key, type, action, attempt: 0, maxAttempts });
+    this._drain();
+  }
+
+  resetDedup() {
+    this._processedIds.clear();
+  }
+
+  async _drain() {
+    if (this._processing) return;
+    this._processing = true;
+    try {
+      while (this._queue.length > 0) {
+        const item = this._queue[0];
+        try {
+          await item.action();
+          this._queue.shift();
+        } catch (e) {
+          item.attempt += 1;
+          if (item.attempt >= item.maxAttempts) {
+            this._queue.shift();
+            new Notice(`${item.type} failed after ${item.maxAttempts} attempts. See console.`);
+            // eslint-disable-next-line no-console
+            console.error(`[SwiftEA Inbox] ${item.type} failed permanently for ${item.id}:`, e);
+          } else {
+            const delay = Math.pow(2, item.attempt - 1) * 1000;
+            // eslint-disable-next-line no-console
+            console.warn(`[SwiftEA Inbox] ${item.type} attempt ${item.attempt} failed for ${item.id}, retrying in ${delay}ms`);
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      }
+    } finally {
+      this._processing = false;
+    }
+  }
+}
+
 class SwiftEAEmailSource {
   constructor(app, settings) {
     this.app = app;
@@ -228,7 +292,7 @@ class SwiftEAInboxView extends ItemView {
     this.isLoading = false;
     this.hasMore = true;
     this.overlayLoadSeq = 0;
-    this.actionInProgress = false;
+    this.actionQueue = new BackgroundActionQueue();
     this.overlayEmailId = null;
     this.manualSyncInProgress = false;
     this.externalRefreshTimer = null;
@@ -323,6 +387,7 @@ class SwiftEAInboxView extends ItemView {
   }
 
   async reload() {
+    this.actionQueue.resetDedup();
     this.emails = [];
     this.selectedIndex = 0;
     this.selectedIds = new Set();
@@ -372,17 +437,19 @@ class SwiftEAInboxView extends ItemView {
   startRealtimeRefresh() {
     this.stopRealtimeRefresh();
 
-    const vaultPath = this.source.getVaultPath();
-    const swifteaDir = path.join(vaultPath, "Swiftea");
+    // Watch the global swiftea database directory for changes.
+    // The centralized DB lives at ~/Library/Application Support/swiftea/mail.db.
+    const home = process.env.HOME || "";
+    const globalDbDir = path.join(home, "Library", "Application Support", "swiftea");
 
     try {
-      this.fsWatcher = fs.watch(swifteaDir, { persistent: false }, (_event, filename) => {
+      this.fsWatcher = fs.watch(globalDbDir, { persistent: false }, (_event, filename) => {
         if (filename && !String(filename).startsWith("mail.db")) return;
         this.scheduleExternalRefresh("fs-watch");
       });
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.warn("[SwiftEA Inbox] could not watch Swiftea/ for updates:", e);
+      console.warn("[SwiftEA Inbox] could not watch global swiftea DB for updates:", e);
     }
 
     // Fallback polling in case filesystem notifications are dropped.
@@ -419,7 +486,7 @@ class SwiftEAInboxView extends ItemView {
   }
 
   async refreshFromExternalChange(_reason) {
-    if (this.actionInProgress || this.isLoading || this.manualSyncInProgress) return;
+    if (this.actionQueue.isProcessing || this.isLoading || this.manualSyncInProgress) return;
 
     // If the overlay is open, avoid resetting list state while the user is reading.
     if (this.overlayEl) {
@@ -480,46 +547,29 @@ class SwiftEAInboxView extends ItemView {
   }
 
   async archiveSelected() {
-    if (this.actionInProgress) return;
     const ids = this.getSelectedIds();
     if (!ids.length) return;
+    const wasInOverlay = !!this.overlayEl;
 
-    this.actionInProgress = true;
-    try {
-      if (ids.length === 1) {
-        await this.source.archiveMessage(ids[0]);
-        const wasInOverlay = !!this.overlayEl;
-        const removedIndex = this.selectedIndex;
-        this.removeEmailAtIndex(this.selectedIndex);
-        if (wasInOverlay) {
-          this.advanceOverlayAfterRemoval(removedIndex);
-        }
-        new Notice("Archived.");
-        return;
-      }
-
-      await this.source.archiveMessages(ids);
-      if (this.overlayEl) this.closeOverlay();
+    if (ids.length === 1) {
+      const removedIndex = this.selectedIndex;
+      this.removeEmailAtIndex(this.selectedIndex);
+      if (wasInOverlay) this.advanceOverlayAfterRemoval(removedIndex);
+      new Notice("Archived.");
+      const source = this.source;
+      const id = ids[0];
+      this.actionQueue.enqueue(id, "archive", () => source.archiveMessage(id));
+    } else {
+      if (wasInOverlay) this.closeOverlay();
       this.removeEmailsByIdSet(new Set(ids));
       new Notice(`Archived ${ids.length} messages.`);
-    } catch (e) {
-      new Notice("Archive failed. See console for details.");
-      // eslint-disable-next-line no-console
-      console.error("[SwiftEA Inbox] archive failed:", e);
-      if (ids.length > 1) {
-        try {
-          await this.reload();
-        } catch {
-          // ignore
-        }
-      }
-    } finally {
-      this.actionInProgress = false;
+      const source = this.source;
+      const idsCopy = [...ids];
+      this.actionQueue.enqueueBatch(idsCopy, "archive", () => source.archiveMessages(idsCopy));
     }
   }
 
   async deleteSelected() {
-    if (this.actionInProgress) return;
     const ids = this.getSelectedIds();
     if (!ids.length) return;
 
@@ -531,37 +581,22 @@ class SwiftEAInboxView extends ItemView {
       if (!ok) return;
     }
 
-    this.actionInProgress = true;
-    try {
-      if (ids.length === 1) {
-        await this.source.deleteMessage(ids[0]);
-        const wasInOverlay = !!this.overlayEl;
-        const removedIndex = this.selectedIndex;
-        this.removeEmailAtIndex(this.selectedIndex);
-        if (wasInOverlay) {
-          this.advanceOverlayAfterRemoval(removedIndex);
-        }
-        new Notice("Deleted.");
-        return;
-      }
-
-      await this.source.deleteMessages(ids);
-      if (this.overlayEl) this.closeOverlay();
+    const wasInOverlay = !!this.overlayEl;
+    if (ids.length === 1) {
+      const removedIndex = this.selectedIndex;
+      this.removeEmailAtIndex(this.selectedIndex);
+      if (wasInOverlay) this.advanceOverlayAfterRemoval(removedIndex);
+      new Notice("Deleted.");
+      const source = this.source;
+      const id = ids[0];
+      this.actionQueue.enqueue(id, "delete", () => source.deleteMessage(id));
+    } else {
+      if (wasInOverlay) this.closeOverlay();
       this.removeEmailsByIdSet(new Set(ids));
       new Notice(`Deleted ${ids.length} messages.`);
-    } catch (e) {
-      new Notice("Delete failed. See console for details.");
-      // eslint-disable-next-line no-console
-      console.error("[SwiftEA Inbox] delete failed:", e);
-      if (ids.length > 1) {
-        try {
-          await this.reload();
-        } catch {
-          // ignore
-        }
-      }
-    } finally {
-      this.actionInProgress = false;
+      const source = this.source;
+      const idsCopy = [...ids];
+      this.actionQueue.enqueueBatch(idsCopy, "delete", () => source.deleteMessages(idsCopy));
     }
   }
 
@@ -1191,7 +1226,7 @@ module.exports = class SwiftEAInboxPlugin extends Plugin {
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn("[SwiftEA Inbox] could not ensure watch daemon is running:", e);
-      new Notice("SwiftEA: couldn't start background sync. Run `swea mail sync --watch` once from the vault root.");
+      new Notice("SwiftEA: couldn't start background sync. Run `swea mail sync --watch` from any terminal.");
     } finally {
       this._ensureWatchPromise = null;
     }

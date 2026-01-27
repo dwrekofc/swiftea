@@ -16,13 +16,21 @@ public struct Sync: ParsableCommand {
     public init() {}
 
     public func run() throws {
-        let vault = try VaultContext.require()
+        let vault = VaultContext.optional()
+        let dbPath = try GlobalConfigManager().resolvedDatabasePath()
+
         if status {
             print("Sync status - not yet implemented")
-            print("Using vault: \(vault.rootPath)")
+            print("Database: \(dbPath)")
+            if let vault = vault {
+                print("Vault: \(vault.rootPath)")
+            }
         } else {
             print("Syncing all modules")
-            print("Using vault: \(vault.rootPath)")
+            print("Database: \(dbPath)")
+            if let vault = vault {
+                print("Vault: \(vault.rootPath)")
+            }
             if watch {
                 print("Watch mode requested")
             }

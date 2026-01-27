@@ -109,6 +109,11 @@ public final class MailDatabase: @unchecked Sendable {
         close()
     }
 
+    /// Access the underlying database connection (for advanced operations like ATTACH)
+    public func getConnection() -> Connection? {
+        return connection
+    }
+
     // MARK: - Transient Write Retry
 
     private static func isTransientLockError(_ error: Error) -> Bool {
@@ -696,6 +701,9 @@ public final class MailDatabase: @unchecked Sendable {
         if currentVersion < 8 {
             try applyMigrationV8(conn)
         }
+        if currentVersion < 9 {
+            try applyMigrationV9(conn)
+        }
     }
 
     /// Migration v1: Initial schema with all mail tables
@@ -1018,10 +1026,25 @@ public final class MailDatabase: @unchecked Sendable {
         }
     }
 
+    /// Migration v9: Composite index for view filter performance
+    /// Enables fast filtering by account_id and mailbox_name in conjunction with status
+    private func applyMigrationV9(_ conn: Connection) throws {
+        do {
+            _ = try conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_account_mailbox_status
+                    ON messages(account_id, mailbox_name, mailbox_status)
+                """)
+
+            _ = try conn.execute("INSERT INTO schema_version (version) VALUES (9)")
+        } catch {
+            throw MailDatabaseError.migrationFailed(underlying: error)
+        }
+    }
+
     // MARK: - Schema Version API
 
     /// The current schema version number (latest migration version)
-    public static let currentSchemaVersion = 8
+    public static let currentSchemaVersion = 9
 
     /// Description of each schema migration
     public static let migrationDescriptions: [Int: String] = [
@@ -1032,7 +1055,8 @@ public final class MailDatabase: @unchecked Sendable {
         5: "Thread-messages junction table for many-to-many relationships",
         6: "Thread position metadata (thread_position, thread_total)",
         7: "Large inbox query optimization indexes",
-        8: "Addresses table for bulk copy from Envelope Index"
+        8: "Addresses table for bulk copy from Envelope Index",
+        9: "Composite index for view filter performance (account_id, mailbox_name, mailbox_status)"
     ]
 
     /// Get the current schema version from the database
@@ -1259,15 +1283,20 @@ public final class MailDatabase: @unchecked Sendable {
     }
 
     /// Search messages using FTS
-    public func searchMessages(query: String, limit: Int = 50, offset: Int = 0) throws -> [MailMessage] {
+    public func searchMessages(query: String, limit: Int = 50, offset: Int = 0, filter: MailViewFilter? = nil) throws -> [MailMessage] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
+        }
+
+        var extraWhere = ""
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "m") {
+            extraWhere = " AND \(filterClause)"
         }
 
         let result = try conn.query("""
             SELECT m.* FROM messages m
             JOIN messages_fts fts ON m.rowid = fts.rowid
-            WHERE messages_fts MATCH '\(escapeSql(escapeFts5Query(query)))'
+            WHERE messages_fts MATCH '\(escapeSql(escapeFts5Query(query)))'\(extraWhere)
             ORDER BY bm25(messages_fts)
             LIMIT \(limit) OFFSET \(offset)
             """)
@@ -1488,12 +1517,17 @@ public final class MailDatabase: @unchecked Sendable {
     }
 
     /// Search messages using structured filters and optional FTS
-    public func searchMessagesWithFilters(_ filter: SearchFilter, limit: Int = 50, offset: Int = 0) throws -> [MailMessage] {
+    public func searchMessagesWithFilters(_ filter: SearchFilter, limit: Int = 50, offset: Int = 0, viewFilter: MailViewFilter? = nil) throws -> [MailMessage] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
         var whereClauses: [String] = []
+
+        // Apply view filter (account/mailbox scoping)
+        if let viewFilterClause = viewFilter?.sqlWhereClause(tableAlias: "m") {
+            whereClauses.append(viewFilterClause)
+        }
 
         // Build WHERE clauses from filters
 
@@ -1608,14 +1642,20 @@ public final class MailDatabase: @unchecked Sendable {
     ///   - limit: Maximum number of messages to return
     ///   - offset: Number of messages to skip for pagination
     /// - Returns: Array of messages ordered by date received (newest first)
-    public func getAllMessages(limit: Int = 100, offset: Int = 0) throws -> [MailMessage] {
+    public func getAllMessages(limit: Int = 100, offset: Int = 0, filter: MailViewFilter? = nil) throws -> [MailMessage] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
+        var whereClauses = ["is_deleted = 0"]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "messages") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
+
         let query = """
             SELECT * FROM messages
-            WHERE is_deleted = 0
+            WHERE \(whereSQL)
             ORDER BY date_received DESC
             LIMIT \(limit) OFFSET \(offset)
             """
@@ -2372,14 +2412,20 @@ public final class MailDatabase: @unchecked Sendable {
     ///   - limit: Maximum number of messages to return (default: 100)
     ///   - offset: Number of messages to skip for pagination (default: 0)
     /// - Returns: Array of messages with the specified status
-    public func getMessagesByStatus(_ status: MailboxStatus, limit: Int = 100, offset: Int = 0) throws -> [MailMessage] {
+    public func getMessagesByStatus(_ status: MailboxStatus, limit: Int = 100, offset: Int = 0, filter: MailViewFilter? = nil) throws -> [MailMessage] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
+        var whereClauses = ["mailbox_status = '\(status.rawValue)'", "is_deleted = 0"]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "messages") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
+
         let result = try conn.query("""
             SELECT * FROM messages
-            WHERE mailbox_status = '\(status.rawValue)' AND is_deleted = 0
+            WHERE \(whereSQL)
             ORDER BY date_received DESC
             LIMIT \(limit) OFFSET \(offset)
             """)
@@ -2401,13 +2447,20 @@ public final class MailDatabase: @unchecked Sendable {
         mailboxStatus: MailboxStatus = .inbox,
         limit: Int = 100,
         offset: Int = 0,
-        previewLength: Int = 160
+        previewLength: Int = 160,
+        filter: MailViewFilter? = nil
     ) throws -> [MailMessageSummary] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
         let previewLen = max(1, previewLength)
+
+        var whereClauses = ["mailbox_status = '\(mailboxStatus.rawValue)'", "is_deleted = 0"]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "messages") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
 
         let result = try conn.query("""
             SELECT
@@ -2423,7 +2476,7 @@ public final class MailDatabase: @unchecked Sendable {
                 is_flagged,
                 has_attachments
             FROM messages
-            WHERE mailbox_status = '\(mailboxStatus.rawValue)' AND is_deleted = 0
+            WHERE \(whereSQL)
             ORDER BY date_received DESC
             LIMIT \(limit) OFFSET \(offset)
             """)
@@ -2452,14 +2505,20 @@ public final class MailDatabase: @unchecked Sendable {
 
     /// Get message counts grouped by mailbox status
     /// - Returns: Dictionary with status as key and count as value
-    public func getMessageCountByStatus() throws -> [MailboxStatus: Int] {
+    public func getMessageCountByStatus(filter: MailViewFilter? = nil) throws -> [MailboxStatus: Int] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
+        var whereClauses = ["is_deleted = 0"]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "messages") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
+
         let result = try conn.query("""
             SELECT mailbox_status, COUNT(*) as count FROM messages
-            WHERE is_deleted = 0
+            WHERE \(whereSQL)
             GROUP BY mailbox_status
             """)
 
@@ -2571,16 +2630,28 @@ public final class MailDatabase: @unchecked Sendable {
     }
 
     /// Get all threads, ordered by last date descending
-    public func getThreads(limit: Int = 100, offset: Int = 0) throws -> [Thread] {
+    public func getThreads(limit: Int = 100, offset: Int = 0, filter: MailViewFilter? = nil) throws -> [Thread] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
-        let result = try conn.query("""
-            SELECT * FROM threads
-            ORDER BY last_date DESC
-            LIMIT \(limit) OFFSET \(offset)
-            """)
+        var sql: String
+        if let threadFilter = filter?.sqlThreadWhereClause(threadAlias: "t") {
+            sql = """
+                SELECT t.* FROM threads t
+                WHERE \(threadFilter)
+                ORDER BY t.last_date DESC
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        } else {
+            sql = """
+                SELECT * FROM threads
+                ORDER BY last_date DESC
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        }
+
+        let result = try conn.query(sql)
 
         var threads: [Thread] = []
         for row in result {
@@ -2602,22 +2673,26 @@ public final class MailDatabase: @unchecked Sendable {
         limit: Int = 100,
         offset: Int = 0,
         sortBy: ThreadSortOrder = .date,
-        participant: String? = nil
+        participant: String? = nil,
+        filter: MailViewFilter? = nil
     ) throws -> [Thread] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
+        var whereClauses: [String] = []
+
+        // Add view filter
+        if let threadFilter = filter?.sqlThreadWhereClause(threadAlias: "t") {
+            whereClauses.append(threadFilter)
+        }
+
         var sql: String
         if let participant = participant {
             // Filter threads by participant (sender or recipient in any message)
-            // Uses EXISTS subqueries for better query plan optimization vs JOINs
-            // Note: LIKE with leading % cannot use indexes, but EXISTS limits the scan
-            // to messages within each thread rather than a full cross-join
             let escaped = escapeSql(participant.lowercased())
-            sql = """
-                SELECT t.* FROM threads t
-                WHERE EXISTS (
+            let participantClause = """
+                (EXISTS (
                     SELECT 1 FROM thread_messages tm
                     JOIN messages m ON tm.message_id = m.id
                     WHERE tm.thread_id = t.id
@@ -2629,14 +2704,23 @@ public final class MailDatabase: @unchecked Sendable {
                     JOIN recipients r ON m.id = r.message_id
                     WHERE tm.thread_id = t.id
                     AND LOWER(r.email) LIKE '%\(escaped)%'
-                )
-                ORDER BY t.\(sortBy.sqlOrderBy)
-                LIMIT \(limit) OFFSET \(offset)
+                ))
                 """
-        } else {
+            whereClauses.append(participantClause)
+        }
+
+        if whereClauses.isEmpty {
             sql = """
                 SELECT * FROM threads
                 ORDER BY \(sortBy.sqlOrderBy)
+                LIMIT \(limit) OFFSET \(offset)
+                """
+        } else {
+            let whereSQL = whereClauses.joined(separator: " AND ")
+            sql = """
+                SELECT t.* FROM threads t
+                WHERE \(whereSQL)
+                ORDER BY t.\(sortBy.sqlOrderBy)
                 LIMIT \(limit) OFFSET \(offset)
                 """
         }
@@ -2655,18 +2739,22 @@ public final class MailDatabase: @unchecked Sendable {
     /// Get count of threads matching filter criteria
     /// - Parameter participant: Filter by participant email (matches sender or recipient)
     /// - Returns: Count of matching threads
-    public func getThreadCount(participant: String? = nil) throws -> Int {
+    public func getThreadCount(participant: String? = nil, filter: MailViewFilter? = nil) throws -> Int {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
-        var sql: String
+        var whereClauses: [String] = []
+
+        // Add view filter
+        if let threadFilter = filter?.sqlThreadWhereClause(threadAlias: "t") {
+            whereClauses.append(threadFilter)
+        }
+
         if let participant = participant {
-            // Use EXISTS subqueries for efficient counting with participant filter
             let escaped = escapeSql(participant.lowercased())
-            sql = """
-                SELECT COUNT(*) FROM threads t
-                WHERE EXISTS (
+            let participantClause = """
+                (EXISTS (
                     SELECT 1 FROM thread_messages tm
                     JOIN messages m ON tm.message_id = m.id
                     WHERE tm.thread_id = t.id
@@ -2678,10 +2766,20 @@ public final class MailDatabase: @unchecked Sendable {
                     JOIN recipients r ON m.id = r.message_id
                     WHERE tm.thread_id = t.id
                     AND LOWER(r.email) LIKE '%\(escaped)%'
-                )
+                ))
                 """
-        } else {
+            whereClauses.append(participantClause)
+        }
+
+        var sql: String
+        if whereClauses.isEmpty {
             sql = "SELECT COUNT(*) FROM threads"
+        } else {
+            let whereSQL = whereClauses.joined(separator: " AND ")
+            sql = """
+                SELECT COUNT(*) FROM threads t
+                WHERE \(whereSQL)
+                """
         }
 
         let result = try conn.query(sql)
@@ -2692,14 +2790,20 @@ public final class MailDatabase: @unchecked Sendable {
     }
 
     /// Get all messages in a thread
-    public func getMessagesInThread(threadId: String, limit: Int = 100, offset: Int = 0) throws -> [MailMessage] {
+    public func getMessagesInThread(threadId: String, limit: Int = 100, offset: Int = 0, filter: MailViewFilter? = nil) throws -> [MailMessage] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
         }
 
+        var whereClauses = ["thread_id = '\(escapeSql(threadId))'", "is_deleted = 0"]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "messages") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
+
         let result = try conn.query("""
             SELECT * FROM messages
-            WHERE thread_id = '\(escapeSql(threadId))' AND is_deleted = 0
+            WHERE \(whereSQL)
             ORDER BY date_received ASC
             LIMIT \(limit) OFFSET \(offset)
             """)

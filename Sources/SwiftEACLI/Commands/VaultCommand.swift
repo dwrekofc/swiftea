@@ -6,7 +6,7 @@ public struct Vault: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "vault",
         abstract: "Manage swea vaults",
-        subcommands: [Init.self, VaultStatus.self, VaultBind.self, VaultUnbind.self]
+        subcommands: [Init.self, VaultStatus.self, VaultAssign.self, VaultUnassign.self, VaultBind.self, VaultUnbind.self]
     )
 
     public init() {}
@@ -40,7 +40,6 @@ public struct Init: ParsableCommand {
             print("Created:")
             print("  \(VaultManager.vaultDirName)/")
             print("    \(VaultManager.configFileName)")
-            print("    \(VaultManager.databaseFileName)")
             print("  \(VaultManager.dataFolderName)/")
             for folder in VaultManager.canonicalFolders {
                 print("    \(folder)/")
@@ -49,15 +48,16 @@ public struct Init: ParsableCommand {
             print("Vault version: \(config.version)")
             print("")
             print("Next steps:")
-            print("  1. Bind accounts with: swea vault bind")
+            print("  1. Assign accounts with: swea vault assign")
             print("  2. Sync mail data: swea mail sync")
             print("     (or start automatic sync: swea mail sync --watch)")
             print("  3. Export to files: swea mail export")
             print("")
-            print("Folder structure:")
-            print("  Swiftea/Mail/      - For exported mail files (.md)")
-            print("  exports/mail/      - Default export location")
-            print("  .swiftea/mail.db   - Synced mail database")
+            print("Mail database is stored globally at:")
+            print("  ~/Library/Application Support/swiftea/mail.db")
+            print("")
+            print("Vault view filter controls which accounts/mailboxes appear")
+            print("when running mail commands from this vault.")
         } catch let error as VaultError {
             throw ValidationError(error.localizedDescription)
         }
@@ -93,25 +93,227 @@ struct VaultStatus: ParsableCommand {
             print("Created: \(dateFormatter.string(from: config.createdAt))")
             print("")
 
-            if config.accounts.isEmpty {
-                print("No accounts bound.")
-                print("Run 'swea vault bind' to bind accounts.")
-            } else {
-                print("Bound accounts (\(config.accounts.count)):")
+            // Show view filter
+            if let viewFilter = config.mail.viewFilter, !viewFilter.isUnfiltered {
+                print("View Filter:")
+                if !viewFilter.accounts.isEmpty {
+                    print("  Accounts: \(viewFilter.accounts.joined(separator: ", "))")
+                }
+                if !viewFilter.includeAllMailboxes && !viewFilter.mailboxes.isEmpty {
+                    print("  Mailboxes: \(viewFilter.mailboxes.joined(separator: ", "))")
+                } else {
+                    print("  Mailboxes: all")
+                }
+            } else if !config.accounts.isEmpty {
+                // Legacy v1 format
+                print("Bound accounts (legacy, run 'swea vault assign' to migrate):")
                 for account in config.accounts {
                     print("  [\(account.type.rawValue)] \(account.name) (\(account.id))")
                 }
+            } else {
+                print("No view filter configured (showing all mail).")
+                print("Run 'swea vault assign' to select accounts for this vault.")
             }
+
+            print("")
+            print("Global database: \(GlobalConfigManager.defaultDatabasePath)")
         } catch {
             throw ValidationError("Failed to read vault config: \(error.localizedDescription)")
         }
     }
 }
 
+// MARK: - Vault Assign (v2 - sets view filter)
+
+struct VaultAssign: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "assign",
+        abstract: "Assign accounts to this vault's view filter",
+        discussion: """
+            Selects which mail accounts (and optionally mailboxes) this vault
+            displays from the global database.
+
+            The global database contains ALL accounts. The vault's view filter
+            controls which subset appears in inbox, search, and thread commands
+            when running from this vault.
+
+            EXAMPLES:
+              swea vault assign                    # Interactive selection
+              swea vault assign --account iCloud   # Assign specific account
+              swea vault assign --list             # List available accounts
+            """
+    )
+
+    @Option(name: .long, help: "Vault path (defaults to current directory)")
+    var path: String?
+
+    @Option(name: .long, help: "Account ID to assign (skips interactive selection)")
+    var account: String?
+
+    @Flag(name: .long, help: "List available accounts without assigning")
+    var list: Bool = false
+
+    func run() throws {
+        let vaultPath = path ?? FileManager.default.currentDirectoryPath
+        let vaultManager = VaultManager()
+        let discovery = AccountDiscovery()
+
+        guard vaultManager.isVault(at: vaultPath) else {
+            print("Not a vault: \(vaultPath)")
+            print("Run 'swea init' to create a vault first.")
+            throw ExitCode.failure
+        }
+
+        // Discover available accounts
+        print("Discovering accounts...")
+        let accounts = try discovery.discoverMailAccounts()
+
+        if accounts.isEmpty {
+            print("No Mail accounts found.")
+            print("Configure accounts in System Settings > Internet Accounts.")
+            throw ExitCode.failure
+        }
+
+        var config = try vaultManager.readConfig(from: vaultPath)
+        let currentFilter = config.mail.viewFilter ?? MailViewFilter()
+        let currentAccounts = Set(currentFilter.accounts)
+
+        // If --list flag, show accounts and current filter
+        if list {
+            print("\nAvailable mail accounts:")
+            for (index, acct) in accounts.enumerated() {
+                let emailStr = acct.email.map { " <\($0)>" } ?? ""
+                let assigned = currentAccounts.contains(acct.id) ? " [assigned]" : ""
+                print("  \(index + 1). \(acct.name)\(emailStr) (id: \(acct.id))\(assigned)")
+            }
+            return
+        }
+
+        // If --account specified, add just that account
+        if let accountId = account {
+            guard accounts.contains(where: { $0.id == accountId }) else {
+                print("Account not found: \(accountId)")
+                print("\nAvailable accounts:")
+                for acct in accounts {
+                    print("  \(acct.id) - \(acct.name)")
+                }
+                throw ExitCode.failure
+            }
+
+            var newAccounts = currentFilter.accounts
+            if !newAccounts.contains(accountId) {
+                newAccounts.append(accountId)
+            }
+            config.mail.viewFilter = MailViewFilter(
+                accounts: newAccounts,
+                mailboxes: currentFilter.mailboxes,
+                includeAllMailboxes: currentFilter.includeAllMailboxes
+            )
+            try vaultManager.writeConfig(config, to: vaultPath)
+            print("Assigned account '\(accountId)' to vault view filter.")
+            return
+        }
+
+        // Interactive selection
+        print("\nAvailable mail accounts (enter numbers to select, comma-separated):")
+        for (index, acct) in accounts.enumerated() {
+            let emailStr = acct.email.map { " <\($0)>" } ?? ""
+            let assigned = currentAccounts.contains(acct.id) ? " [assigned]" : ""
+            print("  \(index + 1). \(acct.name)\(emailStr) (id: \(acct.id))\(assigned)")
+        }
+
+        print("\nEnter selection (e.g., 1,2,3) or 'all' for all accounts: ", terminator: "")
+
+        guard let input = readLine()?.trimmingCharacters(in: .whitespaces), !input.isEmpty else {
+            print("No selection made.")
+            return
+        }
+
+        let selectedAccounts: [DiscoveredAccount]
+        if input.lowercased() == "all" {
+            selectedAccounts = accounts
+        } else {
+            let indices = input.split(separator: ",")
+                .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+                .map { $0 - 1 }
+                .filter { $0 >= 0 && $0 < accounts.count }
+            selectedAccounts = indices.map { accounts[$0] }
+        }
+
+        if selectedAccounts.isEmpty {
+            print("No valid accounts selected.")
+            return
+        }
+
+        let selectedIds = selectedAccounts.map { $0.id }
+        config.mail.viewFilter = MailViewFilter(
+            accounts: selectedIds,
+            mailboxes: [],
+            includeAllMailboxes: true
+        )
+        try vaultManager.writeConfig(config, to: vaultPath)
+
+        print("\nView filter updated with \(selectedIds.count) account(s):")
+        for acct in selectedAccounts {
+            let emailStr = acct.email.map { " <\($0)>" } ?? ""
+            print("  \(acct.name)\(emailStr)")
+        }
+    }
+}
+
+struct VaultUnassign: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "unassign",
+        abstract: "Clear or modify the vault's view filter",
+        discussion: """
+            Removes accounts from the vault's view filter.
+            Use without arguments to clear the entire filter (show all mail).
+
+            EXAMPLES:
+              swea vault unassign                    # Clear entire filter
+              swea vault unassign iCloud             # Remove specific account
+            """
+    )
+
+    @Option(name: .long, help: "Vault path (defaults to current directory)")
+    var path: String?
+
+    @Argument(help: "Account ID to remove from filter (omit to clear all)")
+    var accountId: String?
+
+    func run() throws {
+        let vaultPath = path ?? FileManager.default.currentDirectoryPath
+        let vaultManager = VaultManager()
+
+        guard vaultManager.isVault(at: vaultPath) else {
+            print("Not a vault: \(vaultPath)")
+            throw ExitCode.failure
+        }
+
+        var config = try vaultManager.readConfig(from: vaultPath)
+
+        if let accountId = accountId {
+            // Remove specific account
+            var filter = config.mail.viewFilter ?? MailViewFilter()
+            filter.accounts.removeAll { $0 == accountId }
+            config.mail.viewFilter = filter
+            try vaultManager.writeConfig(config, to: vaultPath)
+            print("Removed account '\(accountId)' from view filter.")
+        } else {
+            // Clear entire filter
+            config.mail.viewFilter = nil
+            try vaultManager.writeConfig(config, to: vaultPath)
+            print("View filter cleared. All mail will be shown.")
+        }
+    }
+}
+
+// MARK: - Legacy Bind/Unbind (deprecated, kept for backward compatibility)
+
 struct VaultBind: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "bind",
-        abstract: "Bind accounts to this vault"
+        abstract: "Bind accounts to this vault (deprecated, use 'vault assign')"
     )
 
     @Option(name: .long, help: "Vault path (defaults to current directory)")
@@ -242,12 +444,22 @@ struct VaultBind: ParsableCommand {
         // Update global registry
         try registry.bindAccount(account, toVault: vaultPath)
 
-        // Update vault config
+        // Update vault config (legacy accounts array + v2 viewFilter)
         var config = try vaultManager.readConfig(from: vaultPath)
         if !config.accounts.contains(where: { $0.id == account.id }) {
             config.accounts.append(BoundAccount(id: account.id, type: account.type, name: account.name))
-            try vaultManager.writeConfig(config, to: vaultPath)
         }
+
+        // Also update v2 viewFilter for mail accounts
+        if account.type == .mail {
+            var filter = config.mail.viewFilter ?? MailViewFilter()
+            if !filter.accounts.contains(account.id) {
+                filter.accounts.append(account.id)
+                config.mail.viewFilter = filter
+            }
+        }
+
+        try vaultManager.writeConfig(config, to: vaultPath)
 
         let emailStr = account.email.map { " <\($0)>" } ?? ""
         print("  Bound: [\(account.type.rawValue)] \(account.name)\(emailStr)")
@@ -257,7 +469,7 @@ struct VaultBind: ParsableCommand {
 struct VaultUnbind: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "unbind",
-        abstract: "Unbind accounts from this vault"
+        abstract: "Unbind accounts from this vault (deprecated, use 'vault unassign')"
     )
 
     @Option(name: .long, help: "Vault path (defaults to current directory)")

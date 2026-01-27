@@ -1,9 +1,9 @@
 # SwiftEA Makefile
 # Usage:
 #   make build    - Build release binary
-#   make install  - Build and install to /usr/local/bin
-#   make dev      - Build debug and install (faster builds)
-#   make uninstall - Remove from /usr/local/bin
+#   make install  - Build and install to ~/.local/bin (code-signed)
+#   make dev      - Build debug and install (code-signed, faster builds)
+#   make uninstall - Remove from ~/.local/bin
 #   make clean    - Clean build artifacts
 #   make test     - Run tests
 
@@ -12,19 +12,21 @@ BINARY_NAME = swea
 BUILD_DIR = .build
 RELEASE_BIN = $(BUILD_DIR)/release/$(BINARY_NAME)
 DEBUG_BIN = $(BUILD_DIR)/debug/$(BINARY_NAME)
+IDENTIFIER = com.swiftea.cli
 
 .PHONY: build install dev uninstall clean test help
 
 help:
 	@echo "SwiftEA Build Commands:"
 	@echo "  make build     - Build release binary"
-	@echo "  make install   - Build release and install to $(PREFIX)/bin"
-	@echo "  make dev       - Build debug and install (faster iteration)"
+	@echo "  make install   - Build release and install to $(PREFIX)/bin (code-signed)"
+	@echo "  make dev       - Build debug and install (code-signed, faster iteration)"
 	@echo "  make uninstall - Remove from $(PREFIX)/bin"
 	@echo "  make clean     - Clean build artifacts"
 	@echo "  make test      - Run tests"
 	@echo ""
 	@echo "After 'make install' or 'make dev', run 'swea' from anywhere."
+	@echo "Binary is ad-hoc signed as $(IDENTIFIER) for persistent macOS permissions."
 
 build:
 	@echo "Building release..."
@@ -40,15 +42,18 @@ install: build
 	@echo "Installing to $(PREFIX)/bin/$(BINARY_NAME)..."
 	@mkdir -p $(PREFIX)/bin
 	@cp -f $(RELEASE_BIN) $(PREFIX)/bin/$(BINARY_NAME)
-	@echo "Installed! Run 'swea --help' to verify."
+	@codesign -f -s - --identifier $(IDENTIFIER) $(PREFIX)/bin/$(BINARY_NAME)
+	@echo "Installed swea to $(PREFIX)/bin/$(BINARY_NAME) (signed as $(IDENTIFIER))"
 
-# Dev install uses symlink for faster iteration (no copy needed after rebuild)
+# Dev install copies binary (not symlink) to preserve code signature
 dev: debug
-	@echo "Installing dev symlink to $(PREFIX)/bin/$(BINARY_NAME)..."
+	@echo "Installing dev build to $(PREFIX)/bin/$(BINARY_NAME)..."
 	@mkdir -p $(PREFIX)/bin
-	@ln -sf "$(CURDIR)/$(DEBUG_BIN)" $(PREFIX)/bin/$(BINARY_NAME)
-	@echo "Installed! Run 'swea --help' to verify."
-	@echo "Note: Run 'make debug' or 'swift build' to update after code changes."
+	@rm -f $(PREFIX)/bin/$(BINARY_NAME)
+	@cp $(DEBUG_BIN) $(PREFIX)/bin/$(BINARY_NAME)
+	@codesign -f -s - --identifier $(IDENTIFIER) $(PREFIX)/bin/$(BINARY_NAME)
+	@echo "Dev install: $(PREFIX)/bin/$(BINARY_NAME) (signed as $(IDENTIFIER))"
+	@echo "Note: Run 'make dev' again after code changes."
 
 uninstall:
 	@echo "Removing $(PREFIX)/bin/$(BINARY_NAME)..."

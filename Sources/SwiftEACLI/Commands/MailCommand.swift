@@ -189,8 +189,8 @@ struct MailSyncCommand: ParsableCommand {
     @Option(name: .long, help: "Sync interval in seconds for watch mode (default: 60, minimum: 30)")
     var interval: Int?
 
-    @Option(name: .long, help: "Explicit vault path (for daemon mode when CWD is unreliable)")
-    var vaultPath: String?
+    @Option(name: .long, help: .hidden)
+    var vaultPath: String?  // Deprecated: kept for backward compat, now ignored
 
     // MARK: - Retry Configuration (for daemon mode)
 
@@ -270,10 +270,6 @@ struct MailSyncCommand: ParsableCommand {
         // Log startup for daemon mode debugging
         if isDaemonMode {
             log("mail sync started (daemon mode, pid=\(ProcessInfo.processInfo.processIdentifier))")
-            log("working directory: \(FileManager.default.currentDirectoryPath)")
-            if let explicitPath = vaultPath {
-                log("vault path (explicit): \(explicitPath)")
-            }
         }
 
         // In daemon mode, use retry with exponential backoff for transient errors
@@ -335,21 +331,13 @@ struct MailSyncCommand: ParsableCommand {
     }
 
     private func executeSync() throws {
-        // Use explicit vault path if provided (for daemon mode), otherwise use CWD
-        let vault: VaultContext
-        if let explicitPath = vaultPath {
-            vault = try VaultContext.require(at: explicitPath)
-        } else {
-            vault = try VaultContext.require()
-        }
-
-        // Handle --watch flag
+        // Handle --watch flag (global daemon, no vault needed)
         if watch {
-            try installWatchDaemon(vault: vault, verbose: verbose)
+            try installWatchDaemon(verbose: verbose)
             return
         }
 
-        // Handle --ensure-watch flag
+        // Handle --ensure-watch flag (global daemon, no vault needed)
         if ensureWatch {
             let daemonStatus = getDaemonStatus()
             if daemonStatus.isRunning {
@@ -358,7 +346,7 @@ struct MailSyncCommand: ParsableCommand {
                 }
                 return
             }
-            try installWatchDaemon(vault: vault, verbose: verbose)
+            try installWatchDaemon(verbose: verbose)
             return
         }
 
@@ -368,11 +356,15 @@ struct MailSyncCommand: ParsableCommand {
             return
         }
 
-        // Create mail database in vault's data folder
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        // Resolve global database (sync is always global)
+        let resolved = try DatabaseResolver.resolve()
+        let mailDatabase = resolved.database
+        let mailDbPath = try GlobalConfigManager().resolvedDatabasePath()
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
+
+        // Try to get vault context for export (optional - sync works without it)
+        let vault = VaultContext.optional()
 
         if verbose || isDaemonMode {
             log("Mail database: \(mailDbPath)")
@@ -388,7 +380,7 @@ struct MailSyncCommand: ParsableCommand {
         // Close the connection first since the daemon manages its own connections
         if daemon {
             mailDatabase.close()
-            try runPersistentDaemon(databasePath: mailDbPath, vault: vault)
+            try runPersistentDaemon(databasePath: mailDbPath)
             return
         }
 
@@ -429,7 +421,7 @@ struct MailSyncCommand: ParsableCommand {
 
         // Handle --bulk-copy flag: fast direct SQL copy for initial sync
         if bulkCopy {
-            try performBulkCopySync(mailDatabase: mailDatabase, vault: vault)
+            try performBulkCopySync(mailDatabase: mailDatabase)
             return
         }
 
@@ -460,7 +452,8 @@ struct MailSyncCommand: ParsableCommand {
             }
 
             // Auto-export new messages to Swiftea/Mail/ unless disabled
-            if !noExport {
+            // Export requires vault context for output directory
+            if !noExport, let vault = vault {
                 try performAutoExport(mailDatabase: mailDatabase, vault: vault)
             }
 
@@ -549,7 +542,7 @@ struct MailSyncCommand: ParsableCommand {
     /// not parse .emlx files for body content or threading headers.
     ///
     /// After bulk copy, run a normal sync to populate body content and detect threads.
-    private func performBulkCopySync(mailDatabase: MailDatabase, vault: VaultContext) throws {
+    private func performBulkCopySync(mailDatabase: MailDatabase) throws {
         let startTime = Date()
 
         log("Performing bulk copy from Apple Mail...")
@@ -596,7 +589,7 @@ struct MailSyncCommand: ParsableCommand {
 
     // MARK: - Status
 
-    private func showSyncStatus(mailDatabase: MailDatabase, vault: VaultContext) throws {
+    private func showSyncStatus(mailDatabase: MailDatabase, vault: VaultContext? = nil) throws {
         let summary = try mailDatabase.getSyncStatusSummary()
         let daemonStatus = getDaemonStatus()
 
@@ -645,7 +638,8 @@ struct MailSyncCommand: ParsableCommand {
 
         // Database location
         print("")
-        print("Database: \(vault.dataFolderPath)/mail.db")
+        let dbPath = (try? GlobalConfigManager().resolvedDatabasePath()) ?? "unknown"
+        print("Database: \(dbPath)")
     }
 
     private struct DaemonStatus {
@@ -719,7 +713,7 @@ struct MailSyncCommand: ParsableCommand {
         }
     }
 
-    private func installWatchDaemon(vault: VaultContext, verbose: Bool) throws {
+    private func installWatchDaemon(verbose: Bool) throws {
         let launchAgentPath = getLaunchAgentPath()
         let executablePath = ProcessInfo.processInfo.arguments[0]
 
@@ -738,20 +732,20 @@ struct MailSyncCommand: ParsableCommand {
             try FileManager.default.createDirectory(atPath: launchAgentsDir, withIntermediateDirectories: true)
         }
 
-        // Create log directory
-        let logDir = "\(vault.dataFolderPath)/logs"
+        // Create global log directory
+        let logDir = GlobalConfigManager.defaultLogDir
         if !FileManager.default.fileExists(atPath: logDir) {
             try FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         }
 
-        // Run initial sync before starting watch daemon (swiftea-7im.12)
-        // This ensures the database is populated before the daemon starts incremental syncs
+        // Run initial sync before starting watch daemon
         print("Running initial sync before starting watch daemon...")
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+        let configManager = GlobalConfigManager()
+        try configManager.ensureDirectories()
+        let mailDbPath = try configManager.resolvedDatabasePath()
         let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
 
-        // Sync will auto-detect incremental mode based on last_sync_time in database
         let sync = MailSync(mailDatabase: mailDatabase)
 
         do {
@@ -769,11 +763,7 @@ struct MailSyncCommand: ParsableCommand {
 
         mailDatabase.close()
 
-        // Generate plist content
-        // Uses --daemon mode for a persistent process with sleep/wake detection.
-        // KeepAlive ensures the daemon is restarted if it exits.
-        // Uses --vault-path to explicitly pass the vault location since launchd's
-        // WorkingDirectory is unreliable (CWD may be empty when daemon starts).
+        // Generate plist content for global daemon (no vault dependency)
         let syncInterval = effectiveSyncInterval
         let plist = """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -790,8 +780,6 @@ struct MailSyncCommand: ParsableCommand {
                     <string>--daemon</string>
                     <string>--interval</string>
                     <string>\(syncInterval)</string>
-                    <string>--vault-path</string>
-                    <string>\(vault.rootPath)</string>
                 </array>
                 <key>RunAtLoad</key>
                 <true/>
@@ -801,8 +789,6 @@ struct MailSyncCommand: ParsableCommand {
                 <string>\(logDir)/mail-sync.log</string>
                 <key>StandardErrorPath</key>
                 <string>\(logDir)/mail-sync.log</string>
-                <key>WorkingDirectory</key>
-                <string>\(vault.rootPath)</string>
                 <key>EnvironmentVariables</key>
                 <dict>
                     <key>PATH</key>
@@ -898,19 +884,17 @@ struct MailSyncCommand: ParsableCommand {
 
     /// Run as a persistent daemon that syncs on startup, on a schedule, and on system wake.
     /// This mode is used internally by the LaunchAgent for sleep/wake-aware syncing.
-    private func runPersistentDaemon(databasePath: String, vault: VaultContext) throws {
+    private func runPersistentDaemon(databasePath: String) throws {
         let syncInterval = effectiveSyncInterval
-        let exportDir = (vault.dataFolderPath as NSString).appendingPathComponent("Mail")
 
         log("Starting persistent mail sync daemon (pid=\(ProcessInfo.processInfo.processIdentifier))")
         log("Sync interval: \(formatInterval(syncInterval))")
-        log("Export directory: \(exportDir)")
+        log("Database: \(databasePath)")
 
         // Create a daemon controller to handle sleep/wake events
         // Controller creates fresh database connections for each sync cycle
         let controller = MailSyncDaemonController(
             databasePath: databasePath,
-            exportDir: exportDir,
             syncIntervalSeconds: TimeInterval(syncInterval),
             logger: log
         )
@@ -932,7 +916,6 @@ struct MailSyncCommand: ParsableCommand {
 /// Uses NSWorkspace notifications to detect system wake and trigger incremental sync.
 final class MailSyncDaemonController: NSObject {
     private let databasePath: String
-    private let exportDir: String
     private let logger: (String) -> Void
     private var isSyncing = false
     private let syncQueue = DispatchQueue(label: "com.swiftea.mail.sync.daemon")
@@ -952,9 +935,8 @@ final class MailSyncDaemonController: NSObject {
     /// Track last sync time to debounce wake events
     private var lastSyncTime: Date?
 
-    init(databasePath: String, exportDir: String, syncIntervalSeconds: TimeInterval = 60, logger: @escaping (String) -> Void) {
+    init(databasePath: String, syncIntervalSeconds: TimeInterval = 60, logger: @escaping (String) -> Void) {
         self.databasePath = databasePath
-        self.exportDir = exportDir
         self.syncIntervalSeconds = syncIntervalSeconds
         self.logger = logger
         super.init()
@@ -1140,9 +1122,6 @@ final class MailSyncDaemonController: NSObject {
                     logger("  \(result.errors.count) warning(s)")
                 }
 
-                // Auto-export new messages after successful sync
-                performAutoExport(mailDatabase: db)
-
                 // Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
                 performBackwardSync(mailDatabase: db)
                 return
@@ -1187,34 +1166,6 @@ final class MailSyncDaemonController: NSObject {
         }
     }
 
-    /// Export newly synced messages to Swiftea/Mail/ as markdown files
-    /// Messages are grouped by conversation/thread for better organization.
-    private func performAutoExport(mailDatabase: MailDatabase) {
-        let exporter = MailExporter(mailDatabase: mailDatabase)
-
-        do {
-            let exportResult = try exporter.exportNewMessages(to: exportDir)
-
-            if exportResult.exported > 0 {
-                var details: [String] = []
-                if exportResult.threadsExported > 0 {
-                    details.append("\(exportResult.threadsExported) threads")
-                }
-                if exportResult.unthreadedExported > 0 {
-                    details.append("\(exportResult.unthreadedExported) unthreaded")
-                }
-                let detailStr = details.isEmpty ? "" : " (\(details.joined(separator: ", ")))"
-                logger("Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/\(detailStr)")
-            }
-
-            if !exportResult.errors.isEmpty {
-                logger("  \(exportResult.errors.count) export warning(s)")
-            }
-        } catch {
-            logger("ERROR: Auto-export failed: \(error.localizedDescription)")
-        }
-    }
-
     /// Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
     private func performBackwardSync(mailDatabase: MailDatabase) {
         let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
@@ -1239,130 +1190,6 @@ final class MailSyncDaemonController: NSObject {
         } catch {
             logger("ERROR: Backward sync failed: \(error.localizedDescription)")
         }
-    }
-}
-
-/// Perform a sync in daemon mode with retry logic.
-/// This is a standalone function for use during daemon startup.
-private func performDaemonSync(mailDatabase: MailDatabase, exportDir: String) {
-    let maxRetryAttempts = 5
-    let baseRetryDelay: TimeInterval = 2.0
-    let maxRetryDelay: TimeInterval = 60.0
-
-    var attempt = 0
-
-    while attempt < maxRetryAttempts {
-        do {
-            let sync = MailSync(mailDatabase: mailDatabase)
-            let result = try sync.sync()
-
-            let timestamp = ISO8601DateFormatter().string(from: Date())
-            fputs("[\(timestamp)] Sync complete: +\(result.messagesAdded) ~\(result.messagesUpdated) (\(String(format: "%.2f", result.duration))s)\n", stdout)
-            fflush(stdout)
-
-            // Auto-export new messages after successful sync
-            performDaemonAutoExport(mailDatabase: mailDatabase, exportDir: exportDir)
-
-            // Process pending backward sync actions (archive/delete from SwiftEA to Apple Mail)
-            performDaemonBackwardSync(mailDatabase: mailDatabase)
-            return
-
-        } catch {
-            attempt += 1
-
-            let description = "\(String(reflecting: error)) | \(error.localizedDescription)".lowercased()
-            let isTransient = description.contains("locked") ||
-                              description.contains("busy") ||
-                              description.contains("timeout") ||
-                              description.contains("temporarily") ||
-                              description.contains("try again")
-
-            if isTransient && attempt < maxRetryAttempts {
-                let delay = min(baseRetryDelay * pow(2.0, Double(attempt - 1)), maxRetryDelay)
-                let jitter = delay * Double.random(in: 0.1...0.2)
-                let totalDelay = delay + jitter
-
-                let timestamp = ISO8601DateFormatter().string(from: Date())
-                fputs("[\(timestamp)] Transient error (attempt \(attempt)/\(maxRetryAttempts)): \(String(reflecting: error))\n", stdout)
-                fputs("[\(timestamp)] Retrying in \(String(format: "%.1f", totalDelay))s...\n", stdout)
-                fflush(stdout)
-
-                Thread.sleep(forTimeInterval: totalDelay)
-            } else {
-                let timestamp = ISO8601DateFormatter().string(from: Date())
-                fputs("[\(timestamp)] ERROR: Initial sync failed: \(String(reflecting: error))\n", stderr)
-                fflush(stderr)
-                return
-            }
-        }
-    }
-}
-
-/// Perform auto-export in daemon mode
-/// Messages are grouped by conversation/thread for better organization.
-private func performDaemonAutoExport(mailDatabase: MailDatabase, exportDir: String) {
-    let exporter = MailExporter(mailDatabase: mailDatabase)
-
-    do {
-        let exportResult = try exporter.exportNewMessages(to: exportDir)
-
-        if exportResult.exported > 0 {
-            let timestamp = ISO8601DateFormatter().string(from: Date())
-            var details: [String] = []
-            if exportResult.threadsExported > 0 {
-                details.append("\(exportResult.threadsExported) threads")
-            }
-            if exportResult.unthreadedExported > 0 {
-                details.append("\(exportResult.unthreadedExported) unthreaded")
-            }
-            let detailStr = details.isEmpty ? "" : " (\(details.joined(separator: ", ")))"
-            fputs("[\(timestamp)] Auto-export: \(exportResult.exported) message(s) to Swiftea/Mail/\(detailStr)\n", stdout)
-            fflush(stdout)
-        }
-
-        if !exportResult.errors.isEmpty {
-            let timestamp = ISO8601DateFormatter().string(from: Date())
-            fputs("[\(timestamp)]   \(exportResult.errors.count) export warning(s)\n", stdout)
-            fflush(stdout)
-        }
-    } catch {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        fputs("[\(timestamp)] ERROR: Auto-export failed: \(error.localizedDescription)\n", stderr)
-        fflush(stderr)
-    }
-}
-
-/// Process pending backward sync actions in daemon mode (archive/delete from SwiftEA to Apple Mail)
-private func performDaemonBackwardSync(mailDatabase: MailDatabase) {
-    let backwardSync = MailSyncBackward(mailDatabase: mailDatabase)
-
-    do {
-        let result = try backwardSync.processPendingActions()
-
-        // Log results if any actions were processed
-        if result.archived > 0 || result.deleted > 0 {
-            let timestamp = ISO8601DateFormatter().string(from: Date())
-            fputs("[\(timestamp)] Backward sync: \(result.archived) archived, \(result.deleted) deleted\n", stdout)
-            fflush(stdout)
-        }
-
-        // Log warnings for failed actions
-        if result.failed > 0 {
-            let timestamp = ISO8601DateFormatter().string(from: Date())
-            fputs("[\(timestamp)] WARNING: Backward sync failed for \(result.failed) message(s)\n", stdout)
-            fflush(stdout)
-            for error in result.errors.prefix(3) {
-                fputs("[\(timestamp)]   - \(error)\n", stdout)
-            }
-            if result.errors.count > 3 {
-                fputs("[\(timestamp)]   ... and \(result.errors.count - 3) more errors\n", stdout)
-            }
-            fflush(stdout)
-        }
-    } catch {
-        let timestamp = ISO8601DateFormatter().string(from: Date())
-        fputs("[\(timestamp)] ERROR: Backward sync failed: \(error.localizedDescription)\n", stderr)
-        fflush(stderr)
     }
 }
 
@@ -1413,10 +1240,9 @@ struct MailInboxCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let vault = VaultContext.optional()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -1425,7 +1251,8 @@ struct MailInboxCommand: ParsableCommand {
             mailboxStatus: mailboxStatus,
             limit: limit,
             offset: offset,
-            previewLength: previewLength
+            previewLength: previewLength,
+            filter: resolved.viewFilter
         )
 
         if json {
@@ -1552,11 +1379,9 @@ struct MailSearchCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let vault = VaultContext.optional()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -1586,10 +1411,10 @@ struct MailSearchCommand: ParsableCommand {
         // Use structured search if we have filters, otherwise fall back to basic FTS
         let results: [MailMessage]
         if filter.hasFilters || filter.hasFreeText {
-            results = try mailDatabase.searchMessagesWithFilters(filter, limit: limit)
+            results = try mailDatabase.searchMessagesWithFilters(filter, limit: limit, viewFilter: resolved.viewFilter)
         } else {
             // Empty query - show recent messages
-            results = try mailDatabase.getAllMessages(limit: limit)
+            results = try mailDatabase.getAllMessages(limit: limit, filter: resolved.viewFilter)
         }
 
         if results.isEmpty {
@@ -1683,11 +1508,8 @@ struct MailShowCommand: ParsableCommand {
     var json: Bool = false
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let resolved = try DatabaseResolver.resolve()
+        let mailDatabase = resolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -1873,11 +1695,9 @@ struct MailThreadCommand: ParsableCommand {
     var format: ThreadOutputFormat = .text
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let vault = VaultContext.optional()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -2221,11 +2041,9 @@ struct MailThreadsCommand: ParsableCommand {
     var format: ThreadOutputFormat = .text
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let vault = VaultContext.optional()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -2234,7 +2052,8 @@ struct MailThreadsCommand: ParsableCommand {
             limit: limit,
             offset: offset,
             sortBy: sort.toDbSortOrder(),
-            participant: participant
+            participant: participant,
+            filter: resolved.viewFilter
         )
 
         if threads.isEmpty {
@@ -2259,7 +2078,7 @@ struct MailThreadsCommand: ParsableCommand {
             return
         }
 
-        let totalCount = try mailDatabase.getThreadCount(participant: participant)
+        let totalCount = try mailDatabase.getThreadCount(participant: participant, filter: resolved.viewFilter)
 
         switch format {
         case .json:
@@ -2583,6 +2402,8 @@ struct MailExportCommand: ParsableCommand {
 
     func run() throws {
         let vault = try VaultContext.require()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
 
         // Determine output directory (default: Swiftea/Mail/ for Obsidian compatibility)
         let outputDir: String
@@ -2599,8 +2420,6 @@ struct MailExportCommand: ParsableCommand {
         }
 
         // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -2916,6 +2735,8 @@ struct MailExportThreadsCommand: ParsableCommand {
 
     func run() throws {
         let vault = try VaultContext.require()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
 
         // Determine output directory (default: Swiftea/Threads/)
         let outputDir: String
@@ -2932,8 +2753,6 @@ struct MailExportThreadsCommand: ParsableCommand {
         }
 
         // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -3273,11 +3092,8 @@ struct MailArchiveCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let resolved = try DatabaseResolver.resolve()
+        let mailDatabase = resolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -3371,11 +3187,8 @@ struct MailDeleteCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let resolved = try DatabaseResolver.resolve()
+        let mailDatabase = resolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -3464,11 +3277,8 @@ struct MailMoveCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let dbResolved = try DatabaseResolver.resolve()
+        let mailDatabase = dbResolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -3540,11 +3350,8 @@ struct MailFlagCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let dbResolved = try DatabaseResolver.resolve()
+        let mailDatabase = dbResolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -3610,11 +3417,8 @@ struct MailMarkCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let dbResolved = try DatabaseResolver.resolve()
+        let mailDatabase = dbResolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -3686,11 +3490,8 @@ struct MailReplyCommand: ParsableCommand {
     }
 
     func run() throws {
-        let vault = try VaultContext.require()
-
-        // Open mail database
-        let mailDbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
-        let mailDatabase = MailDatabase(databasePath: mailDbPath)
+        let dbResolved = try DatabaseResolver.resolve()
+        let mailDatabase = dbResolved.database
         try mailDatabase.initialize()
         defer { mailDatabase.close() }
 
@@ -3799,8 +3600,6 @@ struct MailComposeCommand: ParsableCommand {
     }
 
     func run() throws {
-        _ = try VaultContext.require()
-
         if dryRun {
             print("[DRY RUN] Would compose new message:")
             print("  To: \(to)")
@@ -3893,8 +3692,8 @@ struct MailMigrateCommand: ParsableCommand {
         if let customPath = database {
             dbPath = customPath
         } else {
-            let vault = try VaultContext.require()
-            dbPath = (vault.dataFolderPath as NSString).appendingPathComponent("mail.db")
+            let configManager = GlobalConfigManager()
+            dbPath = try configManager.resolvedDatabasePath()
         }
 
         // Check if database file exists (before migration)

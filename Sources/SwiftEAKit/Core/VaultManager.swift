@@ -61,9 +61,13 @@ public struct VaultConfig: Codable {
     }
 }
 
-/// Mail-specific configuration settings
+/// Mail-specific configuration settings for a vault
 public struct MailSettings: Codable {
+    /// View filter: which accounts/mailboxes this vault displays from the global DB (v2)
+    public var viewFilter: MailViewFilter?
+
     /// Custom path to Apple Mail data directory (nil = auto-detect)
+    /// DEPRECATED: Moved to global config. Kept for backward compatibility on read.
     public var mailDataPath: String?
 
     /// Default export format ("markdown" or "json")
@@ -76,22 +80,29 @@ public struct MailSettings: Codable {
     public var exportIncludeAttachments: Bool
 
     /// Watch daemon sync interval in seconds
+    /// DEPRECATED: Moved to global config. Kept for backward compatibility on read.
     public var watchSyncInterval: Int
 
     /// Whether watch daemon is enabled
+    /// DEPRECATED: Moved to global config. Kept for backward compatibility on read.
     public var watchEnabled: Bool
 
-    /// Available config keys for mail settings
+    /// Available config keys for vault mail settings
     public static let keys: [String: String] = [
-        "mail.dataPath": "Custom path to Apple Mail data directory (auto-detect if empty)",
         "mail.export.format": "Default export format: markdown or json",
         "mail.export.outputDir": "Default export output directory",
-        "mail.export.includeAttachments": "Include attachments by default: true or false",
-        "mail.watch.syncInterval": "Watch sync interval in seconds (default: 300)",
-        "mail.watch.enabled": "Enable watch daemon: true or false"
+        "mail.export.includeAttachments": "Include attachments by default: true or false"
+    ]
+
+    /// Deprecated keys that have moved to global config
+    public static let deprecatedKeys: [String: String] = [
+        "mail.dataPath": "Moved to global config. Use: swea config --global mail.dataPath <value>",
+        "mail.watch.syncInterval": "Moved to global config. Use: swea config --global mail.watch.syncInterval <value>",
+        "mail.watch.enabled": "Moved to global config. Use: swea config --global mail.watch.enabled <value>"
     ]
 
     public init(
+        viewFilter: MailViewFilter? = nil,
         mailDataPath: String? = nil,
         exportFormat: String = "markdown",
         exportOutputDir: String? = nil,
@@ -99,12 +110,25 @@ public struct MailSettings: Codable {
         watchSyncInterval: Int = 300,
         watchEnabled: Bool = true
     ) {
+        self.viewFilter = viewFilter
         self.mailDataPath = mailDataPath
         self.exportFormat = exportFormat
         self.exportOutputDir = exportOutputDir
         self.exportIncludeAttachments = exportIncludeAttachments
         self.watchSyncInterval = watchSyncInterval
         self.watchEnabled = watchEnabled
+    }
+
+    /// Handle decoding with optional viewFilter for backward compatibility
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        viewFilter = try container.decodeIfPresent(MailViewFilter.self, forKey: .viewFilter)
+        mailDataPath = try container.decodeIfPresent(String.self, forKey: .mailDataPath)
+        exportFormat = try container.decodeIfPresent(String.self, forKey: .exportFormat) ?? "markdown"
+        exportOutputDir = try container.decodeIfPresent(String.self, forKey: .exportOutputDir)
+        exportIncludeAttachments = try container.decodeIfPresent(Bool.self, forKey: .exportIncludeAttachments) ?? false
+        watchSyncInterval = try container.decodeIfPresent(Int.self, forKey: .watchSyncInterval) ?? 300
+        watchEnabled = try container.decodeIfPresent(Bool.self, forKey: .watchEnabled) ?? true
     }
 
     /// Get a setting value by key

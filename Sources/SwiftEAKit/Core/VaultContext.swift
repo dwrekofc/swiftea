@@ -48,6 +48,22 @@ public struct VaultContext {
         manager.dataFolder(for: rootPath)
     }
 
+    /// The mail view filter for this vault (derived from config).
+    /// Returns nil if no filtering is configured (show all mail).
+    public var mailViewFilter: MailViewFilter? {
+        if let viewFilter = config.mail.viewFilter, !viewFilter.isUnfiltered {
+            return viewFilter
+        }
+        // Legacy support: convert v1 accounts array to view filter
+        if !config.accounts.isEmpty {
+            let accountIds = config.accounts.filter { $0.type == .mail }.map { $0.id }
+            if !accountIds.isEmpty {
+                return MailViewFilter(accounts: accountIds, mailboxes: [], includeAllMailboxes: true)
+            }
+        }
+        return nil
+    }
+
     private init(rootPath: String, config: VaultConfig, manager: VaultManager) {
         self.rootPath = rootPath
         self.config = config
@@ -77,6 +93,18 @@ public struct VaultContext {
 
         let config = try manager.readConfig(from: absolutePath)
         return VaultContext(rootPath: absolutePath, config: config, manager: manager)
+    }
+
+    /// Try to get a vault context from the current working directory.
+    /// Returns nil if no vault is found (non-throwing alternative to require()).
+    public static func optional() -> VaultContext? {
+        try? require()
+    }
+
+    /// Try to get a vault context at the specified path.
+    /// Returns nil if no vault is found.
+    public static func optional(at path: String) -> VaultContext? {
+        try? require(at: path)
     }
 
     /// Check if a vault exists at the current working directory without throwing.
