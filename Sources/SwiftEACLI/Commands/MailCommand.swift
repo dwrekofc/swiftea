@@ -122,6 +122,8 @@ public struct Mail: ParsableCommand {
             // Label commands
             MailLabelCommand.self,
             MailLabelCountsCommand.self,
+            // Category commands
+            MailCategoryCountsCommand.self,
             // Database maintenance
             MailMigrateCommand.self
         ]
@@ -155,6 +157,7 @@ struct MailSyncCommand: ParsableCommand {
               swea mail sync --status     # Check sync/daemon status
               swea mail sync --stop       # Stop the daemon
               swea mail sync --restart    # Restart daemon (keeps permissions)
+              swea mail sync --purge-non-inbox  # Remove non-inbox messages (fix bulk copy)
             """
     )
 
@@ -193,6 +196,14 @@ struct MailSyncCommand: ParsableCommand {
         parse .emlx files for body content or threading headers.
         """)
     var bulkCopy: Bool = false
+
+    @Flag(name: .long, help: """
+        Purge non-inbox messages from the vault database. Removes messages that were \
+        incorrectly copied from non-inbox mailboxes (archive, trash, sent, junk, drafts). \
+        Preserves labels and AI categories on inbox messages. Use this to fix a database \
+        that contains too many messages from a previous bulk copy bug.
+        """)
+    var purgeNonInbox: Bool = false
 
     @Option(name: .long, help: "Sync interval in seconds for watch mode (default: 60, minimum: 30)")
     var interval: Int?
@@ -474,6 +485,16 @@ struct MailSyncCommand: ParsableCommand {
                     }
                 }
             }
+        }
+
+        // Handle --purge-non-inbox flag: remove non-inbox messages from vault database
+        if purgeNonInbox {
+            log("Purging non-inbox messages from vault database...")
+            let purgeResult = try mailDatabase.purgeNonInboxMessages()
+            log("Purge complete:")
+            log("  Messages deleted: \(purgeResult.messagesDeleted)")
+            log("  Orphaned threads cleaned: \(purgeResult.threadsDeleted)")
+            return
         }
 
         // Handle --bulk-copy flag: fast direct SQL copy for initial sync
@@ -1497,6 +1518,9 @@ struct MailInboxCommand: ParsableCommand {
     @Option(name: .long, help: "Filter by label (e.g., task, waiting, reference, read_later, expenses)")
     var label: String?
 
+    @Option(name: .long, help: "Filter by AI category (e.g., action-required, internal-fyi, meeting-invite, noise, unscreened)")
+    var category: String?
+
     @Flag(name: .long, help: "Exclude messages that have any triage label")
     var excludeLabeled: Bool = false
 
@@ -1532,7 +1556,8 @@ struct MailInboxCommand: ParsableCommand {
             previewLength: previewLength,
             filter: resolved.viewFilter,
             label: label,
-            excludeLabeled: excludeLabeled
+            excludeLabeled: excludeLabeled,
+            category: category
         )
 
         if json {
@@ -1743,6 +1768,47 @@ struct MailLabelCountsCommand: ParsableCommand {
             } else {
                 for (label, count) in counts.sorted(by: { $0.key < $1.key }) {
                     print("\(label): \(count)")
+                }
+            }
+        }
+    }
+}
+
+struct MailCategoryCountsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "category-counts",
+        abstract: "Get message counts per AI category",
+        discussion: """
+            Returns the number of inbox messages for each AI-assigned category.
+
+            EXAMPLES
+              swea mail category-counts --json
+            """
+    )
+
+    @Flag(name: .long, help: "Output as JSON")
+    var json: Bool = false
+
+    func run() throws {
+        let vault = VaultContext.optional()
+        let resolved = try DatabaseResolver.resolve(vaultContext: vault)
+        let mailDatabase = resolved.database
+        try mailDatabase.initialize()
+        defer { mailDatabase.close() }
+
+        let counts = try mailDatabase.getCategoryCounts(filter: resolved.viewFilter)
+
+        if json {
+            if let data = try? JSONSerialization.data(withJSONObject: counts, options: .prettyPrinted),
+               let jsonString = String(data: data, encoding: .utf8) {
+                print(jsonString)
+            }
+        } else {
+            if counts.isEmpty {
+                print("No categories found.")
+            } else {
+                for (category, count) in counts.sorted(by: { $0.key < $1.key }) {
+                    print("\(category): \(count)")
                 }
             }
         }

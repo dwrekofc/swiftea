@@ -9,11 +9,48 @@ const DEFAULT_SETTINGS = {
   cliPath: "swea",
   title: "Inbox",
   pageSize: 200,
-  confirmDelete: true
+  confirmDelete: true,
+  columns: {
+    widths: {},
+    order: ["sender", "subject", "preview", "date"],
+    sort: { column: null, direction: null }
+  }
 };
 
 const ROW_HEIGHT_PX = 44;
 const OVERSCAN_ROWS = 10;
+
+const COLUMN_DEFS = {
+  select:  { id: "select",  label: "",        pinned: true,  defaultWidth: "26px",  minWidth: 26,  sortable: false },
+  labels:  { id: "labels",  label: "",        pinned: true,  defaultWidth: "56px",  minWidth: 56,  sortable: false },
+  sender:  { id: "sender",  label: "Sender",  pinned: false, defaultWidth: "minmax(140px, 220px)", minWidth: 100, sortable: true },
+  subject: { id: "subject", label: "Subject", pinned: false, defaultWidth: "minmax(180px, 2fr)",   minWidth: 120, sortable: true },
+  preview: { id: "preview", label: "Preview", pinned: false, defaultWidth: "minmax(240px, 3fr)",   minWidth: 140, sortable: true },
+  date:    { id: "date",    label: "Date",    pinned: false, defaultWidth: "86px",                 minWidth: 60,  sortable: true }
+};
+
+const DEFAULT_COLUMN_ORDER = ["sender", "subject", "preview", "date"];
+
+function getOrderedColumnDefs(settings) {
+  const order = (settings.columns && settings.columns.order) || DEFAULT_COLUMN_ORDER;
+  const pinned = Object.values(COLUMN_DEFS).filter((c) => c.pinned);
+  const movable = order
+    .map((id) => COLUMN_DEFS[id])
+    .filter(Boolean);
+  return [...pinned, ...movable];
+}
+
+function buildGridTemplate(settings) {
+  const widths = (settings.columns && settings.columns.widths) || {};
+  const cols = getOrderedColumnDefs(settings);
+  return cols
+    .map((col) => {
+      const customWidth = widths[col.id];
+      if (customWidth != null) return `${customWidth}px`;
+      return col.defaultWidth;
+    })
+    .join(" ");
+}
 
 const TRIAGE_LABELS = [
   { key: "1", name: "task", short: "Task", color: "#e05252" },
@@ -21,6 +58,14 @@ const TRIAGE_LABELS = [
   { key: "3", name: "reference", short: "Ref", color: "#4caf50" },
   { key: "4", name: "read_later", short: "Read", color: "#4c8ce0" },
   { key: "5", name: "expenses", short: "Exp", color: "#a855f7" }
+];
+
+const AI_CATEGORIES = [
+  { key: "action-required", short: "Action", color: "#eb5757" },
+  { key: "internal-fyi", short: "FYI", color: "#2f80ed" },
+  { key: "meeting-invite", short: "Meeting", color: "#6f4cff" },
+  { key: "noise", short: "Noise", color: "#828282" },
+  { key: "unscreened", short: "Unscreened", color: "#a0a0a0" }
 ];
 
 function execFileAsync(file, args, options) {
@@ -201,12 +246,13 @@ class SwiftEAEmailSource {
     return configured;
   }
 
-  async listInbox({ offset, limit, label }) {
+  async listInbox({ offset, limit, label, category }) {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
     const args = ["mail", "inbox", "--json", "--limit", String(limit), "--offset", String(offset)];
     if (label) args.push("--label", label);
-    if (!label) args.push("--exclude-labeled");
+    if (category) args.push("--category", category);
+    if (!label && !category) args.push("--exclude-labeled");
     const { stdout } = await execFileAsync(cli, args, { cwd });
     const parsed = JSON.parse(stdout);
     if (!Array.isArray(parsed)) throw new Error("Unexpected JSON from swea mail inbox.");
@@ -317,6 +363,13 @@ class SwiftEAEmailSource {
     const { stdout } = await execFileAsync(cli, ["mail", "label-counts", "--json"], { cwd });
     return JSON.parse(stdout);
   }
+
+  async getCategoryCounts() {
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    const { stdout } = await execFileAsync(cli, ["mail", "category-counts", "--json"], { cwd });
+    return JSON.parse(stdout);
+  }
 }
 
 class SwiftEAInboxView extends ItemView {
@@ -341,6 +394,8 @@ class SwiftEAInboxView extends ItemView {
     this.pendingExternalRefresh = false;
     this.activeLabelFilter = null;
     this.labelCounts = {};
+    this.activeCategoryFilter = null;
+    this.categoryCounts = {};
 
     this._onScroll = this.onScroll.bind(this);
     this._onKeyDownList = this.onKeyDownList.bind(this);
@@ -384,17 +439,16 @@ class SwiftEAInboxView extends ItemView {
       this.setSyncButtonState(true);
     }
 
+    this.categoryTabBarEl = this.contentEl.createDiv({ cls: "swiftea-inbox__category-bar" });
+    this.renderCategoryTabs();
+
     this.bodyWrapEl = this.contentEl.createDiv({ cls: "swiftea-inbox__body-wrap" });
     this.sidebarEl = this.bodyWrapEl.createDiv({ cls: "swiftea-inbox__sidebar" });
     this.mainEl = this.bodyWrapEl.createDiv({ cls: "swiftea-inbox__main" });
 
     this.columnsEl = this.mainEl.createDiv({ cls: "swiftea-inbox__columns" });
-    this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--select", text: "" });
-    this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--labels", text: "" });
-    this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--sender", text: "Sender" });
-    this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--subject", text: "Subject" });
-    this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--preview", text: "Preview" });
-    this.columnsEl.createDiv({ cls: "swiftea-inbox__col swiftea-inbox__col--date", text: "Date" });
+    this.updateGridTemplate();
+    this.renderColumnHeaders();
 
     this.statusContainerEl = this.mainEl.createDiv({ cls: "swiftea-inbox__status-container" });
 
@@ -417,6 +471,7 @@ class SwiftEAInboxView extends ItemView {
 
     await this.reload();
     void this.refreshLabelCounts();
+    void this.refreshCategoryCounts();
     this.startRealtimeRefresh();
   }
 
@@ -429,8 +484,209 @@ class SwiftEAInboxView extends ItemView {
     }
   }
 
+  updateGridTemplate() {
+    this._gridTemplate = buildGridTemplate(this.plugin.settings);
+    if (this.columnsEl) this.columnsEl.style.gridTemplateColumns = this._gridTemplate;
+  }
+
+  renderColumnHeaders() {
+    if (!this.columnsEl) return;
+    this.columnsEl.empty();
+
+    const settings = this.plugin.settings;
+    const cols = getOrderedColumnDefs(settings);
+    const sort = settings.columns.sort || {};
+
+    for (const col of cols) {
+      const colEl = document.createElement("div");
+      colEl.className = `swiftea-inbox__col swiftea-inbox__col--${col.id}`;
+      colEl.dataset.colId = col.id;
+
+      if (col.sortable) {
+        // Clickable label for sorting
+        const btn = document.createElement("span");
+        btn.className = "swiftea-inbox__col-btn";
+        btn.textContent = col.label;
+        btn.addEventListener("click", (evt) => {
+          evt.stopPropagation();
+          this.cycleSort(col.id);
+        });
+        colEl.appendChild(btn);
+
+        // Sort arrow indicator
+        if (sort.column === col.id && sort.direction) {
+          const arrow = document.createElement("span");
+          arrow.className = "swiftea-inbox__sort-arrow";
+          arrow.textContent = sort.direction === "asc" ? " \u25B2" : " \u25BC";
+          colEl.appendChild(arrow);
+        }
+      } else if (col.label) {
+        colEl.textContent = col.label;
+      }
+
+      // Draggable reorder for movable columns
+      if (!col.pinned) {
+        colEl.setAttribute("draggable", "true");
+        colEl.addEventListener("dragstart", (evt) => {
+          evt.dataTransfer.setData("text/plain", col.id);
+          evt.dataTransfer.effectAllowed = "move";
+          colEl.classList.add("is-dragging");
+        });
+        colEl.addEventListener("dragend", () => {
+          colEl.classList.remove("is-dragging");
+          // Clean drop indicators
+          this.columnsEl.querySelectorAll(".is-drop-left, .is-drop-right").forEach((el) => {
+            el.classList.remove("is-drop-left", "is-drop-right");
+          });
+        });
+        colEl.addEventListener("dragover", (evt) => {
+          evt.preventDefault();
+          evt.dataTransfer.dropEffect = "move";
+          const rect = colEl.getBoundingClientRect();
+          const midX = rect.left + rect.width / 2;
+          colEl.classList.toggle("is-drop-left", evt.clientX < midX);
+          colEl.classList.toggle("is-drop-right", evt.clientX >= midX);
+        });
+        colEl.addEventListener("dragleave", () => {
+          colEl.classList.remove("is-drop-left", "is-drop-right");
+        });
+        colEl.addEventListener("drop", (evt) => {
+          evt.preventDefault();
+          colEl.classList.remove("is-drop-left", "is-drop-right");
+          const fromId = evt.dataTransfer.getData("text/plain");
+          if (!fromId || fromId === col.id) return;
+
+          const order = [...settings.columns.order];
+          const fromIdx = order.indexOf(fromId);
+          if (fromIdx < 0) return;
+          order.splice(fromIdx, 1);
+
+          const rect = colEl.getBoundingClientRect();
+          const midX = rect.left + rect.width / 2;
+          let toIdx = order.indexOf(col.id);
+          if (toIdx < 0) return;
+          if (evt.clientX >= midX) toIdx += 1;
+          order.splice(toIdx, 0, fromId);
+
+          settings.columns.order = order;
+          void this.plugin.saveSettings();
+          this.updateGridTemplate();
+          this.renderColumnHeaders();
+          this.renderVisible();
+        });
+
+        // Resize handle at right edge
+        const handle = document.createElement("div");
+        handle.className = "swiftea-inbox__resize-handle";
+        handle.addEventListener("mousedown", (evt) => {
+          evt.stopPropagation();
+          evt.preventDefault();
+          this.startColumnResize(col.id, evt);
+        });
+        colEl.appendChild(handle);
+      }
+
+      this.columnsEl.appendChild(colEl);
+    }
+
+    this.columnsEl.style.gridTemplateColumns = this._gridTemplate;
+  }
+
+  cycleSort(columnId) {
+    const sort = this.plugin.settings.columns.sort;
+    if (sort.column === columnId) {
+      if (sort.direction === "asc") {
+        sort.direction = "desc";
+      } else if (sort.direction === "desc") {
+        sort.column = null;
+        sort.direction = null;
+      } else {
+        sort.direction = "asc";
+      }
+    } else {
+      sort.column = columnId;
+      sort.direction = "asc";
+    }
+    void this.plugin.saveSettings();
+    this.applySortToEmails();
+    this.renderColumnHeaders();
+    this.renderVisible();
+  }
+
+  applySortToEmails() {
+    const sort = this.plugin.settings.columns.sort;
+    const focusedId = this.emails[this.selectedIndex]?.id || null;
+
+    if (!sort.column || !sort.direction) {
+      // Default: date descending
+      this.emails.sort((a, b) => {
+        const da = new Date(a.date || 0).getTime();
+        const db = new Date(b.date || 0).getTime();
+        return db - da;
+      });
+    } else {
+      const dir = sort.direction === "asc" ? 1 : -1;
+      const col = sort.column;
+      this.emails.sort((a, b) => {
+        if (col === "date") {
+          const da = new Date(a.date || 0).getTime();
+          const db = new Date(b.date || 0).getTime();
+          return (da - db) * dir;
+        }
+        const va = String(a[col] || "").toLowerCase();
+        const vb = String(b[col] || "").toLowerCase();
+        return va < vb ? -dir : va > vb ? dir : 0;
+      });
+    }
+
+    // Restore focus to same email after sort
+    if (focusedId) {
+      const idx = this.emails.findIndex((e) => e.id === focusedId);
+      if (idx >= 0) this.selectedIndex = idx;
+    }
+  }
+
+  startColumnResize(columnId, startEvt) {
+    const col = COLUMN_DEFS[columnId];
+    if (!col) return;
+
+    const settings = this.plugin.settings;
+    const widths = settings.columns.widths;
+    // If no custom width yet, compute current rendered width
+    const headerCol = this.columnsEl.querySelector(`[data-col-id="${columnId}"]`);
+    const startWidth = headerCol ? headerCol.getBoundingClientRect().width : (widths[columnId] || col.minWidth);
+    const startX = startEvt.clientX;
+
+    document.body.classList.add("swiftea-inbox--resizing");
+
+    const onMouseMove = (evt) => {
+      const delta = evt.clientX - startX;
+      const newWidth = Math.max(col.minWidth, Math.round(startWidth + delta));
+      widths[columnId] = newWidth;
+      this.updateGridTemplate();
+      // Apply to visible rows for live preview
+      const rows = this.rowsEl?.querySelectorAll(".swiftea-inbox__row");
+      if (rows) {
+        for (const row of rows) row.style.gridTemplateColumns = this._gridTemplate;
+      }
+    };
+
+    const onMouseUp = () => {
+      document.body.classList.remove("swiftea-inbox--resizing");
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      void this.plugin.saveSettings();
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }
+
   updateHeader() {
-    if (this.activeLabelFilter) {
+    if (this.activeCategoryFilter) {
+      const info = AI_CATEGORIES.find((c) => c.key === this.activeCategoryFilter);
+      this.titleEl.setText(info ? info.short : this.activeCategoryFilter);
+    } else if (this.activeLabelFilter) {
       const info = TRIAGE_LABELS.find((l) => l.name === this.activeLabelFilter);
       this.titleEl.setText(info ? info.short : this.activeLabelFilter);
     } else {
@@ -552,8 +808,9 @@ class SwiftEAInboxView extends ItemView {
     const loadedCount = Math.max(this.emails.length, this.plugin.settings.pageSize || DEFAULT_SETTINGS.pageSize);
 
     try {
-      const next = await this.source.listInbox({ offset: 0, limit: loadedCount, label: this.activeLabelFilter });
+      const next = await this.source.listInbox({ offset: 0, limit: loadedCount, label: this.activeLabelFilter, category: this.activeCategoryFilter });
       this.emails = next;
+      this.applySortToEmails();
 
       if (selectedEmailId) {
         const nextIndex = this.emails.findIndex((m) => m.id === selectedEmailId);
@@ -570,6 +827,7 @@ class SwiftEAInboxView extends ItemView {
       this.updateSpacerHeight();
       this.renderVisible();
       if (this.scrollEl) this.scrollEl.scrollTop = scrollTop;
+      void this.refreshCategoryCounts();
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn("[SwiftEA Inbox] background refresh failed:", e);
@@ -820,9 +1078,10 @@ class SwiftEAInboxView extends ItemView {
     try {
       const pageSize = Math.max(20, Number(this.plugin.settings.pageSize) || DEFAULT_SETTINGS.pageSize);
       const offset = this.emails.length;
-      const items = await this.source.listInbox({ offset, limit: pageSize, label: this.activeLabelFilter });
+      const items = await this.source.listInbox({ offset, limit: pageSize, label: this.activeLabelFilter, category: this.activeCategoryFilter });
       if (items.length < pageSize) this.hasMore = false;
       this.emails.push(...items);
+      this.applySortToEmails();
       this.ensureSelection();
       this.updateHeader();
       this.updateSpacerHeight();
@@ -970,12 +1229,11 @@ class SwiftEAInboxView extends ItemView {
         }
       }
 
-      row.appendChild(selectCell);
-      row.appendChild(labelsCell);
-      row.appendChild(sender);
-      row.appendChild(subject);
-      row.appendChild(preview);
-      row.appendChild(date);
+      const cellMap = { select: selectCell, labels: labelsCell, sender, subject, preview, date };
+      for (const col of getOrderedColumnDefs(this.plugin.settings)) {
+        row.appendChild(cellMap[col.id]);
+      }
+      row.style.gridTemplateColumns = this._gridTemplate;
 
       row.addEventListener("click", (evt) => {
         this.handleRowClick(i, evt);
@@ -1361,7 +1619,7 @@ class SwiftEAInboxView extends ItemView {
 
     // "Inbox" entry
     const inboxItem = this.sidebarEl.createDiv({ cls: "swiftea-inbox__sidebar-item" });
-    if (!this.activeLabelFilter) inboxItem.addClass("is-active");
+    if (!this.activeLabelFilter && !this.activeCategoryFilter) inboxItem.addClass("is-active");
     inboxItem.createSpan({ text: "Inbox" });
     const inboxCount = this.labelCounts._unlabeled || 0;
     if (inboxCount > 0) {
@@ -1393,9 +1651,62 @@ class SwiftEAInboxView extends ItemView {
 
   setLabelFilter(label) {
     this.activeLabelFilter = label;
+    this.activeCategoryFilter = null;
+    this.renderSidebar();
+    this.renderCategoryTabs();
+    this.updateHeader();
+    void this.reload();
+  }
+
+  renderCategoryTabs() {
+    if (!this.categoryTabBarEl) return;
+    this.categoryTabBarEl.empty();
+
+    // "All" tab
+    const allTab = this.categoryTabBarEl.createDiv({ cls: "swiftea-inbox__category-tab" });
+    if (!this.activeCategoryFilter) allTab.addClass("is-active");
+    allTab.createSpan({ text: "All" });
+    const totalCount = Object.values(this.categoryCounts).reduce((a, b) => a + b, 0);
+    if (totalCount > 0) {
+      allTab.createSpan({ cls: "swiftea-inbox__category-tab-count", text: String(totalCount) });
+    }
+    allTab.addEventListener("click", () => this.setCategoryFilter(null));
+
+    // Category tabs
+    for (const cat of AI_CATEGORIES) {
+      const tab = this.categoryTabBarEl.createDiv({ cls: "swiftea-inbox__category-tab" });
+      if (this.activeCategoryFilter === cat.key) tab.addClass("is-active");
+
+      const dot = tab.createSpan({ cls: "swiftea-inbox__category-tab-dot" });
+      dot.style.background = cat.color;
+
+      tab.createSpan({ text: cat.short });
+
+      const count = this.categoryCounts[cat.key] || 0;
+      if (count > 0) {
+        tab.createSpan({ cls: "swiftea-inbox__category-tab-count", text: String(count) });
+      }
+
+      tab.addEventListener("click", () => this.setCategoryFilter(cat.key));
+    }
+  }
+
+  setCategoryFilter(category) {
+    this.activeCategoryFilter = category;
+    this.activeLabelFilter = null;
+    this.renderCategoryTabs();
     this.renderSidebar();
     this.updateHeader();
     void this.reload();
+  }
+
+  async refreshCategoryCounts() {
+    try {
+      this.categoryCounts = await this.source.getCategoryCounts();
+    } catch {
+      this.categoryCounts = {};
+    }
+    this.renderCategoryTabs();
   }
 
   async refreshLabelCounts() {
@@ -1503,7 +1814,16 @@ module.exports = class SwiftEAInboxPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = (await this.loadData()) || {};
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+    // Deep merge columns so existing users without columns in data.json get defaults
+    const defaultCols = DEFAULT_SETTINGS.columns;
+    const savedCols = saved.columns || {};
+    this.settings.columns = {
+      widths: Object.assign({}, defaultCols.widths, savedCols.widths || {}),
+      order: Array.isArray(savedCols.order) ? savedCols.order : [...defaultCols.order],
+      sort: Object.assign({}, defaultCols.sort, savedCols.sort || {})
+    };
   }
 
   async saveSettings() {

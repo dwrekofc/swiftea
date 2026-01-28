@@ -59,11 +59,54 @@
   color: var(--text-muted);
 }
 
+/* Category filter tab bar */
+.swiftea-inbox__category-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.swiftea-inbox__category-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  color: var(--text-normal);
+  cursor: pointer;
+  user-select: none;
+}
+
+.swiftea-inbox__category-tab:hover {
+  background: var(--background-modifier-hover);
+}
+
+.swiftea-inbox__category-tab.is-active {
+  background: var(--background-modifier-active-hover);
+  font-weight: 600;
+}
+
+.swiftea-inbox__category-tab-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.swiftea-inbox__category-tab-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .swiftea-inbox__columns {
   margin-top: 8px;
   display: grid;
-  grid-template-columns: 26px 56px minmax(140px, 220px) minmax(180px, 2fr) minmax(240px, 3fr) 86px;
+  /* grid-template-columns set dynamically via JS */
   gap: 10px;
+  padding: 0 12px;
   font-size: 11px;
   color: var(--text-faint);
   text-transform: uppercase;
@@ -99,7 +142,7 @@
 
 .swiftea-inbox__row {
   display: grid;
-  grid-template-columns: 26px 56px minmax(140px, 220px) minmax(180px, 2fr) minmax(240px, 3fr) 86px;
+  /* grid-template-columns set dynamically via JS */
   gap: 10px;
   align-items: center;
   padding: 0 12px;
@@ -364,4 +407,76 @@
 .swiftea-inbox__category--noise {
   background: rgba(130, 130, 130, 0.15);
   color: var(--text-muted);
+}
+
+/* Column header — position relative for resize handle */
+.swiftea-inbox__col {
+  position: relative;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Sortable column button */
+.swiftea-inbox__col-btn {
+  cursor: pointer;
+  user-select: none;
+}
+
+.swiftea-inbox__col-btn:hover {
+  color: var(--text-normal);
+}
+
+/* Sort direction arrow */
+.swiftea-inbox__sort-arrow {
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+/* Resize handle at right edge of column header */
+.swiftea-inbox__resize-handle {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.swiftea-inbox__resize-handle:hover,
+.swiftea-inbox__resize-handle:active {
+  background: var(--interactive-accent);
+  opacity: 0.25;
+  border-radius: 2px;
+}
+
+/* Global cursor override while resizing */
+body.swiftea-inbox--resizing,
+body.swiftea-inbox--resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* Drag feedback: dragging column */
+.swiftea-inbox__col.is-dragging {
+  opacity: 0.4;
+}
+
+/* Drop indicators */
+.swiftea-inbox__col.is-drop-left {
+  box-shadow: inset 3px 0 0 0 var(--interactive-accent);
+}
+
+.swiftea-inbox__col.is-drop-right {
+  box-shadow: inset -3px 0 0 0 var(--interactive-accent);
+}
+
+/* Draggable column grab cursor */
+.swiftea-inbox__col[draggable="true"] {
+  cursor: grab;
+}
+
+.swiftea-inbox__col[draggable="true"]:active {
+  cursor: grabbing;
 }

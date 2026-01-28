@@ -481,7 +481,8 @@ public final class MailDatabase: @unchecked Sendable {
                 FROM envelope.messages m
                 LEFT JOIN envelope.subjects s ON m.subject = s.ROWID
                 LEFT JOIN envelope.addresses a ON m.sender = a.ROWID
-                LEFT JOIN envelope.mailboxes mb ON m.mailbox = mb.ROWID
+                INNER JOIN envelope.mailboxes mb ON m.mailbox = mb.ROWID
+                WHERE LOWER(mb.url) LIKE '%/inbox'
                 """)
 
             // Get the count of copied messages
@@ -615,7 +616,8 @@ public final class MailDatabase: @unchecked Sendable {
                 FROM envelope.messages m
                 LEFT JOIN envelope.subjects s ON m.subject = s.ROWID
                 LEFT JOIN envelope.addresses a ON m.sender = a.ROWID
-                LEFT JOIN envelope.mailboxes mb ON m.mailbox = mb.ROWID
+                INNER JOIN envelope.mailboxes mb ON m.mailbox = mb.ROWID
+                WHERE LOWER(mb.url) LIKE '%/inbox'
                 """)
 
             // Get message count
@@ -648,6 +650,65 @@ public final class MailDatabase: @unchecked Sendable {
             }
 
             throw MailDatabaseError.bulkCopyFailed(operation: operation, underlying: error)
+        }
+    }
+
+    // MARK: - Purge Non-Inbox Messages
+
+    /// Result of a purge operation
+    public struct PurgeResult: Sendable {
+        /// Number of non-inbox messages deleted
+        public let messagesDeleted: Int
+        /// Number of orphaned threads cleaned up
+        public let threadsDeleted: Int
+    }
+
+    /// Purge messages that are not from the inbox mailbox.
+    ///
+    /// This removes messages where `mailbox_name` (extracted from mailbox URL during bulk copy)
+    /// is not 'INBOX'. Labels and AI categories on inbox messages are preserved — only non-inbox
+    /// messages and their cascaded labels are removed.
+    ///
+    /// Also cleans up orphaned threads that no longer have any associated messages.
+    ///
+    /// - Returns: A `PurgeResult` with counts of deleted messages and threads.
+    /// - Throws: `MailDatabaseError.notInitialized` if database connection is not open.
+    /// - Throws: `MailDatabaseError.queryFailed` if the purge queries fail.
+    @discardableResult
+    public func purgeNonInboxMessages() throws -> PurgeResult {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        do {
+            // Count non-inbox messages before deletion
+            var messagesToDelete = 0
+            let countResult = try conn.query("SELECT COUNT(*) FROM messages WHERE UPPER(mailbox_name) != 'INBOX'")
+            for row in countResult {
+                messagesToDelete = (try? row.getInt(0)) ?? 0
+            }
+
+            // Delete non-inbox messages (labels auto-cascade via ON DELETE CASCADE)
+            _ = try conn.execute("DELETE FROM messages WHERE UPPER(mailbox_name) != 'INBOX'")
+
+            // Clean up orphaned threads
+            var threadsToDelete = 0
+            let threadCountResult = try conn.query("""
+                SELECT COUNT(*) FROM threads
+                WHERE id NOT IN (SELECT DISTINCT thread_id FROM messages WHERE thread_id IS NOT NULL)
+                """)
+            for row in threadCountResult {
+                threadsToDelete = (try? row.getInt(0)) ?? 0
+            }
+
+            _ = try conn.execute("""
+                DELETE FROM threads
+                WHERE id NOT IN (SELECT DISTINCT thread_id FROM messages WHERE thread_id IS NOT NULL)
+                """)
+
+            return PurgeResult(messagesDeleted: messagesToDelete, threadsDeleted: threadsToDelete)
+        } catch {
+            throw MailDatabaseError.queryFailed(underlying: error)
         }
     }
 
@@ -2494,7 +2555,8 @@ public final class MailDatabase: @unchecked Sendable {
         previewLength: Int = 160,
         filter: MailViewFilter? = nil,
         label: String? = nil,
-        excludeLabeled: Bool = false
+        excludeLabeled: Bool = false,
+        category: String? = nil
     ) throws -> [MailMessageSummary] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
@@ -2511,6 +2573,13 @@ public final class MailDatabase: @unchecked Sendable {
         }
         if excludeLabeled && label == nil {
             whereClauses.append("id NOT IN (SELECT message_id FROM message_labels)")
+        }
+        if let category {
+            if category == "unscreened" {
+                whereClauses.append("category IS NULL")
+            } else {
+                whereClauses.append("category = '\(escapeSql(category))'")
+            }
         }
         let whereSQL = whereClauses.joined(separator: " AND ")
 
@@ -2791,6 +2860,34 @@ public final class MailDatabase: @unchecked Sendable {
             break
         }
 
+        return counts
+    }
+
+    /// Count messages per AI category (only inbox, non-deleted messages)
+    public func getCategoryCounts(filter: MailViewFilter? = nil) throws -> [String: Int] {
+        guard let conn = connection else {
+            throw MailDatabaseError.notInitialized
+        }
+
+        var whereClauses = ["m.mailbox_status = 'inbox'", "m.is_deleted = 0"]
+        if let filterClause = filter?.sqlWhereClause(tableAlias: "m") {
+            whereClauses.append(filterClause)
+        }
+        let whereSQL = whereClauses.joined(separator: " AND ")
+
+        let result = try conn.query("""
+            SELECT COALESCE(m.category, 'unscreened') AS cat, COUNT(*) as count
+            FROM messages m
+            WHERE \(whereSQL)
+            GROUP BY cat
+            """)
+
+        var counts: [String: Int] = [:]
+        for row in result {
+            if let cat = getStringValue(row, 0), let count = getIntValue(row, 1) {
+                counts[cat] = count
+            }
+        }
         return counts
     }
 

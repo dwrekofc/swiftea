@@ -1,7 +1,6 @@
 # Agent Instructions
 
 ## Start Here
-
 - If the user asks for a new idea, new feature, proposal/spec/change, plan, or new capability: read `.d-spec/AGENTS.md` and follow the linked docs as-needed.
 - If the user asks questions or needs context gathering: use `AskUserTool` for interviews and clarifications.
 - If the user asks to implement an approved change/feature: follow the workflow below, then use **Beads as the sole execution source of truth** per `bd prime` (d-spec is input-only after approval).
