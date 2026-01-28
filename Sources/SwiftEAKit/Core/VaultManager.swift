@@ -332,12 +332,12 @@ public struct AISettings: Codable {
 
     /// Available config keys for AI settings
     public static let keys: [String: String] = [
-        "ai.model": "OpenRouter model ID for AI screening (default: google/gemini-2.0-flash-001)",
+        "ai.model": "OpenRouter model ID for AI screening (default: openai/gpt-oss-120b)",
         "ai.autoScreenOnSync": "Auto-screen new emails during sync: true or false"
     ]
 
     public init(
-        model: String = "google/gemini-2.0-flash-001",
+        model: String = "openai/gpt-oss-120b",
         autoScreenOnSync: Bool = true
     ) {
         self.model = model

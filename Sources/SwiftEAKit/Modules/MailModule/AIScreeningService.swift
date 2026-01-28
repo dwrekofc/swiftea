@@ -50,7 +50,7 @@ public final class AIScreeningService {
 
     public init(
         apiKey: String,
-        model: String = "google/gemini-2.0-flash-001",
+        model: String = "openai/gpt-oss-120b",
         promptTemplate: String,
         apiBaseURL: String = "https://openrouter.ai/api/v1/chat/completions"
     ) {

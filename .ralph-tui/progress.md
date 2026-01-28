@@ -5,32 +5,32 @@ after each iteration and included in agent prompts for context.
 
 ---
 
-## ✓ Iteration 1 - swiftea-ykk.5: US-005: Keep pending action on AppleScript failure for retry
-*2026-01-16T12:58:59.848Z (488s)*
+## ✓ Iteration 1 - swiftea-vy4.8: Run swift test to verify all 14 assertions pass
+*2026-01-22T15:37:41.921Z (862s)*
 
 **Status:** Completed
 
 **Notes:**
-eRetainsPendingActionForRetry` - verifies the full retry flow\n   - Added `testDeleteMessageFailureRetainsPendingActionForRetry` - verifies the full retry flow\n\n**Behavior Change**: When `archiveMessage` or `deleteMessage` fails due to an AppleScript error, the `pending_sync_action` is now retained instead of being cleared. This allows `processPendingActions()` to retry the operation on the next sync cycle, making failed archive/delete operations recoverable from transient Mail.app issues.\n\n
+tiveForm":"Fixing deleteMessage script to use Trash mailbox with localized names"},{"content":"Run swift test to verify all tests pass","status":"completed","activeForm":"Running swift test to verify all tests pass"},{"content":"Commit and close the bead","status":"completed","activeForm":"Committing and closing the bead"}]}}
+{"type":"assistant","message":{"model":"claude-opus-4-5-20251101","id":"msg_01NeGqsVhskpvDQ9cUMP57G4","type":"message","role":"assistant","content":[{"type":"text","text":"
 
 ---
-## ✓ Iteration 2 - swiftea-ykk.4: US-004: Delete exported .md files on archive/delete
-*2026-01-16T13:08:33.494Z (572s)*
+## ✓ Iteration 2 - swiftea-vy4.7: Update testDeleteMessageScriptContainsMessageId to match native delete approach
+*2026-01-22T15:45:21.402Z (458s)*
 
 **Status:** Completed
 
 **Notes:**
-ftea-ykk.4: Implemented deleteExportedFile(message:) helper method that cleans up .md files after successful archive/delete operations. Added 6 tests covering success cases, nil path handling, missing file handling, and failure cases (file not deleted when AppleScript fails).","stderr":"","interrupted":false,"isImage":false}}
-{"type":"assistant","message":{"model":"claude-opus-4-5-20251101","id":"msg_01Nz63Nk5gveyFNrzgRUURE5","type":"message","role":"assistant","content":[{"type":"text","text":"
+":"008d614b-5e22-4673-9667-06597bc8323d","tool_use_result":{"stdout":"✓ Closed swiftea-vy4.5: Work completed as part of swiftea-vy4.7. Renamed testDeleteScriptSupportsLocalizedMailboxNames to testDeleteScriptUsesNativeDelete and removed all localized Trash mailbox assertions.","stderr":"","interrupted":false,"isImage":false}}
+{"type":"assistant","message":{"model":"claude-opus-4-5-20251101","id":"msg_01So11eUTyeCDKVhSt4HPCFo","type":"message","role":"assistant","content":[{"type":"text","text":"
 
 ---
-## ✓ Iteration 3 - swiftea-ykk.3: US-003: Expand mailbox search to include more folders
-*2026-01-16T13:14:31.696Z (357s)*
+## ✓ Iteration 3 - swiftea-vy4.6: Remove or simplify localized Archive mailbox test assertions
+*2026-01-22T15:46:55.780Z (93s)*
 
 **Status:** Completed
 
 **Notes:**
-swiftea-ykk.3: Implemented two-stage mailbox search: Stage 1 searches common folders (Inbox, Sent, Archive, Drafts, Junk, Spam, Trash, Deleted Items), Stage 2 falls back to ALL mailboxes in each account. Error message now includes which folders were searched. All tests pass.","stderr":"","interrupted":false,"isImage":false}}
-{"type":"assistant","message":{"model":"claude-opus-4-5-20251101","id":"msg_016X1iGE2dDC5YxrNoV4ken8","type":"message","role":"assistant","content":[{"type":"text","text":"
+ssistant","content":[{"type":"text","text":"Completed swiftea-vy4.6:\n\n**Summary:**\n- Renamed `testArchiveScriptSupportsLocalizedMailboxNames` → `testArchiveScriptUsesMailboxFallbackList`\n- Simplified assertions from 7 to 3:\n  - Checks `archiveNames` list exists (for locale support)\n  - Checks primary \"Archive\" name is present\n  - Checks error handling for missing mailbox\n- Removed brittle assertions for specific localized names (Archives, Archivo, Archiv, etc.)\n- All 47 tests pass\n\n
 
 ---
