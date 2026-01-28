@@ -604,24 +604,63 @@ struct MailSyncCommand: ParsableCommand {
             let messages = try mailDatabase.getUnscreenedMessages(limit: 50, filter: vault.mailViewFilter)
             guard !messages.isEmpty else { return }
 
+            // Pre-flight credit check — skip screening if credits exhausted
+            if let credits = service.checkCredits(),
+               let remaining = credits.remaining, remaining <= 0 {
+                logError("Auto-screen: credits exhausted, skipping batch")
+                return
+            }
+
             var screened = 0
             var failed = 0
-            for message in messages {
+            var consecutiveFailures = 0
+            for (index, message) in messages.enumerated() {
                 let recipientEmail = try? mailDatabase.getFirstRecipientEmail(messageId: message.id)
                 let result = service.screen(message: message, recipientEmail: recipientEmail)
                 switch result {
                 case .success(let screening):
-                    try mailDatabase.updateScreeningResult(
-                        messageId: screening.messageId,
-                        summary: screening.summary,
-                        category: screening.category.rawValue
-                    )
-                    screened += 1
+                    do {
+                        try mailDatabase.updateScreeningResult(
+                            messageId: screening.messageId,
+                            summary: screening.summary,
+                            category: screening.category.rawValue
+                        )
+                        screened += 1
+                        consecutiveFailures = 0
+                    } catch {
+                        logError("Screening classified \(message.id) but failed to save: \(error.localizedDescription)")
+                        failed += 1
+                    }
                 case .failure(let error):
                     if verbose {
                         logError("Screening failed for \(message.id): \(error.localizedDescription)")
                     }
                     failed += 1
+                    consecutiveFailures += 1
+
+                    // Mark parse failures as uncategorized to prevent infinite re-screening
+                    if case AIScreeningError.responseParsingFailed = error {
+                        try? mailDatabase.updateScreeningResult(
+                            messageId: message.id,
+                            summary: "(screening parse error)",
+                            category: "uncategorized"
+                        )
+                        consecutiveFailures = 0
+                    }
+
+                    if error.isUnrecoverable {
+                        logError("Auto-screen: API cannot process further requests, stopping batch")
+                        break
+                    }
+                    if consecutiveFailures >= 3 {
+                        logError("Auto-screen: 3 consecutive failures, stopping batch")
+                        break
+                    }
+                }
+
+                // Brief pause between API calls to avoid rate limits
+                if index < messages.count - 1 {
+                    Thread.sleep(forTimeInterval: 0.5)
                 }
             }
 
@@ -1459,8 +1498,23 @@ struct MailScreenCommand: ParsableCommand {
             promptTemplate: promptTemplate
         )
 
+        // Pre-flight credit check
+        if let credits = service.checkCredits() {
+            if let remaining = credits.remaining, remaining <= 0 {
+                printError("OpenRouter credits exhausted (remaining: \(remaining)). Add credits at https://openrouter.ai/settings/credits")
+                throw ExitCode.failure
+            }
+            if let remaining = credits.remaining, let limit = credits.limit {
+                print("Credits: \(String(format: "%.4f", remaining)) remaining of \(String(format: "%.2f", limit))\(credits.isFreeTier ? " (free tier)" : "")")
+            } else if credits.limit == nil {
+                print("Credits: unlimited key")
+            }
+            fflush(stdout)
+        }
+
         var screened = 0
         var failed = 0
+        var consecutiveFailures = 0
         for (index, message) in messages.enumerated() {
             let sender = message.senderName ?? message.senderEmail ?? "Unknown"
             print("[\(index + 1)/\(messages.count)] Screening: \(sender) - \(message.subject)")
@@ -1471,17 +1525,53 @@ struct MailScreenCommand: ParsableCommand {
 
             switch result {
             case .success(let screening):
-                try mailDatabase.updateScreeningResult(
-                    messageId: screening.messageId,
-                    summary: screening.summary,
-                    category: screening.category.rawValue
-                )
-                print("  -> \(screening.category.rawValue): \(screening.summary)")
-                fflush(stdout)
-                screened += 1
+                do {
+                    try mailDatabase.updateScreeningResult(
+                        messageId: screening.messageId,
+                        summary: screening.summary,
+                        category: screening.category.rawValue
+                    )
+                    print("  -> \(screening.category.rawValue): \(screening.summary)")
+                    fflush(stdout)
+                    screened += 1
+                    consecutiveFailures = 0
+                } catch {
+                    printError("  -> Classified as \(screening.category.rawValue) but failed to save: \(error.localizedDescription)")
+                    failed += 1
+                }
             case .failure(let error):
                 printError("  -> Failed: \(error.localizedDescription)")
                 failed += 1
+                consecutiveFailures += 1
+
+                // If the API returned data but parsing failed, mark as uncategorized
+                // so this message doesn't re-appear in every future screening run
+                if case AIScreeningError.responseParsingFailed = error {
+                    try? mailDatabase.updateScreeningResult(
+                        messageId: message.id,
+                        summary: "(screening parse error)",
+                        category: "uncategorized"
+                    )
+                    printError("  -> Marked as uncategorized to prevent re-screening")
+                    fflush(stderr)
+                    consecutiveFailures = 0
+                }
+
+                if error.isUnrecoverable {
+                    printError("API cannot process further requests. Stopping batch.")
+                    fflush(stderr)
+                    break
+                }
+                if consecutiveFailures >= 3 {
+                    printError("3 consecutive failures — API may be unavailable. Stopping.")
+                    fflush(stderr)
+                    break
+                }
+            }
+
+            // Brief pause between API calls to avoid rate limits
+            if index < messages.count - 1 {
+                Thread.sleep(forTimeInterval: 0.5)
             }
         }
 

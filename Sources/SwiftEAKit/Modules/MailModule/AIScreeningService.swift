@@ -22,6 +22,7 @@ public enum AIScreeningError: Error, LocalizedError {
     case apiKeyMissing
     case promptTemplateNotFound(path: String)
     case apiRequestFailed(statusCode: Int, body: String)
+    case creditsExhausted(remaining: Double?)
     case responseParsingFailed(detail: String)
     case networkError(underlying: Error)
 
@@ -33,12 +34,36 @@ public enum AIScreeningError: Error, LocalizedError {
             return "Prompt template not found at: \(path)"
         case .apiRequestFailed(let statusCode, let body):
             return "OpenRouter API request failed (HTTP \(statusCode)): \(body)"
+        case .creditsExhausted(let remaining):
+            if let remaining = remaining {
+                return "OpenRouter credits exhausted (remaining: \(remaining)). Add credits at https://openrouter.ai/settings/credits"
+            }
+            return "OpenRouter credits exhausted. Add credits at https://openrouter.ai/settings/credits"
         case .responseParsingFailed(let detail):
             return "Failed to parse AI screening response: \(detail)"
         case .networkError(let underlying):
             return "Network error during AI screening: \(underlying.localizedDescription)"
         }
     }
+
+    /// Whether this error indicates the API cannot process further requests (credits gone, payment required)
+    public var isUnrecoverable: Bool {
+        switch self {
+        case .creditsExhausted:
+            return true
+        case .apiRequestFailed(let statusCode, _):
+            return statusCode == 402 || statusCode == 429
+        default:
+            return false
+        }
+    }
+}
+
+/// Credit status from the OpenRouter API key endpoint
+public struct OpenRouterCreditStatus {
+    public let limit: Double?
+    public let remaining: Double?
+    public let isFreeTier: Bool
 }
 
 /// AI email screening service using OpenRouter API
@@ -70,6 +95,39 @@ public final class AIScreeningService {
         let value = ProcessInfo.processInfo.environment["OPENROUTER_API_KEY"]
         guard let key = value, !key.isEmpty else { return nil }
         return key
+    }
+
+    /// Check credit status from the OpenRouter /api/v1/key endpoint
+    public func checkCredits() -> OpenRouterCreditStatus? {
+        guard let url = URL(string: "https://openrouter.ai/api/v1/key") else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var httpResponse: HTTPURLResponse?
+
+        let task = URLSession.shared.dataTask(with: request) { data, response, _ in
+            responseData = data
+            httpResponse = response as? HTTPURLResponse
+            semaphore.signal()
+        }
+        task.resume()
+        semaphore.wait()
+
+        guard let statusCode = httpResponse?.statusCode, statusCode >= 200, statusCode < 300,
+              let data = responseData,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let keyData = json["data"] as? [String: Any] else {
+            return nil
+        }
+
+        let limit = keyData["limit"] as? Double
+        let remaining = keyData["limit_remaining"] as? Double
+        let isFreeTier = keyData["is_free_tier"] as? Bool ?? true
+        return OpenRouterCreditStatus(limit: limit, remaining: remaining, isFreeTier: isFreeTier)
     }
 
     /// Screen a single email message
@@ -201,26 +259,79 @@ public final class AIScreeningService {
 
     /// Parse the LLM's JSON response into a ScreeningResult
     public func parseScreeningResponse(_ responseText: String, messageId: String) -> Result<ScreeningResult, AIScreeningError> {
-        guard let data = responseText.data(using: .utf8),
+        let cleaned = extractJSON(from: responseText)
+        guard let data = cleaned.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return .failure(.responseParsingFailed(detail: "Invalid JSON: \(String(responseText.prefix(200)))"))
         }
 
-        guard let summary = json["summary"] as? String, !summary.isEmpty else {
-            return .failure(.responseParsingFailed(detail: "Missing or empty 'summary' field"))
-        }
+        // Accept summary or fall back to empty — caller can use subject as fallback
+        let summary = (json["summary"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
-        guard let categoryStr = json["category"] as? String,
-              let category = EmailCategory(rawValue: categoryStr) else {
-            let raw = json["category"] as? String ?? "(missing)"
-            return .failure(.responseParsingFailed(detail: "Invalid category '\(raw)'. Expected one of: \(EmailCategory.allCases.map { $0.rawValue }.joined(separator: ", "))"))
+        let category: EmailCategory
+        if let categoryStr = json["category"] as? String {
+            if let exact = EmailCategory(rawValue: categoryStr) {
+                category = exact
+            } else {
+                // Try normalizing: lowercase, trim, replace spaces with hyphens
+                let normalized = categoryStr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased().replacingOccurrences(of: " ", with: "-")
+                if let fuzzy = EmailCategory(rawValue: normalized) {
+                    category = fuzzy
+                } else {
+                    return .failure(.responseParsingFailed(detail: "Invalid category '\(categoryStr)'. Expected one of: \(EmailCategory.allCases.map { $0.rawValue }.joined(separator: ", "))"))
+                }
+            }
+        } else {
+            // Category field missing entirely — default to noise rather than failing
+            category = .noise
         }
 
         return .success(ScreeningResult(
             messageId: messageId,
-            summary: summary,
+            summary: summary.isEmpty ? "(no summary)" : summary,
             category: category
         ))
+    }
+
+    /// Try to extract a valid JSON object from a potentially malformed LLM response.
+    /// Handles common issues: extra leading chars, markdown code fences, duplicate braces.
+    private func extractJSON(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Strip markdown code fences: ```json ... ```
+        if trimmed.hasPrefix("```") {
+            let lines = trimmed.components(separatedBy: "\n")
+            let inner = lines.dropFirst().prefix(while: { !$0.hasPrefix("```") }).joined(separator: "\n")
+            if !inner.isEmpty {
+                let fenced = inner.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let parsed = tryParseJSON(fenced) { return parsed }
+            }
+        }
+
+        // Try the raw text first
+        if let parsed = tryParseJSON(trimmed) { return parsed }
+
+        // Try each '{' position as potential JSON start (handles prefix garbage)
+        var searchRange = trimmed.startIndex..<trimmed.endIndex
+        while let braceIdx = trimmed.range(of: "{", range: searchRange)?.lowerBound {
+            let candidate = String(trimmed[braceIdx...])
+            if let parsed = tryParseJSON(candidate) { return parsed }
+            let next = trimmed.index(after: braceIdx)
+            guard next < trimmed.endIndex else { break }
+            searchRange = next..<trimmed.endIndex
+        }
+
+        return trimmed
+    }
+
+    /// Attempt to parse a string as a JSON object. Returns the string if valid, nil otherwise.
+    private func tryParseJSON(_ text: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] != nil else {
+            return nil
+        }
+        return text
     }
 
     // MARK: - HTML Stripping

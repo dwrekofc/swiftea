@@ -2682,7 +2682,7 @@ public final class MailDatabase: @unchecked Sendable {
         }
 
         var whereClauses = [
-            "category IS NULL",
+            "(category IS NULL OR TRIM(category) = '')",
             "is_deleted = 0",
             "(body_text IS NOT NULL OR body_html IS NOT NULL)"
         ]
