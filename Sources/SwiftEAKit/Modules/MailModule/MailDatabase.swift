@@ -2493,7 +2493,8 @@ public final class MailDatabase: @unchecked Sendable {
         offset: Int = 0,
         previewLength: Int = 160,
         filter: MailViewFilter? = nil,
-        label: String? = nil
+        label: String? = nil,
+        excludeLabeled: Bool = false
     ) throws -> [MailMessageSummary] {
         guard let conn = connection else {
             throw MailDatabaseError.notInitialized
@@ -2507,6 +2508,9 @@ public final class MailDatabase: @unchecked Sendable {
         }
         if let label {
             whereClauses.append("id IN (SELECT message_id FROM message_labels WHERE label = '\(label)')")
+        }
+        if excludeLabeled && label == nil {
+            whereClauses.append("id NOT IN (SELECT message_id FROM message_labels)")
         }
         let whereSQL = whereClauses.joined(separator: " AND ")
 
@@ -2773,6 +2777,20 @@ public final class MailDatabase: @unchecked Sendable {
                 counts[label] = count
             }
         }
+
+        // Count unlabeled inbox messages (emails with zero labels)
+        let unlabeledResult = try conn.query("""
+            SELECT COUNT(*) FROM messages
+            WHERE \(whereSQL)
+            AND id NOT IN (SELECT message_id FROM message_labels)
+            """)
+        for row in unlabeledResult {
+            if let unlabeledCount = getIntValue(row, 0) {
+                counts["_unlabeled"] = unlabeledCount
+            }
+            break
+        }
+
         return counts
     }
 

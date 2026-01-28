@@ -1497,6 +1497,9 @@ struct MailInboxCommand: ParsableCommand {
     @Option(name: .long, help: "Filter by label (e.g., task, waiting, reference, read_later, expenses)")
     var label: String?
 
+    @Flag(name: .long, help: "Exclude messages that have any triage label")
+    var excludeLabeled: Bool = false
+
     func validate() throws {
         if limit <= 0 {
             throw MailValidationError.invalidLimit
@@ -1528,7 +1531,8 @@ struct MailInboxCommand: ParsableCommand {
             offset: offset,
             previewLength: previewLength,
             filter: resolved.viewFilter,
-            label: label
+            label: label,
+            excludeLabeled: excludeLabeled
         )
 
         if json {

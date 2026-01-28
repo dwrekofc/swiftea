@@ -206,6 +206,7 @@ class SwiftEAEmailSource {
     const cli = this.resolveCliPath();
     const args = ["mail", "inbox", "--json", "--limit", String(limit), "--offset", String(offset)];
     if (label) args.push("--label", label);
+    if (!label) args.push("--exclude-labeled");
     const { stdout } = await execFileAsync(cli, args, { cwd });
     const parsed = JSON.parse(stdout);
     if (!Array.isArray(parsed)) throw new Error("Unexpected JSON from swea mail inbox.");
@@ -1304,6 +1305,10 @@ class SwiftEAInboxView extends ItemView {
       const labelInfo = TRIAGE_LABELS.find((l) => l.name === labelName);
       new Notice(`Labeled "${labelInfo?.short || labelName}".`);
 
+      if (!this.activeLabelFilter) {
+        this.removeEmailsByIdSet(new Set(ids));
+      }
+
       const source = this.source;
       this.actionQueue.enqueueBatch([...ids], `label-${labelName}`, () =>
         source.labelMessages(ids, labelName)
@@ -1336,11 +1341,16 @@ class SwiftEAInboxView extends ItemView {
 
   updateLabelCountsFromEmails() {
     const counts = {};
+    let unlabeled = 0;
     for (const email of this.emails) {
+      if (!email.labels || email.labels.length === 0) {
+        unlabeled++;
+      }
       for (const lbl of email.labels || []) {
         counts[lbl] = (counts[lbl] || 0) + 1;
       }
     }
+    counts._unlabeled = unlabeled;
     this.labelCounts = counts;
     this.renderSidebar();
   }
@@ -1353,6 +1363,10 @@ class SwiftEAInboxView extends ItemView {
     const inboxItem = this.sidebarEl.createDiv({ cls: "swiftea-inbox__sidebar-item" });
     if (!this.activeLabelFilter) inboxItem.addClass("is-active");
     inboxItem.createSpan({ text: "Inbox" });
+    const inboxCount = this.labelCounts._unlabeled || 0;
+    if (inboxCount > 0) {
+      inboxItem.createSpan({ cls: "swiftea-inbox__sidebar-count", text: String(inboxCount) });
+    }
     inboxItem.addEventListener("click", () => this.setLabelFilter(null));
 
     // Separator

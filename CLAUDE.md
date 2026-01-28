@@ -27,6 +27,11 @@ bd list --label ralph # List ralph-tagged tasks
 ralph-tui run --tracker beads --epic <id>  # Autonomous execution
 ```
 
+## Build & Deploy Notes
+
+- After `swift build`, install the binary: `cp .build/debug/swea ~/.local/bin/swea`. The Obsidian plugin calls `~/.local/bin/swea`, not the `.build` directory.
+- When the Obsidian plugin (`obsidian-plugin/swiftea-inbox/main.js`) is modified, copy it to the test vault: `cp obsidian-plugin/swiftea-inbox/main.js test-vault/.obsidian/plugins/swiftea-inbox/main.js`
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
