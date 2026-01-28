@@ -1,5 +1,5 @@
 const { ItemView, Notice, Plugin, PluginSettingTab, Setting } = require("obsidian");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
@@ -68,6 +68,35 @@ const AI_CATEGORIES = [
   { key: "unscreened", short: "Unscreened", color: "#a0a0a0" }
 ];
 
+// Cache the user's full login-shell environment so CLI calls from the
+// Obsidian GUI process can see env vars defined in .zshrc / .zprofile.
+let _shellEnvCache = null;
+let _shellEnvPromise = null;
+
+function resolveShellEnv() {
+  if (_shellEnvCache) return Promise.resolve(_shellEnvCache);
+  if (_shellEnvPromise) return _shellEnvPromise;
+  const shell = process.env.SHELL || "/bin/zsh";
+  _shellEnvPromise = new Promise((resolve) => {
+    execFile(shell, ["-ilc", "env"], { timeout: 5000 }, (err, stdout) => {
+      if (err || !stdout) {
+        _shellEnvPromise = null;
+        resolve(null);
+        return;
+      }
+      const env = {};
+      for (const line of stdout.split("\n")) {
+        const idx = line.indexOf("=");
+        if (idx > 0) env[line.slice(0, idx)] = line.slice(idx + 1);
+      }
+      _shellEnvCache = env;
+      _shellEnvPromise = null;
+      resolve(env);
+    });
+  });
+  return _shellEnvPromise;
+}
+
 function execFileAsync(file, args, options) {
   return new Promise((resolve, reject) => {
     execFile(
@@ -88,6 +117,18 @@ function execFileAsync(file, args, options) {
       }
     );
   });
+}
+
+async function execFileWithShellEnv(file, args, options) {
+  const shellEnv = await resolveShellEnv();
+  const env = shellEnv ? { ...shellEnv, ...process.env, ...(options?.env || {}) } : undefined;
+  return execFileAsync(file, args, { ...options, env });
+}
+
+async function spawnWithShellEnv(file, args, options) {
+  const shellEnv = await resolveShellEnv();
+  const env = shellEnv ? { ...shellEnv, ...process.env, ...(options?.env || {}) } : undefined;
+  return spawn(file, args, { ...options, env, windowsHide: true });
 }
 
 function clamp(value, min, max) {
@@ -253,7 +294,7 @@ class SwiftEAEmailSource {
     if (label) args.push("--label", label);
     if (category) args.push("--category", category);
     if (!label && !category) args.push("--exclude-labeled");
-    const { stdout } = await execFileAsync(cli, args, { cwd });
+    const { stdout } = await execFileWithShellEnv(cli, args, { cwd });
     const parsed = JSON.parse(stdout);
     if (!Array.isArray(parsed)) throw new Error("Unexpected JSON from swea mail inbox.");
     return parsed.map((item) => ({
@@ -270,7 +311,7 @@ class SwiftEAEmailSource {
   async getBody(id) {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    const { stdout } = await execFileAsync(
+    const { stdout } = await execFileWithShellEnv(
       cli,
       ["mail", "show", String(id), "--json"],
       { cwd }
@@ -287,7 +328,7 @@ class SwiftEAEmailSource {
   async archiveMessage(id) {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "archive", "--id", String(id), "--yes"], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "archive", "--id", String(id), "--yes"], { cwd });
   }
 
   async archiveMessages(ids) {
@@ -295,13 +336,13 @@ class SwiftEAEmailSource {
     if (!list.length) return;
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "archive", "--ids", list.join(","), "--yes"], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "archive", "--ids", list.join(","), "--yes"], { cwd });
   }
 
   async deleteMessage(id) {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "delete", "--id", String(id), "--yes"], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "delete", "--id", String(id), "--yes"], { cwd });
   }
 
   async deleteMessages(ids) {
@@ -309,24 +350,64 @@ class SwiftEAEmailSource {
     if (!list.length) return;
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "delete", "--ids", list.join(","), "--yes"], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "delete", "--ids", list.join(","), "--yes"], { cwd });
   }
 
   async syncMail() {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "sync"], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "sync"], { cwd });
+  }
+
+  async screenMail() {
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    await execFileWithShellEnv(cli, ["mail", "screen"], { cwd });
+  }
+
+  async spawnScreenMail() {
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    const child = await spawnWithShellEnv(cli, ["mail", "screen"], { cwd });
+
+    const listeners = [];
+    let buffer = "";
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (line) for (const fn of listeners) fn(line);
+      }
+    });
+
+    const promise = new Promise((resolve, reject) => {
+      child.on("close", (code) => {
+        if (buffer.trim()) {
+          for (const fn of listeners) fn(buffer.trim());
+        }
+        if (code === 0 || code === null) resolve();
+        else reject(new Error(`swea mail screen exited with code ${code}`));
+      });
+      child.on("error", reject);
+    });
+
+    return {
+      child,
+      promise,
+      onLine(fn) { listeners.push(fn); }
+    };
   }
 
   async ensureWatchDaemon(intervalSeconds = 60) {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
     try {
-      await execFileAsync(cli, ["mail", "sync", "--ensure-watch", "--interval", String(intervalSeconds)], { cwd });
+      await execFileWithShellEnv(cli, ["mail", "sync", "--ensure-watch", "--interval", String(intervalSeconds)], { cwd });
     } catch (e) {
       const message = String(e?.message || "");
       if (message.includes("--ensure-watch")) {
-        await execFileAsync(cli, ["mail", "sync", "--watch", "--interval", String(intervalSeconds)], { cwd });
+        await execFileWithShellEnv(cli, ["mail", "sync", "--watch", "--interval", String(intervalSeconds)], { cwd });
         return;
       }
       throw e;
@@ -338,7 +419,7 @@ class SwiftEAEmailSource {
     if (!list.length) return;
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "label", "--ids", list.join(","), "--add", label], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "label", "--ids", list.join(","), "--add", label], { cwd });
   }
 
   async unlabelMessages(ids, label) {
@@ -346,7 +427,7 @@ class SwiftEAEmailSource {
     if (!list.length) return;
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "label", "--ids", list.join(","), "--remove", label], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "label", "--ids", list.join(","), "--remove", label], { cwd });
   }
 
   async clearLabels(ids) {
@@ -354,20 +435,28 @@ class SwiftEAEmailSource {
     if (!list.length) return;
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    await execFileAsync(cli, ["mail", "label", "--ids", list.join(","), "--clear"], { cwd });
+    await execFileWithShellEnv(cli, ["mail", "label", "--ids", list.join(","), "--clear"], { cwd });
+  }
+
+  async replyMessage(id, body, { all = false } = {}) {
+    const cwd = this.getVaultPath();
+    const cli = this.resolveCliPath();
+    const args = ["mail", "reply", "--id", String(id), "--body", body];
+    if (all) args.push("--all");
+    await execFileWithShellEnv(cli, args, { cwd });
   }
 
   async getLabelCounts() {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    const { stdout } = await execFileAsync(cli, ["mail", "label-counts", "--json"], { cwd });
+    const { stdout } = await execFileWithShellEnv(cli, ["mail", "label-counts", "--json"], { cwd });
     return JSON.parse(stdout);
   }
 
   async getCategoryCounts() {
     const cwd = this.getVaultPath();
     const cli = this.resolveCliPath();
-    const { stdout } = await execFileAsync(cli, ["mail", "category-counts", "--json"], { cwd });
+    const { stdout } = await execFileWithShellEnv(cli, ["mail", "category-counts", "--json"], { cwd });
     return JSON.parse(stdout);
   }
 }
@@ -397,9 +486,15 @@ class SwiftEAInboxView extends ItemView {
     this.activeCategoryFilter = null;
     this.categoryCounts = {};
 
+    this.replyEditorEl = null;
+    this.replyTextareaEl = null;
+    this.replyIsAll = false;
+    this.replySaving = false;
+
     this._onScroll = this.onScroll.bind(this);
     this._onKeyDownList = this.onKeyDownList.bind(this);
     this._onKeyDownOverlay = this.onKeyDownOverlay.bind(this);
+    this._onKeyDownReply = this.onKeyDownReply.bind(this);
   }
 
   getViewType() {
@@ -439,6 +534,19 @@ class SwiftEAInboxView extends ItemView {
       this.setSyncButtonState(true);
     }
 
+    this.screenButtonEl = this.actionsEl.createEl("button", {
+      cls: "swiftea-inbox__screen-button",
+      text: "Screen"
+    });
+    this.screenButtonEl.addEventListener("click", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      void this.runManualScreen();
+    });
+    if (this.plugin._screenPromise) {
+      this.setScreenButtonState(true);
+    }
+
     this.categoryTabBarEl = this.contentEl.createDiv({ cls: "swiftea-inbox__category-bar" });
     this.renderCategoryTabs();
 
@@ -460,9 +568,18 @@ class SwiftEAInboxView extends ItemView {
     this.spacerEl = this.scrollEl.createDiv({ cls: "swiftea-inbox__spacer" });
     this.rowsEl = this.spacerEl.createDiv({ cls: "swiftea-inbox__rows" });
 
+    this.tickerEl = this.mainEl.createDiv({ cls: "swiftea-inbox__ticker" });
+    this.tickerEl.addClass("is-hidden");
+    this.tickerContentEl = this.tickerEl.createDiv({ cls: "swiftea-inbox__ticker-content" });
+    this.tickerStopEl = this.tickerEl.createEl("button", {
+      cls: "swiftea-inbox__ticker-stop",
+      text: "Stop"
+    });
+    this.tickerStopEl.addEventListener("click", () => this.stopScreening());
+
     this.hintEl = this.mainEl.createDiv({ cls: "swiftea-inbox__hint" });
     this.hintEl.setText(
-      "Click/Cmd+click/Shift+click select • Shift+↑/↓ range • Enter open • e archive • d delete • 1-5 label • 0 clear labels • Esc close • g/G jump • Ctrl+u/d page"
+      "Click/Cmd+click/Shift+click select • Shift+↑/↓ range • Enter open • e archive • d delete • 1-5 label • 0 clear labels • r reply • R reply-all • Esc close • g/G jump • Ctrl+u/d page"
     );
 
     this.updateHeader();
@@ -476,6 +593,7 @@ class SwiftEAInboxView extends ItemView {
   }
 
   async onClose() {
+    this.closeReplyEditor(true);
     this.closeOverlay();
     this.stopRealtimeRefresh();
     if (this.scrollEl) {
@@ -693,6 +811,7 @@ class SwiftEAInboxView extends ItemView {
       this.titleEl.setText(this.plugin.settings.title || "Inbox");
     }
     this.countEl.setText(this.emails.length ? `(${this.emails.length} emails)` : "");
+    this.updateScreenButtonLabel();
   }
 
   async reload() {
@@ -720,6 +839,23 @@ class SwiftEAInboxView extends ItemView {
     this.syncButtonEl.textContent = "Sync";
   }
 
+  setScreenButtonState(isScreening) {
+    if (!this.screenButtonEl) return;
+    if (isScreening) {
+      this.screenButtonEl.setAttribute("disabled", "true");
+      this.screenButtonEl.textContent = "Screening\u2026";
+      return;
+    }
+    this.screenButtonEl.removeAttribute("disabled");
+    this.updateScreenButtonLabel();
+  }
+
+  updateScreenButtonLabel() {
+    if (!this.screenButtonEl) return;
+    const count = this.categoryCounts["unscreened"] || 0;
+    this.screenButtonEl.textContent = count > 0 ? `Screen (${count})` : "Screen";
+  }
+
   async runManualSync() {
     if (this.manualSyncInProgress) return;
     this.manualSyncInProgress = true;
@@ -740,6 +876,93 @@ class SwiftEAInboxView extends ItemView {
     if (ok) {
       await this.refreshFromExternalChange("manual-sync");
       new Notice("SwiftEA sync complete.");
+    }
+  }
+
+  showTicker() {
+    if (this.tickerEl) this.tickerEl.removeClass("is-hidden");
+  }
+
+  hideTicker() {
+    if (this.tickerEl) this.tickerEl.addClass("is-hidden");
+  }
+
+  appendTickerItem(text, cls) {
+    if (!this.tickerContentEl) return;
+    const span = document.createElement("span");
+    span.className = "swiftea-inbox__ticker-item" + (cls ? ` ${cls}` : "");
+    span.textContent = text;
+    this.tickerContentEl.appendChild(span);
+    // Auto-scroll to rightmost content
+    this.tickerContentEl.scrollLeft = this.tickerContentEl.scrollWidth;
+  }
+
+  clearTicker() {
+    if (this.tickerContentEl) this.tickerContentEl.empty();
+  }
+
+  stopScreening() {
+    if (this.plugin._screenChild) {
+      this.plugin._screenChild.kill("SIGTERM");
+      this.plugin._screenChild = null;
+    }
+  }
+
+  async runManualScreen() {
+    if (this.manualScreenInProgress) return;
+    this.manualScreenInProgress = true;
+    this.setScreenButtonState(true);
+    this.clearTicker();
+    this.showTicker();
+    this.appendTickerItem("Screening\u2026", "ticker-pulse");
+
+    let ok = false;
+    try {
+      const handle = await this.plugin.screenMailNow();
+      handle.onLine((line) => {
+        const progressMatch = line.match(/^\[(\d+)\/(\d+)\]\s+Screening:\s+(.+)/);
+        const resultMatch = line.match(/^\s+->\s+(\S+?):\s+(.+)/);
+        const foundMatch = line.match(/^Found\s+(\d+)\s+email/);
+        const completeMatch = line.match(/^Screening complete/);
+
+        if (foundMatch) {
+          this.appendTickerItem(`Screening ${foundMatch[1]} emails`, "ticker-info");
+        } else if (progressMatch) {
+          const [, current, total, desc] = progressMatch;
+          this.appendTickerItem(` [${current}/${total}] ${desc}`, "ticker-progress");
+        } else if (resultMatch) {
+          const [, category] = resultMatch;
+          this.appendTickerItem(` \u2192 ${category}`, `ticker-result ticker-cat--${category}`);
+        } else if (completeMatch) {
+          this.appendTickerItem(` \u2713 ${line}`, "ticker-done");
+        }
+      });
+      await handle.promise;
+      ok = true;
+    } catch (e) {
+      if (this.plugin._screenChild === null) {
+        // Was killed by stop button
+        this.appendTickerItem(" \u25A0 Stopped", "ticker-stopped");
+      } else {
+        this.appendTickerItem(" \u2717 Failed", "ticker-error");
+        new Notice("SwiftEA screening failed. See console for details.");
+        // eslint-disable-next-line no-console
+        console.error("[SwiftEA Inbox] screening failed:", e);
+      }
+    } finally {
+      this.manualScreenInProgress = false;
+      this.setScreenButtonState(false);
+      this.plugin._screenChild = null;
+      // Auto-hide ticker after 3 seconds
+      if (this._tickerHideTimer) window.clearTimeout(this._tickerHideTimer);
+      this._tickerHideTimer = window.setTimeout(() => {
+        this.hideTicker();
+        this._tickerHideTimer = null;
+      }, 3000);
+    }
+    if (ok) {
+      await this.refreshFromExternalChange("manual-screen");
+      new Notice("SwiftEA screening complete.");
     }
   }
 
@@ -1350,6 +1573,18 @@ class SwiftEAInboxView extends ItemView {
       }
       return;
     }
+
+    // Reply / Reply-All from list view
+    if (!ctrl && (key === "r" || key === "R")) {
+      evt.preventDefault();
+      const email = this.emails[this.selectedIndex];
+      if (!email) return;
+      void (async () => {
+        await this.openOverlay(email);
+        this.openReplyEditor(key === "R");
+      })();
+      return;
+    }
   }
 
   async openOverlay(_email) {
@@ -1381,6 +1616,7 @@ class SwiftEAInboxView extends ItemView {
   async loadOverlayForIndex(index) {
     const email = this.emails[index];
     if (!email || !this.overlayEl) return;
+    if (this.replyEditorEl && !this.closeReplyEditor()) return;
 
     this.selectIndex(index);
 
@@ -1492,10 +1728,18 @@ class SwiftEAInboxView extends ItemView {
       }
       return;
     }
+
+    // Reply / Reply-All from overlay
+    if (evt.key === "r" || evt.key === "R") {
+      evt.preventDefault();
+      this.openReplyEditor(evt.key === "R");
+      return;
+    }
   }
 
   closeOverlay() {
     if (!this.overlayEl) return;
+    if (this.replyEditorEl && !this.closeReplyEditor()) return;
     this.overlayEl.removeEventListener("keydown", this._onKeyDownOverlay);
     this.overlayEl.remove();
     this.overlayEl = null;
@@ -1521,6 +1765,126 @@ class SwiftEAInboxView extends ItemView {
     const nextIndex = removedIndex - 1;
     const safeIndex = clamp(nextIndex, 0, this.emails.length - 1);
     void this.loadOverlayForIndex(safeIndex);
+  }
+
+  // --- Reply Editor Methods ---
+
+  openReplyEditor(isAll) {
+    if (this.replyEditorEl) {
+      if (this.replyTextareaEl) this.replyTextareaEl.focus();
+      return;
+    }
+
+    this.replyIsAll = !!isAll;
+
+    const panel = this.overlayEl?.querySelector(".swiftea-inbox__panel");
+    const divider = panel?.querySelector(".swiftea-inbox__divider");
+    const bodyWrap = this.overlayBodyWrap;
+    if (!panel || !bodyWrap) return;
+
+    this.replyEditorEl = document.createElement("div");
+    this.replyEditorEl.className = "swiftea-inbox__reply-editor";
+
+    const header = document.createElement("div");
+    header.className = "swiftea-inbox__reply-header";
+    const label = document.createElement("span");
+    label.className = "swiftea-inbox__reply-label";
+    label.textContent = isAll ? "Reply All" : "Reply";
+    header.appendChild(label);
+    this.replyEditorEl.appendChild(header);
+
+    this.replyTextareaEl = document.createElement("textarea");
+    this.replyTextareaEl.className = "swiftea-inbox__reply-textarea";
+    this.replyTextareaEl.placeholder = "Type your reply…";
+    this.replyTextareaEl.addEventListener("keydown", this._onKeyDownReply);
+    this.replyEditorEl.appendChild(this.replyTextareaEl);
+
+    const hint = document.createElement("div");
+    hint.className = "swiftea-inbox__reply-hint";
+    hint.textContent = "Cmd+Enter save draft • Esc discard";
+    this.replyEditorEl.appendChild(hint);
+
+    // Insert after the divider, before the body
+    if (divider && divider.nextSibling) {
+      panel.insertBefore(this.replyEditorEl, divider.nextSibling);
+    } else {
+      panel.insertBefore(this.replyEditorEl, bodyWrap);
+    }
+
+    this.replyTextareaEl.focus();
+  }
+
+  closeReplyEditor(force = false) {
+    if (!this.replyEditorEl) return true;
+
+    if (!force && this.replyTextareaEl && this.replyTextareaEl.value.trim()) {
+      const ok = window.confirm("Discard unsaved reply?");
+      if (!ok) {
+        this.replyTextareaEl.focus();
+        return false;
+      }
+    }
+
+    if (this.replyTextareaEl) {
+      this.replyTextareaEl.removeEventListener("keydown", this._onKeyDownReply);
+    }
+    this.replyEditorEl.remove();
+    this.replyEditorEl = null;
+    this.replyTextareaEl = null;
+    this.replyIsAll = false;
+    this.replySaving = false;
+
+    if (this.overlayBodyWrap) this.overlayBodyWrap.focus();
+    return true;
+  }
+
+  async saveReplyDraft() {
+    if (this.replySaving) return;
+    if (!this.replyTextareaEl) return;
+
+    const body = this.replyTextareaEl.value.trim();
+    if (!body) {
+      new Notice("Reply is empty.");
+      return;
+    }
+
+    const emailId = this.overlayEmailId;
+    if (!emailId) {
+      new Notice("No email selected.");
+      return;
+    }
+
+    this.replySaving = true;
+    try {
+      await this.source.replyMessage(emailId, body, { all: this.replyIsAll });
+      new Notice(this.replyIsAll ? "Reply-all draft saved." : "Reply draft saved.");
+      this.closeReplyEditor(true);
+    } catch (e) {
+      new Notice("Failed to save reply draft. See console.");
+      // eslint-disable-next-line no-console
+      console.error("[SwiftEA Inbox] reply draft failed:", e);
+    } finally {
+      this.replySaving = false;
+    }
+  }
+
+  onKeyDownReply(evt) {
+    if ((evt.metaKey || evt.ctrlKey) && evt.key === "Enter") {
+      evt.preventDefault();
+      evt.stopPropagation();
+      void this.saveReplyDraft();
+      return;
+    }
+
+    if (evt.key === "Escape") {
+      evt.preventDefault();
+      evt.stopPropagation();
+      this.closeReplyEditor();
+      return;
+    }
+
+    // Prevent all other keystrokes from reaching overlay/list handlers
+    evt.stopPropagation();
   }
 
   // --- Label Methods ---
@@ -1738,6 +2102,12 @@ module.exports = class SwiftEAInboxPlugin extends Plugin {
       callback: () => void this.syncMailNow()
     });
 
+    this.addCommand({
+      id: "swiftea-screen-mail",
+      name: "SwiftEA: Screen unanalyzed emails",
+      callback: () => void this.screenMailNow()
+    });
+
     this.addSettingTab(new SwiftEAInboxSettingTab(this.app, this));
 
     // Ensure the background sync daemon is running so the inbox updates continuously.
@@ -1771,6 +2141,38 @@ module.exports = class SwiftEAInboxPlugin extends Plugin {
       if (view && typeof view.setSyncButtonState === "function") {
         view.setSyncButtonState(false);
         view.manualSyncInProgress = false;
+      }
+    }
+  }
+
+  async screenMailNow() {
+    if (this._screenPromise) {
+      return { promise: this._screenPromise, onLine() {}, child: this._screenChild };
+    }
+    const source = new SwiftEAEmailSource(this.app, this.settings);
+    const handle = await source.spawnScreenMail();
+    this._screenChild = handle.child;
+    this._screenPromise = (async () => {
+      await handle.promise;
+      this.refreshOpenViews();
+    })();
+
+    this._screenPromise.finally(() => {
+      this._screenPromise = null;
+      this._screenChild = null;
+      this.resetScreenButtonsOnAllViews();
+    });
+
+    return { ...handle, promise: this._screenPromise };
+  }
+
+  resetScreenButtonsOnAllViews() {
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view && typeof view.setScreenButtonState === "function") {
+        view.setScreenButtonState(false);
+        view.manualScreenInProgress = false;
       }
     }
   }

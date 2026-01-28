@@ -1397,6 +1397,7 @@ struct MailScreenCommand: ParsableCommand {
         }
 
         print("Found \(messages.count) email(s) to screen.")
+        fflush(stdout)
 
         if dryRun {
             for msg in messages {
@@ -1463,6 +1464,7 @@ struct MailScreenCommand: ParsableCommand {
         for (index, message) in messages.enumerated() {
             let sender = message.senderName ?? message.senderEmail ?? "Unknown"
             print("[\(index + 1)/\(messages.count)] Screening: \(sender) - \(message.subject)")
+            fflush(stdout)
 
             let recipientEmail = try? mailDatabase.getFirstRecipientEmail(messageId: message.id)
             let result = service.screen(message: message, recipientEmail: recipientEmail)
@@ -1475,6 +1477,7 @@ struct MailScreenCommand: ParsableCommand {
                     category: screening.category.rawValue
                 )
                 print("  -> \(screening.category.rawValue): \(screening.summary)")
+                fflush(stdout)
                 screened += 1
             case .failure(let error):
                 printError("  -> Failed: \(error.localizedDescription)")
@@ -1483,6 +1486,7 @@ struct MailScreenCommand: ParsableCommand {
         }
 
         print("\nScreening complete: \(screened) classified, \(failed) failed")
+        fflush(stdout)
     }
 }
 
