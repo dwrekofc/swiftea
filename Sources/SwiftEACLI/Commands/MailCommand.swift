@@ -154,6 +154,7 @@ struct MailSyncCommand: ParsableCommand {
               swea mail sync --ensure-watch --interval 60  # Ensure daemon is installed and running
               swea mail sync --status     # Check sync/daemon status
               swea mail sync --stop       # Stop the daemon
+              swea mail sync --restart    # Restart daemon (keeps permissions)
             """
     )
 
@@ -162,6 +163,9 @@ struct MailSyncCommand: ParsableCommand {
 
     @Flag(name: .long, help: "Stop the watch daemon")
     var stop: Bool = false
+
+    @Flag(name: .long, help: "Restart the watch daemon (preserves plist and permissions)")
+    var restart: Bool = false
 
     @Flag(name: .long, help: "Show sync status and watch daemon state")
     var status: Bool = false
@@ -257,7 +261,7 @@ struct MailSyncCommand: ParsableCommand {
     private static let defaultIntervalSeconds = 60
 
     func validate() throws {
-        let modeFlags = [watch, ensureWatch, stop, status, daemon].filter { $0 }
+        let modeFlags = [watch, ensureWatch, stop, restart, status, daemon].filter { $0 }
         if modeFlags.count > 1 {
             throw MailValidationError.watchAndStopMutuallyExclusive
         }
@@ -363,6 +367,43 @@ struct MailSyncCommand: ParsableCommand {
                 return
             }
             try installWatchDaemon(verbose: verbose)
+            return
+        }
+
+        // Handle --restart flag (bounce daemon without touching plist)
+        if restart {
+            let launchAgentPath = getLaunchAgentPath()
+            guard FileManager.default.fileExists(atPath: launchAgentPath) else {
+                print("Watch daemon is not installed. Use --watch to install it.")
+                throw ExitCode.failure
+            }
+
+            // Unload (ignore errors if already unloaded)
+            let unloadProcess = Process()
+            unloadProcess.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            unloadProcess.arguments = ["unload", launchAgentPath]
+            unloadProcess.standardOutput = FileHandle.nullDevice
+            unloadProcess.standardError = FileHandle.nullDevice
+            try? unloadProcess.run()
+            unloadProcess.waitUntilExit()
+
+            // Load
+            let loadProcess = Process()
+            loadProcess.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            loadProcess.arguments = ["load", launchAgentPath]
+            let errorPipe = Pipe()
+            loadProcess.standardError = errorPipe
+            try loadProcess.run()
+            loadProcess.waitUntilExit()
+
+            if loadProcess.terminationStatus != 0 {
+                let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+                let errorOutput = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+                printError("Failed to restart daemon: \(errorOutput)")
+                throw ExitCode.failure
+            }
+
+            print("Watch daemon restarted")
             return
         }
 
@@ -1286,6 +1327,7 @@ struct MailScreenCommand: ParsableCommand {
               swea mail screen --force          # Re-screen all emails
               swea mail screen --limit 10       # Screen up to 10
               swea mail screen --dry-run        # Preview without API calls
+              swea mail screen --preview        # Render full prompt without calling API
               swea mail screen --prompt-path    # Print path to prompt template
             """
     )
@@ -1298,6 +1340,9 @@ struct MailScreenCommand: ParsableCommand {
 
     @Flag(name: .long, help: "Preview which emails would be screened without making API calls")
     var dryRun: Bool = false
+
+    @Flag(name: .long, help: "Render the full prompt for each email without calling the API")
+    var preview: Bool = false
 
     @Flag(name: .long, help: "Print the path to the AI prompt template and exit")
     var promptPath: Bool = false
@@ -1340,6 +1385,41 @@ struct MailScreenCommand: ParsableCommand {
                 let sender = msg.senderName ?? msg.senderEmail ?? "Unknown"
                 let existing = msg.category.map { " [\($0)]" } ?? ""
                 print("  \(date)  \(sender): \(msg.subject)\(existing)")
+            }
+            return
+        }
+
+        // --preview: render the full prompt for each email without calling the API
+        if preview {
+            let promptTemplate = try PromptTemplateManager.loadOrCreateTemplate(vaultRoot: vault.rootPath)
+            let service = AIScreeningService(
+                apiKey: "preview-mode",
+                model: vault.config.ai.model,
+                promptTemplate: promptTemplate
+            )
+
+            for (index, message) in messages.enumerated() {
+                let recipientEmail = try? mailDatabase.getFirstRecipientEmail(messageId: message.id)
+
+                let bodyText: String
+                if let text = message.bodyText, !text.isEmpty {
+                    bodyText = String(text.prefix(4000))
+                } else if let html = message.bodyHtml, !html.isEmpty {
+                    bodyText = String(service.stripHtmlForAI(html).prefix(4000))
+                } else {
+                    bodyText = "(empty body)"
+                }
+
+                let rendered = service.renderPrompt(
+                    senderEmail: service.anonymizeEmail(message.senderEmail ?? "unknown"),
+                    recipientEmail: service.anonymizeEmail(recipientEmail ?? "unknown"),
+                    subject: message.subject,
+                    bodyText: bodyText
+                )
+
+                print("=== [\(index + 1)/\(messages.count)] \(message.subject) ===")
+                print(rendered)
+                print("")
             }
             return
         }
