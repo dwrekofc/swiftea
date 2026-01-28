@@ -283,8 +283,7 @@ public final class AIScreeningService {
                 }
             }
         } else {
-            // Category field missing entirely — default to noise rather than failing
-            category = .noise
+            return .failure(.responseParsingFailed(detail: "Missing 'category' field"))
         }
 
         return .success(ScreeningResult(

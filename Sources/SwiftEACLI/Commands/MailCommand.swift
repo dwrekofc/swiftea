@@ -1517,7 +1517,8 @@ struct MailScreenCommand: ParsableCommand {
         var consecutiveFailures = 0
         for (index, message) in messages.enumerated() {
             let sender = message.senderName ?? message.senderEmail ?? "Unknown"
-            print("[\(index + 1)/\(messages.count)] Screening: \(sender) - \(message.subject)")
+            let truncatedSubject = message.subject.prefix(25) + (message.subject.count > 25 ? "..." : "")
+            print("[\(index + 1)/\(messages.count)] Screening: \(sender) - \(truncatedSubject)")
             fflush(stdout)
 
             let recipientEmail = try? mailDatabase.getFirstRecipientEmail(messageId: message.id)
